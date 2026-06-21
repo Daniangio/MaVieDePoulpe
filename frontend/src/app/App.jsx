@@ -18,7 +18,7 @@ import AdminPage from "../pages/AdminPage.jsx";
 import AuthPage from "../pages/AuthPage.jsx";
 import FriendsPage from "../pages/FriendsPage.jsx";
 import GameHistoryPage from "../pages/GameHistoryPage.jsx";
-import GameRoomPage from "../pages/GameRoomPage.jsx";
+import GameRoomPage from "../pages/GameRoomPage";
 import LobbyPage from "../pages/LobbyPage.jsx";
 import PlayPage from "../pages/PlayPage.jsx";
 import PostGamePage from "../pages/PostGamePage.jsx";

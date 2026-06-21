@@ -9,3 +9,4 @@ psycopg[binary]
 debugpy
 redis
 firebase-admin
+pytest

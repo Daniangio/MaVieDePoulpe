@@ -25,7 +25,7 @@ const SoloPlayPage = () => {
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ mode: "solo", game_type: "proxy_room" }),
+        body: JSON.stringify({ mode: "solo", game_type: "goldfish" }),
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.detail || "Failed to create game room.");
@@ -44,7 +44,7 @@ const SoloPlayPage = () => {
       <section className="mb-5">
         <h1 className="text-2xl font-semibold text-white">Solo Play</h1>
         <p className="mt-1 max-w-3xl text-sm text-slate-400">
-          Start a placeholder room for Ma vie de poulpe while the real game loop is under construction.
+          Start a map-only goldfish room and move Poulpita around the 16-node board.
         </p>
       </section>
 
@@ -62,8 +62,8 @@ const SoloPlayPage = () => {
           disabled
         />
         <ModeCard
-          title="Proxy Room"
-          description="Create a solo room immediately and test the room-to-results lifecycle."
+          title="Goldfish"
+          description="Create a solo room with the movement-only Phase 1 prototype."
           actionLabel={creating ? "Creating..." : "Start"}
           onClick={createQuickMatch}
           disabled={creating}

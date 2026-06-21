@@ -1,18 +1,20 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
 
+from .database import SessionLocal
 from .runtime_state import get_game_room_service
 from .schemas import (
     GameCommandQueuedResponse,
     GameCommandRequest,
     GameHistoryResponse,
+    GameRoomJoinResponse,
     GameResultResponse,
     GameRoomCreateRequest,
     GameRoomResponse,
     GameStateResponse,
 )
-from .security import get_current_user
+from .security import get_current_user, get_current_user_with_db
 from .server_models import User
 
 
@@ -42,6 +44,14 @@ async def get_game_room(room_id: str, current_user: User = Depends(get_current_u
     return room
 
 
+@router.post("/game/rooms/{room_id}/join", response_model=GameRoomJoinResponse)
+async def join_game_room(room_id: str, current_user: User = Depends(get_current_user)):
+    joined = await _service().join_room(room_id=room_id, user=current_user)
+    if joined is None:
+        raise HTTPException(status_code=404, detail="Game room not found.")
+    return joined
+
+
 @router.post("/game/rooms/{room_id}/end", response_model=GameRoomResponse)
 async def end_game_room(room_id: str, current_user: User = Depends(get_current_user)):
     try:
@@ -68,11 +78,12 @@ async def enqueue_game_command(
     current_user: User = Depends(get_current_user),
 ):
     try:
-        return await _service().enqueue_game_command(
+        result = await _service().enqueue_game_command(
             room_id=room_id,
             user=current_user,
             command=payload.model_dump(),
         )
+        return result
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -88,3 +99,38 @@ async def get_game_result(room_id: str, current_user: User = Depends(get_current
 @router.get("/game/history", response_model=GameHistoryResponse)
 async def get_game_history(current_user: User = Depends(get_current_user)):
     return GameHistoryResponse(results=await _service().list_history(user_id=current_user.id))
+
+
+@router.websocket("/game/rooms/{room_id}/ws")
+async def game_room_websocket(websocket: WebSocket, room_id: str):
+    token = str(websocket.query_params.get("token") or "")
+    if not token:
+        await websocket.close(code=4401)
+        return
+    db = SessionLocal()
+    try:
+        try:
+            user = get_current_user_with_db(token, db)
+        except Exception:
+            await websocket.close(code=4401)
+            return
+    finally:
+        db.close()
+
+    service = get_game_room_service()
+    if service is None:
+        await websocket.close(code=1011)
+        return
+    connected = await service.connect_room_socket(room_id=room_id, user=user, websocket=websocket)
+    if not connected:
+        await websocket.close(code=4404)
+        return
+    try:
+        while True:
+            message = await websocket.receive_json()
+            if message.get("type") == "request_projection":
+                projection = await service.get_projection(room_id=room_id, user=user)
+                if projection is not None:
+                    await websocket.send_json({"type": "state_projection", "payload": projection})
+    except WebSocketDisconnect:
+        service.disconnect_room_socket(room_id=room_id, websocket=websocket)

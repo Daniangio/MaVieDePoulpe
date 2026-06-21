@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class UserPublic(BaseModel):
@@ -62,7 +62,7 @@ class LobbyStateResponse(BaseModel):
 
 class GameRoomCreateRequest(BaseModel):
     mode: str = "solo"
-    game_type: str = "proxy_room"
+    game_type: str = "goldfish"
 
 
 class GameRoomResponse(BaseModel):
@@ -77,27 +77,49 @@ class GameRoomResponse(BaseModel):
     result_id: Optional[str] = None
 
 
+class GameRoomJoinResponse(BaseModel):
+    room_id: str
+    seat_id: str
+
+
 class GameCommandRequest(BaseModel):
     command_id: str
     type: str
+    room_id: Optional[str] = None
+    actor_user_id: Optional[str] = None
+    actor_seat_id: Optional[str] = None
+    expected_version: Optional[int] = None
     expected_revision: Optional[int] = None
     client_timestamp_ms: Optional[int] = None
+    payload: Dict[str, Any] = Field(default_factory=dict)
 
 
 class GameCommandQueuedResponse(BaseModel):
-    status: str
+    ok: bool = True
+    status: str = "accepted"
     command_id: str
-    revision: int
+    revision: int = 0
+    version: Optional[int] = None
+    reason: Optional[str] = None
+    message: Optional[str] = None
+    current_version: Optional[int] = None
+    projection: Optional[Dict[str, Any]] = None
+    events: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class GameStateResponse(BaseModel):
-    revision: int
+    version: int
     phase: str
     room_id: str
-    game_type: str = "proxy_room"
-    status: str = "waiting_for_game_logic"
-    message: str = ""
-    available_actions: List[Dict[str, Any]]
+    projection_mode: str = "goldfish"
+    privacy_enforced: bool = False
+    mode: str = "goldfish"
+    level_id: str
+    active_capability_id: Optional[str] = None
+    last_active_capability_id: Optional[str] = None
+    map: Dict[str, Any]
+    poulpita: Dict[str, Any]
+    events: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class GameResultResponse(BaseModel):
