@@ -15,6 +15,7 @@ import {
   subscribeToIdTokenChanges,
 } from "../lib/firebase.js";
 import AdminPage from "../pages/AdminPage.jsx";
+import AdminContentPage from "../pages/AdminContentPage.jsx";
 import AuthPage from "../pages/AuthPage.jsx";
 import FriendsPage from "../pages/FriendsPage.jsx";
 import GameHistoryPage from "../pages/GameHistoryPage.jsx";
@@ -274,6 +275,7 @@ function AppContent() {
           <Route path="/games/:roomId" element={inGamePage(<GameRoomPage />)} />
           <Route path="/games/:roomId/post-game" element={authenticatedPage(<PostGamePage />)} />
           <Route path="/admin" element={authenticatedPage(<AdminPage />)} />
+          <Route path="/admin/content" element={authenticatedPage(<AdminContentPage />)} />
           <Route path="*" element={<Navigate to={token ? "/lobby" : "/auth"} />} />
         </Routes>
       </StateGuard>

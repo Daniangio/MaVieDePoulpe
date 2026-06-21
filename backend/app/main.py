@@ -21,6 +21,7 @@ from .websocket_session_router import WebSocketSessionRouter
 from .websocket_gateway import WebSocketGateway
 from .runtime_state import set_connection_manager, set_game_room_service, set_presence_service
 from .map_service import MAPS_ROOT
+from .game_content_service import CONTENT_ROOT
 
 app = FastAPI()
 
@@ -42,6 +43,8 @@ app.include_router(admin_router, prefix="/api")
 app.include_router(game_router, prefix="/api")
 MAPS_ROOT.mkdir(parents=True, exist_ok=True)
 app.mount("/static/maps", StaticFiles(directory=str(MAPS_ROOT)), name="maps")
+CONTENT_ROOT.mkdir(parents=True, exist_ok=True)
+app.mount("/static/content", StaticFiles(directory=str(CONTENT_ROOT)), name="content")
 
 connection_manager = ConnectionManager()
 presence_service = PresenceService(ttl_seconds=settings.PRESENCE_TTL_SECONDS)

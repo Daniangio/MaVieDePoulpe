@@ -1,7 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
+import { PageSubnavigation } from "../components/AuthenticatedLayout.jsx";
 import { useStore } from "../store.js";
 import { buildApiUrl } from "../utils/connection.js";
+
+const adminSubnavItems = [
+  { label: "Backoffice", to: "/admin" },
+  { label: "Game content", to: "/admin/content" },
+];
 
 const emptyMapDraft = () => ({
   id: "",
@@ -300,6 +306,7 @@ const AdminPage = () => {
 
   return (
     <>
+      <PageSubnavigation items={adminSubnavItems} />
       <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold text-white">Admin Backoffice</h1>
@@ -465,7 +472,7 @@ const AdminPage = () => {
                   <span className="text-slate-300">Tier</span>
                   <input className="mt-1 w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-white" type="number" min="1" value={selectedNode.tier || 1} onChange={(event) => updateSelectedNode({ tier: Number(event.target.value) })} />
                 </label>
-                <p className="mt-3 text-xs text-slate-500">x {selectedNode.x.toFixed(3)} · y {selectedNode.y.toFixed(3)}</p>
+                <p className="mt-3 text-xs text-slate-500">x {selectedNode.x.toFixed(3)} - y {selectedNode.y.toFixed(3)}</p>
                 <button className="mt-3 w-full rounded-md border border-rose-500/60 px-3 py-2 text-sm text-rose-100 hover:bg-rose-950" onClick={deleteSelectedNode} type="button">
                   Delete node
                 </button>
@@ -484,7 +491,7 @@ const AdminPage = () => {
           {auditLogs.map((entry) => (
             <div key={entry.id} className="py-3 text-sm">
               <p className="text-white">{entry.action} <span className="text-slate-500">on</span> {entry.target_type}:{entry.target_id}</p>
-              <p className="mt-1 text-xs text-slate-500">{entry.admin_username} · {new Date(entry.created_at).toLocaleString()}</p>
+              <p className="mt-1 text-xs text-slate-500">{entry.admin_username} - {new Date(entry.created_at).toLocaleString()}</p>
             </div>
           ))}
           {auditLogs.length === 0 ? <p className="py-5 text-slate-400">No audit logs yet.</p> : null}

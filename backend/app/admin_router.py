@@ -10,6 +10,20 @@ from sqlalchemy.orm import Session
 from .database import get_db
 from .db_models import AdminAuditLogRecord, UserProfileRecord
 from .friend_service import list_friends_summary
+from .game_content_service import (
+    create_category,
+    create_event,
+    create_interaction,
+    delete_category,
+    delete_event,
+    delete_interaction,
+    delete_tile,
+    get_content_state,
+    save_tile,
+    update_category,
+    update_event,
+    update_interaction,
+)
 from .map_service import create_map, delete_map, get_map, list_maps, update_map
 from .runtime_state import get_presence_service
 from .schemas import (
@@ -228,6 +242,16 @@ def _json_form_object(value: str, label: str) -> dict:
     return parsed
 
 
+def _json_form_list(value: str, label: str) -> list:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"{label} must be valid JSON.") from exc
+    if not isinstance(parsed, list):
+        raise HTTPException(status_code=400, detail=f"{label} must be a JSON array.")
+    return parsed
+
+
 @router.get("/admin/maps")
 async def admin_list_maps(_admin: User = Depends(require_admin)):
     return {"maps": list_maps()}
@@ -304,3 +328,162 @@ async def admin_delete_map(map_id: str, _admin: User = Depends(require_admin)):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/admin/content")
+async def admin_get_content(_admin: User = Depends(require_admin)):
+    return get_content_state()
+
+
+@router.post("/admin/content/categories")
+async def admin_create_category(name: str = Form(...), _admin: User = Depends(require_admin)):
+    try:
+        return create_category(name=name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/admin/content/categories/{category_id}")
+async def admin_update_category(category_id: str, name: str = Form(...), _admin: User = Depends(require_admin)):
+    try:
+        return update_category(category_id=category_id, name=name)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/admin/content/categories/{category_id}")
+async def admin_delete_category(category_id: str, _admin: User = Depends(require_admin)):
+    try:
+        delete_category(category_id)
+        return {"status": "deleted"}
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/admin/content/interactions")
+async def admin_create_interaction(
+    name: str = Form(...),
+    image: UploadFile = File(...),
+    _admin: User = Depends(require_admin),
+):
+    try:
+        return await create_interaction(name=name, image=image)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/admin/content/interactions/{interaction_id}")
+async def admin_update_interaction(
+    interaction_id: str,
+    name: str = Form(...),
+    image: UploadFile | None = File(default=None),
+    _admin: User = Depends(require_admin),
+):
+    try:
+        return await update_interaction(interaction_id=interaction_id, name=name, image=image)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/admin/content/interactions/{interaction_id}")
+async def admin_delete_interaction(interaction_id: str, _admin: User = Depends(require_admin)):
+    try:
+        delete_interaction(interaction_id)
+        return {"status": "deleted"}
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/admin/content/events")
+async def admin_create_event(
+    name: str = Form(...),
+    category_id: str = Form(...),
+    image: UploadFile = File(...),
+    _admin: User = Depends(require_admin),
+):
+    try:
+        return await create_event(name=name, category_id=category_id, image=image)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/admin/content/events/{event_id}")
+async def admin_update_event(
+    event_id: str,
+    name: str = Form(...),
+    category_id: str = Form(...),
+    image: UploadFile | None = File(default=None),
+    _admin: User = Depends(require_admin),
+):
+    try:
+        return await update_event(event_id=event_id, name=name, category_id=category_id, image=image)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/admin/content/events/{event_id}")
+async def admin_delete_event(event_id: str, _admin: User = Depends(require_admin)):
+    try:
+        delete_event(event_id)
+        return {"status": "deleted"}
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/admin/content/tiles")
+async def admin_create_tile(
+    name: str = Form(...),
+    event_id: str = Form(...),
+    interaction_ids_json: str = Form(...),
+    _admin: User = Depends(require_admin),
+):
+    try:
+        return save_tile(
+            name=name,
+            event_id=event_id,
+            interaction_ids=[str(item) for item in _json_form_list(interaction_ids_json, "interaction_ids_json")],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/admin/content/tiles/{tile_id}")
+async def admin_update_tile(
+    tile_id: str,
+    name: str = Form(...),
+    event_id: str = Form(...),
+    interaction_ids_json: str = Form(...),
+    _admin: User = Depends(require_admin),
+):
+    try:
+        return save_tile(
+            tile_id=tile_id,
+            name=name,
+            event_id=event_id,
+            interaction_ids=[str(item) for item in _json_form_list(interaction_ids_json, "interaction_ids_json")],
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/admin/content/tiles/{tile_id}")
+async def admin_delete_tile(tile_id: str, _admin: User = Depends(require_admin)):
+    try:
+        delete_tile(tile_id)
+        return {"status": "deleted"}
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
