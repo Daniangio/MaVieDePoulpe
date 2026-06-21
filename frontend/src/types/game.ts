@@ -22,17 +22,40 @@ export type PoulpitaProjection = {
   previous_node_id: NodeId | null;
 };
 
+export type CapabilityProjection = {
+  id: string;
+  name: string;
+  pa: number;
+  control_takes_this_night: number;
+  actions_taken_this_control: number;
+  max_actions_per_control: number;
+  max_control_takes_per_night: number;
+};
+
+export type PlayerProjection = {
+  id: string;
+  seat_id: string;
+  display_name: string;
+};
+
 export type GameProjection = {
   room_id: string;
   projection_mode: "goldfish";
   privacy_enforced: false;
   mode: "goldfish";
   version: number;
-  phase: "setup" | "night_action" | "game_over";
+  phase: "setup" | "night_idle" | "night_action" | "game_over";
   level_id: string;
+  day_index: number;
+  night_time_spent: number;
   selected_map_id?: string;
   active_capability_id: string | null;
   last_active_capability_id: string | null;
+  focused_capability_id: string;
+  capability_order: string[];
+  capabilities: Record<string, CapabilityProjection>;
+  players: PlayerProjection[];
+  player_boards: CapabilityProjection[];
   map: MapProjection;
   poulpita: PoulpitaProjection;
   events: Array<Record<string, unknown>>;

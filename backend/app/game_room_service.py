@@ -20,9 +20,19 @@ ROOM_STATE_IN_GAME = "IN_GAME"
 ROOM_STATE_FINISHED = "FINISHED"
 COMMAND_STREAM_KEY = "game:commands"
 PHASE_SETUP = "setup"
+PHASE_NIGHT_IDLE = "night_idle"
 PHASE_NIGHT_ACTION = "night_action"
 PHASE_FINISHED = "game_over"
-DEFAULT_ACTIVE_CAPABILITY_ID = "poulpita"
+DEFAULT_FOCUSED_CAPABILITY_ID = "agility"
+DEFAULT_ACTIVE_CAPABILITY_ID = DEFAULT_FOCUSED_CAPABILITY_ID
+CAPABILITY_ORDER = ["agility", "camouflage", "force", "propulsion", "intelligence"]
+CAPABILITY_NAMES = {
+    "agility": "Agilite",
+    "camouflage": "Camouflage",
+    "force": "Force",
+    "propulsion": "Propulsion",
+    "intelligence": "Intelligence",
+}
 
 
 def _now_iso() -> str:
@@ -72,6 +82,28 @@ def _validate_map_config(config: dict[str, Any]) -> None:
                 raise ValueError(f"Map adjacency must be symmetric between {node_id} and {adjacent_id}.")
 
 
+def _map_projection(map_config: dict[str, Any]) -> dict[str, Any]:
+    nodes = {}
+    adjacency = {}
+    for node_id, node in map_config["nodes"].items():
+        nodes[node_id] = {
+            "id": node_id,
+            "tier": int(node["tier"]),
+            "x": float(node.get("x") or 0),
+            "y": float(node.get("y") or 0),
+        }
+        adjacency[node_id] = list((map_config.get("adjacency") or {}).get(node_id) or [])
+    return {
+        "id": map_config["id"],
+        "name": map_config["name"],
+        "nodes": nodes,
+        "adjacency": adjacency,
+        "image_url": map_config.get("image_url"),
+        "image_width": map_config.get("image_width"),
+        "image_height": map_config.get("image_height"),
+    }
+
+
 @dataclass
 class CommandRejection(Exception):
     command_id: str
@@ -95,56 +127,63 @@ class CommandRejection(Exception):
 
 
 def _setup_state(room_id: str, *, map_id: str | None = None) -> dict[str, Any]:
+    map_config = get_map(map_id)
+    _validate_map_config(map_config)
     return {
         "room_id": room_id,
         "mode": "goldfish",
         "version": 0,
         "phase": PHASE_SETUP,
         "level_id": "goldfish_movement",
-        "selected_map_id": map_id or DEFAULT_MAP_ID,
+        "day_index": 1,
+        "night_time_spent": 0,
+        "selected_map_id": map_config["id"],
         "active_capability_id": None,
         "last_active_capability_id": None,
-        "map": {"nodes": {}, "adjacency": {}, "image_url": None, "image_width": None, "image_height": None},
+        "focused_capability_id": DEFAULT_FOCUSED_CAPABILITY_ID,
+        "map": _map_projection(map_config),
         "poulpita": {"node_id": None, "previous_node_id": None},
+        "capabilities": _initial_capabilities(),
         "event_log": [],
+    }
+
+
+def _initial_capabilities() -> dict[str, dict[str, Any]]:
+    return {
+        capability_id: {
+            "id": capability_id,
+            "name": CAPABILITY_NAMES[capability_id],
+            "pa": 0,
+            "control_takes_this_night": 0,
+            "actions_taken_this_control": 0,
+            "max_actions_per_control": 3,
+            "max_control_takes_per_night": 3,
+        }
+        for capability_id in CAPABILITY_ORDER
     }
 
 
 def _goldfish_state(room_id: str, *, map_id: str | None = None) -> dict[str, Any]:
     map_config = get_map(map_id)
     _validate_map_config(map_config)
-    nodes = {}
-    adjacency = {}
-    for node_id, node in map_config["nodes"].items():
-        nodes[node_id] = {
-            "id": node_id,
-            "tier": int(node["tier"]),
-            "x": float(node.get("x") or 0),
-            "y": float(node.get("y") or 0),
-        }
-        adjacency[node_id] = list((map_config.get("adjacency") or {}).get(node_id) or [])
     return {
         "room_id": room_id,
         "mode": "goldfish",
         "version": 1,
-        "phase": PHASE_NIGHT_ACTION,
+        "phase": PHASE_NIGHT_IDLE,
         "level_id": "goldfish_movement",
+        "day_index": 1,
+        "night_time_spent": 0,
         "selected_map_id": map_config["id"],
-        "active_capability_id": DEFAULT_ACTIVE_CAPABILITY_ID,
+        "active_capability_id": None,
         "last_active_capability_id": None,
-        "map": {
-            "id": map_config["id"],
-            "name": map_config["name"],
-            "nodes": nodes,
-            "adjacency": adjacency,
-            "image_url": map_config.get("image_url"),
-            "image_width": map_config.get("image_width"),
-            "image_height": map_config.get("image_height"),
-        },
+        "focused_capability_id": DEFAULT_FOCUSED_CAPABILITY_ID,
+        "map": _map_projection(map_config),
         "poulpita": {
             "node_id": str(map_config["starting_node_id"]),
             "previous_node_id": None,
         },
+        "capabilities": _initial_capabilities(),
         "event_log": [
             {
                 "event_id": f"evt_{uuid.uuid4().hex}",
@@ -157,6 +196,9 @@ def _goldfish_state(room_id: str, *, map_id: str | None = None) -> dict[str, Any
 
 
 def _project_state(state: dict[str, Any]) -> dict[str, Any]:
+    capabilities = deepcopy(state.get("capabilities") or {})
+    capability_order = list(CAPABILITY_ORDER)
+    player_boards = [capabilities[capability_id] for capability_id in capability_order if capability_id in capabilities]
     return {
         "room_id": state["room_id"],
         "projection_mode": "goldfish",
@@ -165,9 +207,24 @@ def _project_state(state: dict[str, Any]) -> dict[str, Any]:
         "version": int(state["version"]),
         "phase": state["phase"],
         "level_id": state["level_id"],
+        "day_index": int(state.get("day_index") or 1),
+        "night_time_spent": int(state.get("night_time_spent") or 0),
         "selected_map_id": state.get("selected_map_id") or DEFAULT_MAP_ID,
         "active_capability_id": state.get("active_capability_id"),
         "last_active_capability_id": state.get("last_active_capability_id"),
+        "focused_capability_id": state.get("focused_capability_id") or DEFAULT_FOCUSED_CAPABILITY_ID,
+        "capability_order": capability_order,
+        "capabilities": capabilities,
+        "players": [
+            {
+                "id": capability_id,
+                "seat_id": capability_id,
+                "display_name": capabilities.get(capability_id, {}).get("name", CAPABILITY_NAMES.get(capability_id, capability_id)),
+            }
+            for capability_id in capability_order
+            if capability_id in capabilities
+        ],
+        "player_boards": player_boards,
         "map": deepcopy(state["map"]),
         "poulpita": deepcopy(state["poulpita"]),
         "events": list(state.get("event_log") or [])[-20:],
@@ -313,9 +370,37 @@ class GameRoomService:
             event = next_state["event_log"][0]
             return next_state, [event]
 
+        if command_type == "select_map":
+            if state["phase"] != PHASE_SETUP:
+                self._reject(state, command_id, "game_already_started", "Map can be changed only before the game starts.")
+            payload = command.get("payload") or {}
+            if not isinstance(payload, dict):
+                self._reject(state, command_id, "invalid_payload", "Command payload must be an object.")
+            map_id = str(payload.get("map_id") or "")
+            try:
+                map_config = get_map(map_id)
+                _validate_map_config(map_config)
+            except (LookupError, ValueError):
+                self._reject(state, command_id, "unknown_map", "Selected map does not exist or is invalid.")
+            next_state = deepcopy(state)
+            next_state["version"] = int(state["version"]) + 1
+            next_state["selected_map_id"] = map_config["id"]
+            next_state["map"] = _map_projection(map_config)
+            room["map_id"] = map_config["id"]
+            event = {
+                "event_id": f"evt_{uuid.uuid4().hex}",
+                "type": "map_selected",
+                "command_id": command_id,
+                "map_id": map_config["id"],
+                "version": int(next_state["version"]),
+                "created_at": _now_iso(),
+            }
+            next_state.setdefault("event_log", []).append(event)
+            return next_state, [event]
+
         if command_type == "move_poulpita":
             if state["phase"] != PHASE_NIGHT_ACTION:
-                self._reject(state, command_id, "phase_not_movable", "Poulpita can move only after the goldfish game has started.")
+                self._reject(state, command_id, "phase_not_movable", "Take control before moving Poulpita.")
             payload = command.get("payload") or {}
             if not isinstance(payload, dict):
                 self._reject(state, command_id, "invalid_payload", "Command payload must be an object.")
@@ -323,6 +408,13 @@ class GameRoomService:
             target_node_id = str(payload.get("target_node_id") or "")
             if capability_id != state.get("active_capability_id"):
                 self._reject(state, command_id, "not_active_capability", "Only the active capability can move Poulpita.")
+            capability = (state.get("capabilities") or {}).get(capability_id)
+            if capability is None:
+                self._reject(state, command_id, "unknown_capability", "Unknown capability.")
+            if int(capability.get("pa") or 0) < 1:
+                self._reject(state, command_id, "insufficient_pa", "Moving costs 1 AP.")
+            if int(capability.get("actions_taken_this_control") or 0) >= int(capability.get("max_actions_per_control") or 3):
+                self._reject(state, command_id, "action_limit_reached", "This capability has already taken 3 actions during this control.")
             nodes = state["map"]["nodes"]
             if target_node_id not in nodes:
                 self._reject(state, command_id, "unknown_target_node", "Target node does not exist.")
@@ -333,12 +425,86 @@ class GameRoomService:
             next_state["version"] = int(state["version"]) + 1
             next_state["poulpita"]["previous_node_id"] = current_node_id
             next_state["poulpita"]["node_id"] = target_node_id
+            next_capability = next_state["capabilities"][capability_id]
+            next_capability["pa"] = int(next_capability.get("pa") or 0) - 1
+            next_capability["actions_taken_this_control"] = int(next_capability.get("actions_taken_this_control") or 0) + 1
+            next_state["night_time_spent"] = int(next_state.get("night_time_spent") or 0) + 1
             event = {
                 "event_id": f"evt_{uuid.uuid4().hex}",
                 "type": "poulpita_moved",
                 "command_id": command_id,
                 "from_node_id": current_node_id,
                 "to_node_id": target_node_id,
+                "version": int(next_state["version"]),
+                "created_at": _now_iso(),
+            }
+            next_state.setdefault("event_log", []).append(event)
+            return next_state, [event]
+
+        if command_type == "take_control":
+            if state["phase"] not in {PHASE_NIGHT_IDLE, PHASE_NIGHT_ACTION}:
+                self._reject(state, command_id, "phase_not_controllable", "Control can be taken only during the night.")
+            payload = command.get("payload") or {}
+            if not isinstance(payload, dict):
+                self._reject(state, command_id, "invalid_payload", "Command payload must be an object.")
+            capability_id = str(payload.get("capability_id") or "")
+            capabilities = state.get("capabilities") or {}
+            capability = capabilities.get(capability_id)
+            if capability is None:
+                self._reject(state, command_id, "unknown_capability", "Unknown capability.")
+            if capability_id == state.get("active_capability_id"):
+                self._reject(state, command_id, "already_active_capability", "This capability already controls Poulpita.")
+            if int(capability.get("control_takes_this_night") or 0) >= int(capability.get("max_control_takes_per_night") or 3):
+                self._reject(state, command_id, "control_limit_reached", "This capability has already taken control 3 times tonight.")
+            next_state = deepcopy(state)
+            previous_active = next_state.get("active_capability_id")
+            if previous_active:
+                next_state["last_active_capability_id"] = previous_active
+            next_state["active_capability_id"] = capability_id
+            next_state["focused_capability_id"] = capability_id
+            next_state["phase"] = PHASE_NIGHT_ACTION
+            next_state["version"] = int(state["version"]) + 1
+            next_capability = next_state["capabilities"][capability_id]
+            next_capability["control_takes_this_night"] = int(next_capability.get("control_takes_this_night") or 0) + 1
+            next_capability["actions_taken_this_control"] = 0
+            event = {
+                "event_id": f"evt_{uuid.uuid4().hex}",
+                "type": "control_taken",
+                "command_id": command_id,
+                "capability_id": capability_id,
+                "previous_active_capability_id": previous_active,
+                "version": int(next_state["version"]),
+                "created_at": _now_iso(),
+            }
+            next_state.setdefault("event_log", []).append(event)
+            return next_state, [event]
+
+        if command_type == "collect_action_points":
+            if state["phase"] != PHASE_NIGHT_ACTION:
+                self._reject(state, command_id, "phase_not_actionable", "Take control before collecting AP.")
+            payload = command.get("payload") or {}
+            if not isinstance(payload, dict):
+                self._reject(state, command_id, "invalid_payload", "Command payload must be an object.")
+            capability_id = str(payload.get("capability_id") or "")
+            if capability_id != state.get("active_capability_id"):
+                self._reject(state, command_id, "not_active_capability", "Only the active capability can collect AP.")
+            capability = (state.get("capabilities") or {}).get(capability_id)
+            if capability is None:
+                self._reject(state, command_id, "unknown_capability", "Unknown capability.")
+            if int(capability.get("actions_taken_this_control") or 0) >= int(capability.get("max_actions_per_control") or 3):
+                self._reject(state, command_id, "action_limit_reached", "This capability has already taken 3 actions during this control.")
+            amount = 1
+            next_state = deepcopy(state)
+            next_state["version"] = int(state["version"]) + 1
+            next_capability = next_state["capabilities"][capability_id]
+            next_capability["pa"] = int(next_capability.get("pa") or 0) + amount
+            next_capability["actions_taken_this_control"] = int(next_capability.get("actions_taken_this_control") or 0) + 1
+            event = {
+                "event_id": f"evt_{uuid.uuid4().hex}",
+                "type": "action_points_collected",
+                "command_id": command_id,
+                "capability_id": capability_id,
+                "amount": amount,
                 "version": int(next_state["version"]),
                 "created_at": _now_iso(),
             }

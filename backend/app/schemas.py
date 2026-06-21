@@ -117,8 +117,16 @@ class GameStateResponse(BaseModel):
     privacy_enforced: bool = False
     mode: str = "goldfish"
     level_id: str
+    day_index: int = 1
+    night_time_spent: int = 0
+    selected_map_id: Optional[str] = None
     active_capability_id: Optional[str] = None
     last_active_capability_id: Optional[str] = None
+    focused_capability_id: Optional[str] = None
+    capability_order: List[str] = Field(default_factory=list)
+    capabilities: Dict[str, Any] = Field(default_factory=dict)
+    players: List[Dict[str, Any]] = Field(default_factory=list)
+    player_boards: List[Dict[str, Any]] = Field(default_factory=list)
     map: Dict[str, Any]
     poulpita: Dict[str, Any]
     events: List[Dict[str, Any]] = Field(default_factory=list)

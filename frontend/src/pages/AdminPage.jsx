@@ -405,8 +405,9 @@ const AdminPage = () => {
                   alt="Board map"
                   className="absolute inset-0 h-full w-full object-contain"
                   onLoad={(event) => {
+                    const { naturalWidth, naturalHeight } = event.currentTarget;
                     if (!draftMap.image_width || !draftMap.image_height) {
-                      setDraftMap((current) => ({ ...current, image_width: event.currentTarget.naturalWidth, image_height: event.currentTarget.naturalHeight }));
+                      setDraftMap((current) => ({ ...current, image_width: naturalWidth, image_height: naturalHeight }));
                     }
                   }}
                   src={boardImageUrl}
