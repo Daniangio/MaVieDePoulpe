@@ -1,0 +1,39 @@
+# backend/Dockerfile.prod
+FROM python:3.11-slim AS image-manifest-builder
+
+WORKDIR /manifest
+
+COPY frontend/public/images/ /manifest/frontend/public/images/
+COPY scripts/generate_image_manifest.py /manifest/scripts/generate_image_manifest.py
+
+RUN python /manifest/scripts/generate_image_manifest.py \
+    --image-root /manifest/frontend/public/images \
+    --output /manifest/image_manifest.json
+
+FROM python:3.11-slim
+
+# Prevent Python from writing pyc files and buffering stdout
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# Install system dependencies (e.g., for psycopg2 if needed)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+COPY backend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the application code
+COPY backend/ /app/backend/
+COPY --from=image-manifest-builder /manifest/image_manifest.json /app/backend/data/image_manifest.json
+
+# Expose the API port
+EXPOSE 8000
+
+# Run Uvicorn without the --reload flag for production performance
+CMD ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]

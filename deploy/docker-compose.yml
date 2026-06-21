@@ -1,0 +1,115 @@
+services:
+  redis:
+    image: redis:7-alpine
+    command: >
+      sh -c "if [ -n \"$$REDIS_PASSWORD\" ]; then
+               exec redis-server --requirepass \"$$REDIS_PASSWORD\";
+             else
+               exec redis-server;
+             fi"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "if [ -n \"$$REDIS_PASSWORD\" ]; then redis-cli -a \"$$REDIS_PASSWORD\" ping; else redis-cli ping; fi",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  backend:
+    image: ${BACKEND_IMAGE}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      APP_NAME: ${APP_NAME:-Ma vie de poulpe}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      SECRET_KEY: ${SECRET_KEY}
+      FIREBASE_ADMIN_CREDENTIALS: ${FIREBASE_ADMIN_CREDENTIALS:-/opt/maviedepoulpe/secrets/firebase-admin.prod.json}
+      FIREBASE_PRIMARY_ADMIN_EMAIL: ${FIREBASE_PRIMARY_ADMIN_EMAIL:-}
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
+      AUTO_CREATE_SCHEMA: "true"
+      CHAT_STREAM_PREFIX: "${CHAT_STREAM_PREFIX:-chat}"
+      CHAT_RETENTION_SECONDS: "${CHAT_RETENTION_SECONDS:-86400}"
+      CHAT_HISTORY_LIMIT: "${CHAT_HISTORY_LIMIT:-80}"
+      CORS_ALLOW_ORIGINS: "${CORS_ALLOW_ORIGINS:-*}"
+    volumes:
+      - /opt/maviedepoulpe/secrets:/opt/maviedepoulpe/secrets:ro
+    expose:
+      - "8000"
+    restart: unless-stopped
+
+  redisinsight:
+    profiles: ["ops"]
+    image: redis/redisinsight:latest
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${REDIS_INSIGHT_PORT:-5540}:5540"
+    environment:
+      RI_APP_HOST: "0.0.0.0"
+      RI_ACCEPT_TERMS_AND_CONDITIONS: "true"
+      RI_REDIS_HOST: "redis"
+      RI_REDIS_PORT: "6379"
+      RI_REDIS_ALIAS: "maviedepoulpe-prod"
+      RI_REDIS_USERNAME: "default"
+      RI_REDIS_PASSWORD: "${REDIS_PASSWORD:-}"
+      RI_ENCRYPTION_KEY: "${REDIS_INSIGHT_ENCRYPTION_KEY:-set-a-long-random-key}"
+    volumes:
+      - redisinsight_data:/data
+    restart: unless-stopped
+
+  frontend:
+    image: ${FRONTEND_IMAGE}
+    expose:
+      - "80"
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - backend
+      - frontend
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  redisinsight_data:
+  caddy_data:
+  caddy_config:

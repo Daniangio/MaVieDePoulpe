@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+bcrypt
+python-jose[cryptography]
+pydantic-settings
+python-multipart
+sqlalchemy
+psycopg[binary]
+debugpy
+redis
+firebase-admin
