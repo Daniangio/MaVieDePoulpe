@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import BoardView from "../components/BoardView";
+import HexTilePreview from "../components/HexTilePreview.jsx";
 import { useStore } from "../store.js";
 import type { CapabilityProjection, CardProjection, CommandRejection, GameProjection, NodeId } from "../types/game";
 import { buildApiUrl, buildWsUrl } from "../utils/connection.js";
@@ -21,6 +22,7 @@ const CapabilityBoard = ({
   focused,
   compact,
   pending,
+  projection,
   moveMode,
   onFocus,
   onTakeControl,
@@ -33,13 +35,18 @@ const CapabilityBoard = ({
   focused: boolean;
   compact?: boolean;
   pending: boolean;
+  projection: GameProjection | null;
   moveMode: boolean;
   onFocus?: () => void;
   onTakeControl?: () => void;
   onCollect?: () => void;
   onDraw?: () => void;
   onMoveMode?: () => void;
-}) => (
+}) => {
+  const initiableEvents = (capability.initiates_event_ids || [])
+    .map((eventId) => projection?.tile_catalog?.events?.[eventId])
+    .filter(Boolean);
+  return (
   <article
     className={[
       "group relative min-w-0 rounded-md border bg-slate-900 text-slate-100 shadow-xl transition",
@@ -53,27 +60,43 @@ const CapabilityBoard = ({
         <h3 className="truncate text-sm font-semibold text-white">{capability.name}</h3>
         <p className="text-xs text-slate-400">{active ? "Controls Poulpita" : focused ? "In focus" : "Waiting"}</p>
       </div>
-      <div className="rounded bg-slate-800 px-2 py-1 text-xs font-semibold text-teal-100">{capability.pa} AP</div>
+      <div className="rounded bg-slate-800 px-2 py-1 text-xs font-semibold text-black-100">{capability.pa} AP</div>
     </div>
-    <div className={compact ? "mt-2 grid grid-cols-2 gap-2 text-xs" : "mt-3 grid grid-cols-3 gap-2 text-xs"}>
-      <div className="rounded bg-slate-800 p-2">
-        <span className="block text-slate-400">Control</span>
-        <strong>
-          {capability.control_takes_this_night}/{capability.max_control_takes_per_night}
-        </strong>
-      </div>
-      <div className="rounded bg-slate-800 p-2">
-        <span className="block text-slate-400">Actions</span>
-        <strong>
-          {capability.actions_taken_this_control}/{capability.max_actions_per_control}
-        </strong>
-      </div>
-      {!compact ? (
+    <div className={compact ? "mt-2 grid grid-cols-[1fr_auto] gap-2" : "mt-3 grid grid-cols-[1fr_7rem] gap-3"}>
+      <div className={compact ? "grid grid-cols-2 gap-2 text-xs" : "grid grid-cols-3 gap-2 text-xs"}>
+        <div className="rounded bg-slate-800 p-2">
+          <span className="block text-slate-400">Control</span>
+          <strong>
+            {capability.control_takes_this_night}/{capability.max_control_takes_per_night}
+          </strong>
+        </div>
+        <div className="rounded bg-slate-800 p-2">
+          <span className="block text-slate-400">Actions</span>
+          <strong>
+            {capability.actions_taken_this_control}/{capability.max_actions_per_control}
+          </strong>
+        </div>
+        {!compact ? (
         <div className="rounded bg-slate-800 p-2">
           <span className="block text-slate-400">Focus</span>
           <strong>{focused ? "Yes" : "No"}</strong>
         </div>
-      ) : null}
+        ) : null}
+      </div>
+      <div className={`rounded bg-slate-800 p-2 ${compact ? "hidden w-16 group-hover:block" : ""}`}>
+        <span className="block text-xs text-slate-400">Can initiate</span>
+        <div className="mt-2 flex flex-wrap gap-1">
+          {initiableEvents.map((event: any) => {
+            const imageUrl = event.image_url ? buildApiUrl(event.image_url) : "";
+            return (
+              <span className="flex h-7 w-7 items-center justify-center overflow-hidden rounded border border-slate-700 bg-slate-900 text-[0.55rem]" key={event.id} title={event.name}>
+                {imageUrl ? <img alt="" className="h-full w-full object-cover" src={imageUrl} /> : event.name?.slice(0, 2)}
+              </span>
+            );
+          })}
+          {initiableEvents.length === 0 ? <span className="text-xs text-slate-500">None</span> : null}
+        </div>
+      </div>
     </div>
     {compact ? <p className="mt-2 hidden text-xs text-slate-400 group-hover:block">Double-click to focus this board.</p> : null}
     {!compact ? (
@@ -116,7 +139,8 @@ const CapabilityBoard = ({
       </div>
     ) : null}
   </article>
-);
+  );
+};
 
 const CardButton = ({
   card,
@@ -159,6 +183,8 @@ const InteractionPanel = ({
   const interaction = projection.interaction;
   if (!interaction) return null;
   const tile = projection.tile_catalog?.tiles?.[interaction.tile_id] || {};
+  const event = tile.event || projection.tile_catalog?.events?.[tile.event_id];
+  const interactionsById = projection.tile_catalog?.interactions || {};
   const playedInteractions = (interaction.played_cards || []).map((card: CardProjection) => card.interaction_id);
   const missingSuccess = [...(tile.interaction_ids || [])];
   playedInteractions.forEach((interactionId: string) => {
@@ -167,12 +193,12 @@ const InteractionPanel = ({
   });
   const canResolve = missingSuccess.length === 0;
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/70 p-4">
-      <section className="grid max-h-[86vh] w-[min(62rem,calc(100vw-2rem))] gap-4 overflow-auto rounded-lg border border-cyan-700 bg-slate-900 p-4 shadow-2xl md:grid-cols-[18rem_1fr]">
+    <div className="absolute inset-0 z-40 flex items-center justify-center bg-slate-950/45 p-3">
+      <section className="grid max-h-full w-[min(54rem,calc(100%-1rem))] gap-3 overflow-auto rounded-lg border border-cyan-700 bg-slate-900 p-3 shadow-2xl md:grid-cols-[16rem_1fr]">
         <div>
           <h2 className="text-lg font-semibold text-white">Interaction</h2>
           <div className="mt-3 rounded-md border border-slate-700 bg-slate-950 p-3">
-            {tile.image_url ? <img alt="" className="mx-auto h-32 w-32 rounded object-cover" src={buildApiUrl(tile.image_url)} /> : null}
+            <HexTilePreview className="max-w-[15rem]" event={event} interactionsById={interactionsById} tile={tile} />
             <p className="mt-2 text-center font-semibold text-white">{tile.name || interaction.tile_id}</p>
             <p className="mt-1 text-center text-xs text-slate-400">Node {interaction.node_id}</p>
           </div>
@@ -476,6 +502,7 @@ const GameRoomPage = () => {
               setMoveMode(false);
             }}
             pending={pending}
+            projection={projection}
           />
         ))}
       </section>
@@ -487,22 +514,21 @@ const GameRoomPage = () => {
         </div>
       ) : null}
 
-      {projection ? (
-        <InteractionPanel
-          onFail={failInteraction}
-          onPlayCard={playInteractionCard}
-          onResolve={resolveInteraction}
-          onWithdrawCard={withdrawInteractionCard}
-          pending={pending}
-          projection={projection}
-          selectedCapability={selectedCapability}
-        />
-      ) : null}
-
       <section className="grid h-[50vh] grid-cols-[minmax(0,75%)_minmax(14rem,25%)] overflow-hidden">
-        <div className="min-w-0 overflow-hidden border-r border-slate-800">
+        <div className="relative min-w-0 overflow-hidden border-r border-slate-800">
           {projection ? (
-            <BoardView moveMode={moveMode} onMove={movePoulpita} onStartInteraction={startInteraction} pending={pending} projection={projection} />
+            <>
+              <BoardView moveMode={moveMode} onMove={movePoulpita} onStartInteraction={startInteraction} pending={pending} projection={projection} />
+              <InteractionPanel
+                onFail={failInteraction}
+                onPlayCard={playInteractionCard}
+                onResolve={resolveInteraction}
+                onWithdrawCard={withdrawInteractionCard}
+                pending={pending}
+                projection={projection}
+                selectedCapability={selectedCapability}
+              />
+            </>
           ) : (
             <div className="flex h-full items-center justify-center text-sm text-slate-400">Loading room state.</div>
           )}
@@ -556,6 +582,7 @@ const GameRoomPage = () => {
             onMoveMode={() => setMoveMode((value) => !value)}
             onTakeControl={takeControl}
             pending={pending}
+            projection={projection}
           />
         ) : (
           <div className="rounded-md border border-slate-800 bg-slate-900 p-3 text-sm text-slate-400">No focused player board.</div>
