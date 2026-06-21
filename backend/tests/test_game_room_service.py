@@ -1,4 +1,5 @@
 import asyncio
+import pytest
 
 from backend.app.game_room_service import (
     DEFAULT_ACTIVE_CAPABILITY_ID,
@@ -7,6 +8,54 @@ from backend.app.game_room_service import (
     ROOM_STATE_SETUP,
 )
 from backend.app.server_models import User
+
+TEST_MAP = {
+    "id": "test-map",
+    "name": "Test map",
+    "starting_node_id": "1A",
+    "image_filename": None,
+    "image_url": None,
+    "image_width": None,
+    "image_height": None,
+    "nodes": {
+        f"{row}{column}": {
+            "id": f"{row}{column}",
+            "tier": 1,
+            "x": (column_index + 1) / 5,
+            "y": row / 5,
+        }
+        for row in range(1, 5)
+        for column_index, column in enumerate(["A", "B", "C", "D"])
+    },
+    "adjacency": {
+        "1A": ["1B"],
+        "1B": ["1A", "1C"],
+        "1C": ["1B", "1D"],
+        "1D": ["1C"],
+        "2A": ["2B"],
+        "2B": ["2A", "2C"],
+        "2C": ["2B", "2D"],
+        "2D": ["2C"],
+        "3A": ["3B"],
+        "3B": ["3A", "3C"],
+        "3C": ["3B", "3D"],
+        "3D": ["3C"],
+        "4A": ["4B"],
+        "4B": ["4A", "4C"],
+        "4C": ["4B", "4D"],
+        "4D": ["4C"],
+    },
+}
+
+
+@pytest.fixture(autouse=True)
+def explicit_test_map(monkeypatch):
+    def get_test_map(map_id=None):
+        if map_id in (None, "", "test-map"):
+            return TEST_MAP
+        raise LookupError("Map not found.")
+
+    monkeypatch.setattr("backend.app.game_room_service.get_map", get_test_map)
 
 
 def run(coro):
@@ -83,7 +132,7 @@ def test_room_creation_returns_setup_state():
         assert room["state"] == ROOM_STATE_SETUP
         assert projection["version"] == 0
         assert projection["phase"] == "setup"
-        assert projection["selected_map_id"] == "default-16"
+        assert projection["selected_map_id"] == "test-map"
         assert len(projection["player_boards"]) == 5
         assert projection["player_boards"][0]["id"] == DEFAULT_ACTIVE_CAPABILITY_ID
 

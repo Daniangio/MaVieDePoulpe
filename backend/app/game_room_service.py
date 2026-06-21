@@ -12,7 +12,7 @@ from typing import Any, Optional
 from fastapi import WebSocket
 
 from .game_content_service import get_player_board_configs
-from .map_service import DEFAULT_MAP_ID, get_map
+from .map_service import get_map
 from .server_models import User
 
 
@@ -62,7 +62,7 @@ def _public_room(room: dict[str, Any]) -> dict[str, Any]:
         "started_at": room.get("started_at") or "",
         "ended_at": room.get("ended_at") or None,
         "result_id": room.get("result_id") or None,
-        "map_id": room.get("map_id") or DEFAULT_MAP_ID,
+        "map_id": room.get("map_id") or "",
     }
 
 
@@ -164,7 +164,7 @@ def _initial_capabilities() -> dict[str, dict[str, Any]]:
             "max_control_takes_per_night": int(board.get("control_takes_per_night") or 3),
             "default_max_cards_in_hand": int(board.get("default_max_cards_in_hand") or 3),
             "current_max_cards_in_hand": int(board.get("default_max_cards_in_hand") or 3),
-            "initiates_interaction_ids": list(board.get("initiates_interaction_ids") or []),
+            "initiates_event_ids": list(board.get("initiates_event_ids") or []),
             "deck": deepcopy(board.get("deck") or []),
             "hand_size_upgrades": deepcopy(board.get("hand_size_upgrades") or []),
         }
@@ -220,7 +220,7 @@ def _project_state(state: dict[str, Any]) -> dict[str, Any]:
         "level_id": state["level_id"],
         "day_index": int(state.get("day_index") or 1),
         "night_time_spent": int(state.get("night_time_spent") or 0),
-        "selected_map_id": state.get("selected_map_id") or DEFAULT_MAP_ID,
+        "selected_map_id": state.get("selected_map_id") or "",
         "active_capability_id": state.get("active_capability_id"),
         "last_active_capability_id": state.get("last_active_capability_id"),
         "focused_capability_id": state.get("focused_capability_id") or DEFAULT_FOCUSED_CAPABILITY_ID,

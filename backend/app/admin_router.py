@@ -17,8 +17,10 @@ from .game_content_service import (
     delete_category,
     delete_event,
     delete_interaction,
+    delete_level,
     delete_tile,
     get_content_state,
+    save_level,
     save_tile,
     save_player_board,
     update_category,
@@ -510,13 +512,72 @@ async def admin_delete_tile(tile_id: str, _admin: User = Depends(require_admin))
         return {"status": "deleted"}
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/admin/content/levels")
+async def admin_create_level(
+    name: str = Form(...),
+    map_id: str = Form(...),
+    node_tile_counts_json: str = Form(...),
+    node_group_ids_json: str = Form(...),
+    groups_json: str = Form(...),
+    _admin: User = Depends(require_admin),
+):
+    try:
+        return save_level(
+            name=name,
+            map_id=map_id,
+            node_tile_counts=_json_form_object(node_tile_counts_json, "node_tile_counts_json"),
+            node_group_ids=_json_form_object(node_group_ids_json, "node_group_ids_json"),
+            groups=_json_form_list(groups_json, "groups_json"),
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/admin/content/levels/{level_id}")
+async def admin_update_level(
+    level_id: str,
+    name: str = Form(...),
+    map_id: str = Form(...),
+    node_tile_counts_json: str = Form(...),
+    node_group_ids_json: str = Form(...),
+    groups_json: str = Form(...),
+    _admin: User = Depends(require_admin),
+):
+    try:
+        return save_level(
+            level_id=level_id,
+            name=name,
+            map_id=map_id,
+            node_tile_counts=_json_form_object(node_tile_counts_json, "node_tile_counts_json"),
+            node_group_ids=_json_form_object(node_group_ids_json, "node_group_ids_json"),
+            groups=_json_form_list(groups_json, "groups_json"),
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/admin/content/levels/{level_id}")
+async def admin_delete_level(level_id: str, _admin: User = Depends(require_admin)):
+    try:
+        delete_level(level_id)
+        return {"status": "deleted"}
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.put("/admin/content/player-boards/{board_id}")
 async def admin_update_player_board(
     board_id: str,
     name: str = Form(...),
-    initiates_interaction_ids_json: str = Form(default="[]"),
+    initiates_event_ids_json: str = Form(default="[]"),
     deck_json: str = Form(default="[]"),
     default_max_cards_in_hand: int = Form(default=3),
     hand_size_upgrades_json: str = Form(default="[]"),
@@ -528,8 +589,8 @@ async def admin_update_player_board(
         return save_player_board(
             board_id=board_id,
             name=name,
-            initiates_interaction_ids=[
-                str(item) for item in _json_form_list(initiates_interaction_ids_json, "initiates_interaction_ids_json")
+            initiates_event_ids=[
+                str(item) for item in _json_form_list(initiates_event_ids_json, "initiates_event_ids_json")
             ],
             deck=_json_form_list(deck_json, "deck_json"),
             default_max_cards_in_hand=default_max_cards_in_hand,

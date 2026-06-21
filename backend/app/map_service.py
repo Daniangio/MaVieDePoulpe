@@ -11,12 +11,7 @@ from fastapi import UploadFile
 
 
 MAPS_ROOT = Path(__file__).resolve().parents[1] / "data" / "maps"
-DEFAULT_MAP_ID = "default-16"
 ALLOWED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
-
-
-def _builtin_map_path() -> Path:
-    return Path(__file__).resolve().parent / "content" / "map.json"
 
 
 def _slug(value: str) -> str:
@@ -86,37 +81,9 @@ def _with_runtime_urls(map_data: dict[str, Any]) -> dict[str, Any]:
     return copy
 
 
-def load_builtin_map() -> dict[str, Any]:
-    with _builtin_map_path().open("r", encoding="utf-8") as handle:
-        config = json.load(handle)
-    max_x = max(float(node.get("x") or 0) for node in config["nodes"].values()) or 1
-    max_y = max(float(node.get("y") or 0) for node in config["nodes"].values()) or 1
-    nodes = {
-        node_id: {
-            "id": node_id,
-            "tier": int(node["tier"]),
-            "x": float(node.get("x") or 0) / max_x,
-            "y": float(node.get("y") or 0) / max_y,
-        }
-        for node_id, node in config["nodes"].items()
-    }
-    adjacency = {node_id: list(node.get("adjacent") or []) for node_id, node in config["nodes"].items()}
-    return {
-        "id": DEFAULT_MAP_ID,
-        "name": "Default 16-node map",
-        "starting_node_id": config["starting_node_id"],
-        "image_filename": None,
-        "image_url": None,
-        "image_width": None,
-        "image_height": None,
-        "nodes": nodes,
-        "adjacency": adjacency,
-    }
-
-
 def list_maps() -> list[dict[str, Any]]:
     MAPS_ROOT.mkdir(parents=True, exist_ok=True)
-    maps = [load_builtin_map()]
+    maps = []
     for path in sorted(MAPS_ROOT.glob("*/map.json")):
         with path.open("r", encoding="utf-8") as handle:
             maps.append(_with_runtime_urls(json.load(handle)))
@@ -124,9 +91,12 @@ def list_maps() -> list[dict[str, Any]]:
 
 
 def get_map(map_id: str | None) -> dict[str, Any]:
-    normalized_id = str(map_id or DEFAULT_MAP_ID)
-    if normalized_id == DEFAULT_MAP_ID:
-        return load_builtin_map()
+    if not map_id:
+        maps = list_maps()
+        if not maps:
+            raise LookupError("No maps available. Create a map in the admin console first.")
+        return maps[0]
+    normalized_id = str(map_id)
     path = _map_json_path(normalized_id)
     if not path.exists():
         raise LookupError("Map not found.")
@@ -213,8 +183,6 @@ async def update_map(
     image_height: int | None,
     starting_node_id: str | None = None,
 ) -> dict[str, Any]:
-    if map_id == DEFAULT_MAP_ID:
-        raise ValueError("The built-in map cannot be edited.")
     current = get_map(map_id)
     image_filename = current.get("image_filename")
     if image is not None and image.filename:
@@ -232,8 +200,6 @@ async def update_map(
 
 
 def delete_map(map_id: str) -> None:
-    if map_id == DEFAULT_MAP_ID:
-        raise ValueError("The built-in map cannot be deleted.")
     path = _map_dir(map_id)
     if not path.exists():
         raise LookupError("Map not found.")

@@ -10,6 +10,8 @@ from typing import Any
 
 from fastapi import UploadFile
 
+from .map_service import get_map
+
 
 CONTENT_ROOT = Path(__file__).resolve().parents[1] / "data" / "content"
 CONTENT_IMAGES_ROOT = CONTENT_ROOT / "images"
@@ -24,7 +26,18 @@ DEFAULT_CATEGORIES = [
 COUNTER_ATTACK_CATEGORY_ID = "__counter_attack__"
 COUNTER_ATTACK_CATEGORY = {"id": COUNTER_ATTACK_CATEGORY_ID, "name": "Counter-attack", "special": True}
 SUCCESS_EFFECT_TYPES = {"gain_energy", "gain_neurons", "gain_seashells"}
-FAILURE_EFFECT_TYPES = {"lose_energy", "lose_neurons", "lose_seashells", "lose_ap", "half_ap", "all_ap"}
+FAILURE_EFFECT_TYPES = {
+    "lose_energy",
+    "lose_neurons",
+    "lose_seashells",
+    "lose_ap",
+    "half_ap",
+    "all_ap",
+    "stay_node",
+    "move_node_free",
+    "keep_tile",
+    "remove_tile",
+}
 PLAYER_BOARD_ORDER = ["agility", "camouflage", "force", "propulsion", "intelligence"]
 PLAYER_BOARD_DEFAULT_NAMES = {
     "agility": "Agility",
@@ -34,6 +47,11 @@ PLAYER_BOARD_DEFAULT_NAMES = {
     "intelligence": "Intelligence",
 }
 UPGRADE_COST_RESOURCES = {"energy", "neurons"}
+LEGACY_FAILURE_EFFECT_TYPES = {
+    "move_pulpita_previous": "stay_node",
+    "move_pulpita_free": "move_node_free",
+    "move_tile_previous": "keep_tile",
+}
 
 
 def _slug(value: str) -> str:
@@ -47,6 +65,7 @@ def _empty_content() -> dict[str, Any]:
         "interactions": [],
         "events": [],
         "tiles": [],
+        "levels": [],
         "player_boards": _default_player_boards(),
     }
 
@@ -73,6 +92,7 @@ def _read_content() -> dict[str, Any]:
     content.setdefault("interactions", [])
     content.setdefault("events", [])
     content.setdefault("tiles", [])
+    content.setdefault("levels", [])
     content["player_boards"] = _normalize_player_boards(content.get("player_boards") or [])
     for tile in content["tiles"]:
         tile.setdefault("interaction_ids", [])
@@ -80,6 +100,7 @@ def _read_content() -> dict[str, Any]:
         tile.setdefault("success_effects", [])
         tile.setdefault("counter_attack_effects", [])
         tile.setdefault("failure_effects", [])
+        tile["failure_effects"] = _migrate_failure_effects(tile["failure_effects"])
     return content
 
 
@@ -88,7 +109,7 @@ def _default_player_boards() -> list[dict[str, Any]]:
         {
             "id": board_id,
             "name": PLAYER_BOARD_DEFAULT_NAMES[board_id],
-            "initiates_interaction_ids": [],
+            "initiates_event_ids": [],
             "deck": [],
             "default_max_cards_in_hand": 3,
             "hand_size_upgrades": [],
@@ -106,7 +127,8 @@ def _normalize_player_boards(raw_boards: list[dict[str, Any]]) -> list[dict[str,
         current = {**default, **by_id.get(default["id"], {})}
         current["id"] = default["id"]
         current["name"] = _normalize_name(current.get("name") or default["name"])
-        current["initiates_interaction_ids"] = [str(item) for item in current.get("initiates_interaction_ids") or []]
+        current["initiates_event_ids"] = [str(item) for item in current.get("initiates_event_ids") or []]
+        current.pop("initiates_interaction_ids", None)
         current["deck"] = [
             {"interaction_id": str(entry.get("interaction_id") or ""), "count": max(0, int(entry.get("count") or 0))}
             for entry in current.get("deck") or []
@@ -232,6 +254,7 @@ def get_content_state() -> dict[str, Any]:
         "interactions": [_with_urls(interaction) for interaction in content.get("interactions", [])],
         "events": [_with_urls(event) for event in content.get("events", [])],
         "tiles": [dict(tile) for tile in content.get("tiles", [])],
+        "levels": [dict(level) for level in content.get("levels", [])],
         "player_boards": [dict(board) for board in content.get("player_boards", [])],
         "cards": _generated_cards(content),
     }
@@ -302,8 +325,7 @@ def delete_interaction(interaction_id: str) -> None:
         or interaction_id in (tile.get("counter_attack_interaction_ids") or [])
         for tile in content["tiles"]
     ) or any(
-        interaction_id in (board.get("initiates_interaction_ids") or [])
-        or any(entry.get("interaction_id") == interaction_id for entry in board.get("deck") or [])
+        any(entry.get("interaction_id") == interaction_id for entry in board.get("deck") or [])
         for board in content["player_boards"]
     ):
         raise ValueError("Interaction is used by one or more tiles.")
@@ -346,8 +368,11 @@ async def update_event(*, event_id: str, name: str, category_id: str, image: Upl
 
 def delete_event(event_id: str) -> None:
     content = _read_content()
-    if any(tile.get("event_id") == event_id for tile in content["tiles"]):
-        raise ValueError("Event is used by one or more tiles.")
+    if any(tile.get("event_id") == event_id for tile in content["tiles"]) or any(
+        event_id in (board.get("initiates_event_ids") or [])
+        for board in content["player_boards"]
+    ):
+        raise ValueError("Event is used by one or more tiles or player boards.")
     index = _find_index(content["events"], event_id)
     _delete_image(content["events"][index].get("image_filename"))
     del content["events"][index]
@@ -364,6 +389,16 @@ def _normalize_interaction_ids(interaction_ids: list[str], interaction_set: set[
     return normalized
 
 
+def _normalize_event_ids(event_ids: list[str], event_set: set[str]) -> list[str]:
+    normalized = []
+    for event_id in event_ids:
+        if event_id not in event_set:
+            raise ValueError("Player board references an unknown event.")
+        if event_id not in normalized:
+            normalized.append(event_id)
+    return normalized
+
+
 def _normalize_effects(effects: list[dict[str, Any]], allowed_types: set[str], label: str) -> list[dict[str, Any]]:
     normalized = []
     for effect in effects or []:
@@ -373,10 +408,21 @@ def _normalize_effects(effects: list[dict[str, Any]], allowed_types: set[str], l
         if effect_type not in allowed_types:
             raise ValueError(f"Unsupported {label} effect: {effect_type or '<missing>'}.")
         amount = int(effect.get("amount") or 0)
-        if effect_type not in {"half_ap", "all_ap"} and amount < 1:
+        no_amount_types = {"half_ap", "all_ap", "stay_node", "move_node_free", "keep_tile", "remove_tile"}
+        if effect_type not in no_amount_types and amount < 1:
             raise ValueError(f"{label} effect amount must be at least 1.")
-        normalized.append({"type": effect_type, "amount": None if effect_type in {"half_ap", "all_ap"} else amount})
+        normalized.append({"type": effect_type, "amount": None if effect_type in no_amount_types else amount})
     return normalized
+
+
+def _migrate_failure_effects(effects: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    migrated = []
+    for effect in effects or []:
+        if not isinstance(effect, dict):
+            continue
+        effect_type = str(effect.get("type") or "")
+        migrated.append({**effect, "type": LEGACY_FAILURE_EFFECT_TYPES.get(effect_type, effect_type)})
+    return migrated
 
 
 def save_tile(
@@ -417,8 +463,104 @@ def save_tile(
 
 def delete_tile(tile_id: str) -> None:
     content = _read_content()
+    if any(
+        int((group.get("tile_counts") or {}).get(tile_id) or 0) > 0
+        for level in content.get("levels", [])
+        for group in level.get("groups", [])
+    ):
+        raise ValueError("Tile is used by one or more levels.")
     index = _find_index(content["tiles"], tile_id)
     del content["tiles"][index]
+    _write_content(content)
+
+
+def _normalize_node_tile_counts(node_tile_counts: dict[str, Any], node_ids: set[str]) -> dict[str, int]:
+    normalized = {}
+    for node_id in node_ids:
+        count = int(node_tile_counts.get(node_id, 3))
+        if count < 0:
+            raise ValueError("Node tile counts cannot be negative.")
+        normalized[node_id] = count
+    return normalized
+
+
+def _normalize_level_groups(groups: list[dict[str, Any]], tile_set: set[str]) -> list[dict[str, Any]]:
+    normalized = []
+    seen_ids = set()
+    for index, group in enumerate(groups or []):
+        if not isinstance(group, dict):
+            raise ValueError("Level groups must be objects.")
+        group_id = _slug(str(group.get("id") or group.get("name") or f"group-{index + 1}"))
+        if not group_id:
+            raise ValueError("Level group ID is required.")
+        if group_id in seen_ids:
+            raise ValueError("Level group IDs must be unique.")
+        seen_ids.add(group_id)
+        tile_counts = {}
+        for tile_id, raw_count in (group.get("tile_counts") or {}).items():
+            tile_id = str(tile_id)
+            if tile_id not in tile_set:
+                raise ValueError("Level group references an unknown tile.")
+            count = int(raw_count or 0)
+            if count < 0:
+                raise ValueError("Level tile counts cannot be negative.")
+            if count:
+                tile_counts[tile_id] = count
+        normalized.append({"id": group_id, "name": _normalize_name(group.get("name") or group_id), "tile_counts": tile_counts})
+    if not normalized:
+        raise ValueError("A level needs at least one group.")
+    return normalized
+
+
+def save_level(
+    *,
+    name: str,
+    map_id: str,
+    node_tile_counts: dict[str, Any],
+    node_group_ids: dict[str, Any],
+    groups: list[dict[str, Any]],
+    level_id: str | None = None,
+) -> dict[str, Any]:
+    content = _read_content()
+    map_config = get_map(map_id)
+    node_ids = {str(node_id) for node_id in (map_config.get("nodes") or {})}
+    if not node_ids:
+        raise ValueError("Level map has no nodes.")
+    tile_set = {str(tile.get("id")) for tile in content["tiles"]}
+    normalized_groups = _normalize_level_groups(groups, tile_set)
+    group_ids = {group["id"] for group in normalized_groups}
+    normalized_counts = _normalize_node_tile_counts(node_tile_counts or {}, node_ids)
+    normalized_node_groups = {}
+    for node_id in node_ids:
+        group_id = str((node_group_ids or {}).get(node_id) or "")
+        if group_id not in group_ids:
+            raise ValueError("Every map node must belong to a level group.")
+        normalized_node_groups[node_id] = group_id
+    for group in normalized_groups:
+        capacity = sum(count for node_id, count in normalized_counts.items() if normalized_node_groups[node_id] == group["id"])
+        assigned = sum(int(count or 0) for count in (group.get("tile_counts") or {}).values())
+        if assigned != capacity:
+            raise ValueError(f"Group {group['name']} has {assigned} assigned tiles but needs {capacity}.")
+    level = {
+        "id": level_id or f"{_slug(name)}-{uuid.uuid4().hex[:8]}",
+        "name": _normalize_name(name),
+        "map_id": str(map_id),
+        "node_tile_counts": normalized_counts,
+        "node_group_ids": normalized_node_groups,
+        "groups": normalized_groups,
+    }
+    if level_id:
+        content["levels"][_find_index(content["levels"], level_id)] = level
+    else:
+        content["levels"].append(level)
+    _write_content(content)
+    return dict(level)
+
+
+def delete_level(level_id: str) -> None:
+    content = _read_content()
+    index = _find_index(content["levels"], level_id)
+    del content["levels"][index]
     _write_content(content)
 
 
@@ -426,7 +568,7 @@ def save_player_board(
     *,
     board_id: str,
     name: str,
-    initiates_interaction_ids: list[str],
+    initiates_event_ids: list[str],
     deck: list[dict[str, Any]],
     default_max_cards_in_hand: int,
     hand_size_upgrades: list[dict[str, Any]],
@@ -437,7 +579,8 @@ def save_player_board(
     if board_id not in PLAYER_BOARD_ORDER:
         raise ValueError("Unknown player board.")
     interaction_set = {interaction.get("id") for interaction in content["interactions"]}
-    normalized_initiates = _normalize_interaction_ids(initiates_interaction_ids, interaction_set)
+    event_set = {event.get("id") for event in content["events"]}
+    normalized_initiates = _normalize_event_ids(initiates_event_ids, event_set)
     normalized_deck = []
     for entry in deck or []:
         if not isinstance(entry, dict):
@@ -467,7 +610,7 @@ def save_player_board(
     next_board = {
         "id": board_id,
         "name": _normalize_name(name),
-        "initiates_interaction_ids": normalized_initiates,
+        "initiates_event_ids": normalized_initiates,
         "deck": normalized_deck,
         "default_max_cards_in_hand": max(1, int(default_max_cards_in_hand or 3)),
         "hand_size_upgrades": normalized_upgrades,

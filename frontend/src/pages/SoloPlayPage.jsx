@@ -14,7 +14,7 @@ const SoloPlayPage = () => {
   const [error, setError] = useState("");
   const [creating, setCreating] = useState(false);
   const [maps, setMaps] = useState([]);
-  const [selectedMapId, setSelectedMapId] = useState("default-16");
+  const [selectedMapId, setSelectedMapId] = useState("");
 
   useEffect(() => {
     const loadMaps = async () => {
@@ -38,7 +38,7 @@ const SoloPlayPage = () => {
   }, [token]);
 
   const createQuickMatch = async () => {
-    if (!token || creating) return;
+    if (!token || creating || !selectedMapId) return;
     setCreating(true);
     setError("");
     try {
@@ -67,7 +67,7 @@ const SoloPlayPage = () => {
       <section className="mb-5">
         <h1 className="text-2xl font-semibold text-white">Solo Play</h1>
         <p className="mt-1 max-w-3xl text-sm text-slate-400">
-          Start a map-only goldfish room and move Poulpita around the 16-node board.
+          Start a map-only goldfish room and move Poulpita around an admin-created board.
         </p>
       </section>
 
@@ -87,6 +87,7 @@ const SoloPlayPage = () => {
               </option>
             ))}
           </select>
+          {!maps.length ? <span className="mt-2 block text-xs text-amber-300">Create a map in the admin console before starting.</span> : null}
         </label>
       </section>
 
@@ -106,7 +107,7 @@ const SoloPlayPage = () => {
           description="Create a solo room with the movement-only Phase 1 prototype."
           actionLabel={creating ? "Creating..." : "Start"}
           onClick={createQuickMatch}
-          disabled={creating}
+          disabled={creating || !selectedMapId}
         />
       </section>
     </>

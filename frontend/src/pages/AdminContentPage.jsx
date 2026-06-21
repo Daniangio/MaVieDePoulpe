@@ -1,5 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
+import AdminLevelEditor from "../components/AdminLevelEditor.jsx";
+import AdminMapEditor from "../components/AdminMapEditor.jsx";
+import HexTilePreview from "../components/HexTilePreview.jsx";
+import PlayerBoardPreview from "../components/PlayerBoardPreview.jsx";
 import { PageSubnavigation } from "../components/AuthenticatedLayout.jsx";
 import { useStore } from "../store.js";
 import { buildApiUrl } from "../utils/connection.js";
@@ -24,7 +28,7 @@ const emptyTile = {
 const emptyPlayerBoard = {
   id: "",
   name: "",
-  initiates_interaction_ids: [],
+  initiates_event_ids: [],
   deck: [],
   default_max_cards_in_hand: 3,
   hand_size_upgrades: [],
@@ -43,8 +47,24 @@ const failureEffectOptions = [
   ["lose_neurons", "Lose neurons"],
   ["lose_seashells", "Lose seashells"],
   ["lose_ap", "Lose AP"],
-  ["half_ap", "Half AP"],
-  ["all_ap", "All AP"],
+  ["half_ap", "Lose half AP"],
+  ["all_ap", "Lose all AP"],
+  ["stay_node", "Poulpita remains on same node"],
+  ["move_node_free", "Poulpita must move for free"],
+  ["keep_tile", "Keep tile"],
+  ["remove_tile", "Remove tile"],
+];
+const noAmountEffectTypes = new Set(["half_ap", "all_ap", "stay_node", "move_node_free", "keep_tile", "remove_tile"]);
+
+const contentTabs = [
+  ["map", "Map"],
+  ["levels", "Levels"],
+  ["categories", "Categories"],
+  ["interactions", "Interactions"],
+  ["events", "Events/Animals"],
+  ["tiles", "Tiles"],
+  ["cards", "Cards"],
+  ["player_boards", "Player Boards"],
 ];
 
 const imageUrl = (entry) => (entry?.image_url ? buildApiUrl(entry.image_url) : "");
@@ -56,12 +76,13 @@ const dangerButton = "rounded-md border border-rose-300 bg-white px-3 py-2 text-
 
 const AdminContentPage = () => {
   const { token, user } = useStore();
-  const [content, setContent] = useState({ categories: [], card_categories: [], interactions: [], events: [], tiles: [], player_boards: [], cards: [] });
+  const [content, setContent] = useState({ categories: [], card_categories: [], interactions: [], events: [], tiles: [], levels: [], player_boards: [], cards: [] });
   const [categoryName, setCategoryName] = useState("");
   const [interactionDraft, setInteractionDraft] = useState(emptyInteraction);
   const [eventDraft, setEventDraft] = useState(emptyEvent);
   const [tileDraft, setTileDraft] = useState(emptyTile);
   const [playerBoardDraft, setPlayerBoardDraft] = useState(emptyPlayerBoard);
+  const [activeTab, setActiveTab] = useState("map");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const interactionImageRef = useRef(null);
@@ -222,7 +243,7 @@ const AdminContentPage = () => {
     try {
       const form = new FormData();
       form.set("name", playerBoardDraft.name);
-      form.set("initiates_interaction_ids_json", JSON.stringify(playerBoardDraft.initiates_interaction_ids || []));
+      form.set("initiates_event_ids_json", JSON.stringify(playerBoardDraft.initiates_event_ids || []));
       form.set("deck_json", JSON.stringify((playerBoardDraft.deck || []).filter((entry) => Number(entry.count || 0) > 0)));
       form.set("default_max_cards_in_hand", String(playerBoardDraft.default_max_cards_in_hand || 3));
       form.set("hand_size_upgrades_json", JSON.stringify(playerBoardDraft.hand_size_upgrades || []));
@@ -247,7 +268,7 @@ const AdminContentPage = () => {
   };
 
   const addEffect = (field, type) => {
-    setTileDraft((current) => ({ ...current, [field]: [...(current[field] || []), { type, amount: type === "half_ap" || type === "all_ap" ? null : 1 }] }));
+    setTileDraft((current) => ({ ...current, [field]: [...(current[field] || []), { type, amount: noAmountEffectTypes.has(type) ? null : 1 }] }));
   };
 
   const updateEffect = (field, index, patch) => {
@@ -261,12 +282,12 @@ const AdminContentPage = () => {
     setTileDraft((current) => ({ ...current, [field]: (current[field] || []).filter((_effect, effectIndex) => effectIndex !== index) }));
   };
 
-  const togglePlayerBoardInitiation = (interactionId) => {
+  const togglePlayerBoardInitiation = (eventId) => {
     setPlayerBoardDraft((current) => {
-      const selected = new Set(current.initiates_interaction_ids || []);
-      if (selected.has(interactionId)) selected.delete(interactionId);
-      else selected.add(interactionId);
-      return { ...current, initiates_interaction_ids: Array.from(selected) };
+      const selected = new Set(current.initiates_event_ids || []);
+      if (selected.has(eventId)) selected.delete(eventId);
+      else selected.add(eventId);
+      return { ...current, initiates_event_ids: Array.from(selected) };
     });
   };
 
@@ -319,143 +340,82 @@ const AdminContentPage = () => {
 
       {error ? <p className="mb-4 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</p> : null}
 
-      <section className="grid gap-4 xl:grid-cols-[20rem_1fr]">
-        <aside className="space-y-4">
-          <div className={panel}>
-            <h2 className="font-semibold text-teal-950">Categories</h2>
-            <p className="mt-1 text-xs text-slate-500">Counter-attack is special and does not appear here.</p>
-            <div className="mt-3 flex gap-2">
-              <input className={input} value={categoryName} onChange={(event) => setCategoryName(event.target.value)} placeholder="Category name" />
-              <button className={primaryButton} disabled={busy} onClick={() => saveCategory()} type="button">Add</button>
-            </div>
-            <div className="mt-3 space-y-2">
-              {content.categories.map((category) => (
-                <div className="flex items-center gap-2 rounded-md border border-cyan-100 bg-cyan-50/70 p-2" key={category.id}>
-                  <input className="min-w-0 flex-1 bg-transparent text-sm text-teal-950 outline-none" value={category.name} onChange={(event) => setContent((current) => ({ ...current, categories: current.categories.map((item) => item.id === category.id ? { ...item, name: event.target.value } : item) }))} />
-                  <button className={subtleButton} disabled={busy} onClick={() => saveCategory(category)} type="button">Save</button>
-                  <button className={dangerButton} disabled={busy} onClick={() => deleteItem(`/api/admin/content/categories/${category.id}`, category.name)} type="button">Delete</button>
-                </div>
-              ))}
-            </div>
-          </div>
+      <nav className="mb-4 flex flex-wrap gap-2">
+        {contentTabs.map(([id, label]) => (
+          <button className={`rounded-md px-3 py-2 text-sm font-medium ${activeTab === id ? "bg-teal-500 text-white" : "border border-cyan-300 bg-white text-teal-900 hover:bg-cyan-50"}`} key={id} onClick={() => setActiveTab(id)} type="button">
+            {label}
+          </button>
+        ))}
+      </nav>
 
-          <EditorPanel title="Interaction Type">
-            <label className="block text-sm">
-              <span className="text-slate-600">Name</span>
-              <input className={`${input} mt-1`} value={interactionDraft.name} onChange={(event) => setInteractionDraft((current) => ({ ...current, name: event.target.value }))} placeholder="Charge" />
-            </label>
-            <label className="mt-3 block text-sm">
-              <span className="text-slate-600">Card symbol</span>
-              <input ref={interactionImageRef} className={`${input} mt-1 text-sm`} type="file" accept="image/png,image/jpeg,image/webp" />
-            </label>
-            <div className="mt-3 flex gap-2">
-              <button className={primaryButton} disabled={busy} onClick={saveInteraction} type="button">{interactionDraft.id ? "Update" : "Create"}</button>
-              <button className={subtleButton} onClick={resetInteraction} type="button">Clear</button>
-            </div>
-          </EditorPanel>
+      {activeTab === "map" ? <AdminMapEditor busy={busy} request={request} setBusy={setBusy} setError={setError} /> : null}
 
-          <EditorPanel title="Event / Animal">
-            <label className="block text-sm">
-              <span className="text-slate-600">Name</span>
-              <input className={`${input} mt-1`} value={eventDraft.name} onChange={(event) => setEventDraft((current) => ({ ...current, name: event.target.value }))} placeholder="Crab" />
-            </label>
-            <label className="mt-3 block text-sm">
-              <span className="text-slate-600">Category</span>
-              <select className={`${input} mt-1`} value={eventDraft.category_id} onChange={(event) => setEventDraft((current) => ({ ...current, category_id: event.target.value }))}>
-                <option value="">Select category</option>
-                {content.categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
-              </select>
-            </label>
-            <label className="mt-3 block text-sm">
-              <span className="text-slate-600">Tile image</span>
-              <input ref={eventImageRef} className={`${input} mt-1 text-sm`} type="file" accept="image/png,image/jpeg,image/webp" />
-            </label>
-            <div className="mt-3 flex gap-2">
-              <button className={primaryButton} disabled={busy} onClick={saveEvent} type="button">{eventDraft.id ? "Update" : "Create"}</button>
-              <button className={subtleButton} onClick={resetEvent} type="button">Clear</button>
-            </div>
-          </EditorPanel>
-        </aside>
+      {activeTab === "levels" ? <AdminLevelEditor busy={busy} content={content} onReload={loadContent} request={request} setBusy={setBusy} setError={setError} /> : null}
 
-        <div className="space-y-4">
-          <PlayerBoardEditor
-            boards={content.player_boards || []}
-            interactions={content.interactions}
-            draft={playerBoardDraft}
-            setDraft={setPlayerBoardDraft}
-            onSave={savePlayerBoard}
-            busy={busy}
-            onToggleInitiation={togglePlayerBoardInitiation}
-            onSetDeckCount={setDeckCount}
-            onAddUpgrade={addUpgrade}
-            onUpdateUpgrade={updateUpgrade}
-            onRemoveUpgrade={removeUpgrade}
-          />
+      {activeTab === "categories" ? (
+        <CategoryEditor
+          busy={busy}
+          categoryName={categoryName}
+          content={content}
+          deleteItem={deleteItem}
+          saveCategory={saveCategory}
+          setCategoryName={setCategoryName}
+          setContent={setContent}
+        />
+      ) : null}
 
-          <section className={panel}>
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <h2 className="font-semibold text-teal-950">Tiles</h2>
-              <button className={subtleButton} onClick={resetTile} type="button">New tile</button>
-            </div>
-            <div className="mt-4 grid gap-4 lg:grid-cols-[22rem_1fr]">
-              <div className="space-y-3">
-                <input className={input} value={tileDraft.name} onChange={(event) => setTileDraft((current) => ({ ...current, name: event.target.value }))} placeholder="Tile name" />
-                <select className={input} value={tileDraft.event_id} onChange={(event) => setTileDraft((current) => ({ ...current, event_id: event.target.value }))}>
-                  <option value="">Select event</option>
-                  {content.events.map((event) => <option key={event.id} value={event.id}>{event.name}</option>)}
-                </select>
-                <InteractionChecklist title="Required to succeed" field="interaction_ids" interactions={content.interactions} selected={tileDraft.interaction_ids} onToggle={toggleTileInteraction} />
-                <InteractionChecklist title="Optional counter-attack" field="counter_attack_interaction_ids" interactions={content.interactions} selected={tileDraft.counter_attack_interaction_ids} onToggle={toggleTileInteraction} />
-                <EffectEditor title="Success effects" field="success_effects" effects={tileDraft.success_effects} options={successEffectOptions} onAdd={addEffect} onUpdate={updateEffect} onRemove={removeEffect} />
-                <EffectEditor title="Counter-attack effects" field="counter_attack_effects" effects={tileDraft.counter_attack_effects} options={successEffectOptions} onAdd={addEffect} onUpdate={updateEffect} onRemove={removeEffect} />
-                <EffectEditor title="Failure effects" field="failure_effects" effects={tileDraft.failure_effects} options={failureEffectOptions} onAdd={addEffect} onUpdate={updateEffect} onRemove={removeEffect} />
-                <button className="w-full rounded-md bg-teal-500 px-3 py-2 text-sm font-semibold text-white hover:bg-teal-600 disabled:opacity-60" disabled={busy} onClick={saveTile} type="button">{tileDraft.id ? "Update tile" : "Create tile"}</button>
-              </div>
-              <TileList content={content} eventsById={eventsById} categoriesById={categoriesById} interactionsById={interactionsById} setTileDraft={setTileDraft} deleteItem={deleteItem} busy={busy} />
-            </div>
-          </section>
+      {activeTab === "interactions" ? (
+        <section className="grid gap-4 lg:grid-cols-[22rem_1fr]">
+          <InteractionEditor busy={busy} draft={interactionDraft} imageRef={interactionImageRef} reset={resetInteraction} save={saveInteraction} setDraft={setInteractionDraft} />
+          <ContentList title="Interactions" items={content.interactions} onEdit={setInteractionDraft} onDelete={(item) => deleteItem(`/api/admin/content/interactions/${item.id}`, item.name)} />
+        </section>
+      ) : null}
 
-          <section className="grid gap-4 lg:grid-cols-2">
-            <ContentList title="Interactions" items={content.interactions} onEdit={setInteractionDraft} onDelete={(item) => deleteItem(`/api/admin/content/interactions/${item.id}`, item.name)} />
-            <ContentList title="Events / Animals" items={content.events.map((event) => ({ ...event, subtitle: categoriesById[event.category_id]?.name || "No category" }))} onEdit={setEventDraft} onDelete={(item) => deleteItem(`/api/admin/content/events/${item.id}`, item.name)} />
-          </section>
+      {activeTab === "events" ? (
+        <section className="grid gap-4 lg:grid-cols-[22rem_1fr]">
+          <EventEditor busy={busy} categories={content.categories} draft={eventDraft} imageRef={eventImageRef} reset={resetEvent} save={saveEvent} setDraft={setEventDraft} />
+          <ContentList title="Events / Animals" items={content.events.map((event) => ({ ...event, subtitle: categoriesById[event.category_id]?.name || "No category" }))} onEdit={setEventDraft} onDelete={(item) => deleteItem(`/api/admin/content/events/${item.id}`, item.name)} />
+        </section>
+      ) : null}
 
-          <section className={panel}>
-            <h2 className="font-semibold text-teal-950">Generated Cards</h2>
-            <div className="mt-4 grid gap-3 md:grid-cols-2">
-              {content.cards.map((card) => (
-                <article className="rounded-md border border-cyan-200 bg-white p-3 shadow-sm" key={card.id}>
-                  <div className="flex items-center gap-3">
-                    {card.image_url ? <img alt="" className="h-12 w-12 rounded object-cover" src={buildApiUrl(card.image_url)} /> : null}
-                    <h3 className="font-semibold text-teal-950">{card.name}</h3>
-                  </div>
-                  <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                    {cardCategories.map((category) => {
-                      const resolved = card.resolves?.[category.id] || [];
-                      return (
-                        <div className={`rounded border p-2 ${category.special ? "border-fuchsia-200 bg-fuchsia-50" : "border-cyan-100 bg-cyan-50"}`} key={category.id}>
-                          <p className="text-xs font-semibold text-teal-900">{category.name}</p>
-                          {resolved.length ? (
-                            <div className="mt-2 flex flex-wrap gap-2">
-                              {resolved.map((entry) => (
-                                <span className="inline-flex items-center gap-1 rounded bg-white px-2 py-1 text-xs text-slate-700 shadow-sm" key={`${entry.tile_id}:${entry.event_id}:${entry.requirement_type}`}>
-                                  {entry.event_image_url ? <img alt="" className="h-5 w-5 rounded object-cover" src={buildApiUrl(entry.event_image_url)} /> : null}
-                                  {entry.event_name}
-                                </span>
-                              ))}
-                            </div>
-                          ) : <p className="mt-2 text-xs text-slate-400">None</p>}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </article>
-              ))}
-              {content.cards.length === 0 ? <p className="text-sm text-slate-500">Create interaction types to generate cards.</p> : null}
-            </div>
-          </section>
-        </div>
-      </section>
+      {activeTab === "tiles" ? (
+        <TileEditor
+          busy={busy}
+          categoriesById={categoriesById}
+          content={content}
+          deleteItem={deleteItem}
+          eventsById={eventsById}
+          interactionsById={interactionsById}
+          saveTile={saveTile}
+          setTileDraft={setTileDraft}
+          tileDraft={tileDraft}
+          toggleTileInteraction={toggleTileInteraction}
+          addEffect={addEffect}
+          updateEffect={updateEffect}
+          removeEffect={removeEffect}
+        />
+      ) : null}
+
+      {activeTab === "cards" ? <CardsView cardCategories={cardCategories} content={content} /> : null}
+
+      {activeTab === "player_boards" ? (
+        <PlayerBoardEditor
+          boards={content.player_boards || []}
+          events={content.events}
+          interactions={content.interactions}
+          eventsById={eventsById}
+          interactionsById={interactionsById}
+          draft={playerBoardDraft}
+          setDraft={setPlayerBoardDraft}
+          onSave={savePlayerBoard}
+          busy={busy}
+          onToggleInitiation={togglePlayerBoardInitiation}
+          onSetDeckCount={setDeckCount}
+          onAddUpgrade={addUpgrade}
+          onUpdateUpgrade={updateUpgrade}
+          onRemoveUpgrade={removeUpgrade}
+        />
+      ) : null}
     </div>
   );
 };
@@ -467,9 +427,139 @@ const EditorPanel = ({ title, children }) => (
   </div>
 );
 
+const CategoryEditor = ({ busy, categoryName, content, deleteItem, saveCategory, setCategoryName, setContent }) => (
+  <section className={panel}>
+    <h2 className="font-semibold text-teal-950">Categories</h2>
+    <p className="mt-1 text-xs text-slate-500">Counter-attack is special and does not appear here.</p>
+    <div className="mt-3 flex gap-2">
+      <input className={input} value={categoryName} onChange={(event) => setCategoryName(event.target.value)} placeholder="Category name" />
+      <button className={primaryButton} disabled={busy} onClick={() => saveCategory()} type="button">Add</button>
+    </div>
+    <div className="mt-3 space-y-2">
+      {content.categories.map((category) => (
+        <div className="flex items-center gap-2 rounded-md border border-cyan-100 bg-cyan-50/70 p-2" key={category.id}>
+          <input className="min-w-0 flex-1 bg-transparent text-sm text-teal-950 outline-none" value={category.name} onChange={(event) => setContent((current) => ({ ...current, categories: current.categories.map((item) => item.id === category.id ? { ...item, name: event.target.value } : item) }))} />
+          <button className={subtleButton} disabled={busy} onClick={() => saveCategory(category)} type="button">Save</button>
+          <button className={dangerButton} disabled={busy} onClick={() => deleteItem(`/api/admin/content/categories/${category.id}`, category.name)} type="button">Delete</button>
+        </div>
+      ))}
+    </div>
+  </section>
+);
+
+const InteractionEditor = ({ busy, draft, imageRef, reset, save, setDraft }) => (
+  <EditorPanel title="Interaction Type">
+    <label className="block text-sm">
+      <span className="text-slate-600">Name</span>
+      <input className={`${input} mt-1`} value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} placeholder="Charge" />
+    </label>
+    <label className="mt-3 block text-sm">
+      <span className="text-slate-600">Card symbol</span>
+      <input ref={imageRef} className={`${input} mt-1 text-sm`} type="file" accept="image/png,image/jpeg,image/webp" />
+    </label>
+    <div className="mt-3 flex gap-2">
+      <button className={primaryButton} disabled={busy} onClick={save} type="button">{draft.id ? "Update" : "Create"}</button>
+      <button className={subtleButton} onClick={reset} type="button">Clear</button>
+    </div>
+  </EditorPanel>
+);
+
+const EventEditor = ({ busy, categories, draft, imageRef, reset, save, setDraft }) => (
+  <EditorPanel title="Event / Animal">
+    <label className="block text-sm">
+      <span className="text-slate-600">Name</span>
+      <input className={`${input} mt-1`} value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} placeholder="Crab" />
+    </label>
+    <label className="mt-3 block text-sm">
+      <span className="text-slate-600">Category</span>
+      <select className={`${input} mt-1`} value={draft.category_id} onChange={(event) => setDraft((current) => ({ ...current, category_id: event.target.value }))}>
+        <option value="">Select category</option>
+        {categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
+      </select>
+    </label>
+    <label className="mt-3 block text-sm">
+      <span className="text-slate-600">Tile image</span>
+      <input ref={imageRef} className={`${input} mt-1 text-sm`} type="file" accept="image/png,image/jpeg,image/webp" />
+    </label>
+    <div className="mt-3 flex gap-2">
+      <button className={primaryButton} disabled={busy} onClick={save} type="button">{draft.id ? "Update" : "Create"}</button>
+      <button className={subtleButton} onClick={reset} type="button">Clear</button>
+    </div>
+  </EditorPanel>
+);
+
+const TileEditor = ({ addEffect, busy, categoriesById, content, deleteItem, eventsById, interactionsById, removeEffect, saveTile, setTileDraft, tileDraft, toggleTileInteraction, updateEffect }) => (
+  <section className={panel}>
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <h2 className="font-semibold text-teal-950">Tiles</h2>
+      <button className={subtleButton} onClick={() => setTileDraft(emptyTile)} type="button">New tile</button>
+    </div>
+    <div className="mt-4 grid gap-4 xl:grid-cols-[22rem_18rem_1fr]">
+      <div className="space-y-3">
+        <input className={input} value={tileDraft.name} onChange={(event) => setTileDraft((current) => ({ ...current, name: event.target.value }))} placeholder="Tile name" />
+        <select className={input} value={tileDraft.event_id} onChange={(event) => setTileDraft((current) => ({ ...current, event_id: event.target.value }))}>
+          <option value="">Select event</option>
+          {content.events.map((event) => <option key={event.id} value={event.id}>{event.name}</option>)}
+        </select>
+        <InteractionChecklist title="Required to succeed" field="interaction_ids" interactions={content.interactions} selected={tileDraft.interaction_ids} onToggle={toggleTileInteraction} />
+        <InteractionChecklist title="Optional counter-attack" field="counter_attack_interaction_ids" interactions={content.interactions} selected={tileDraft.counter_attack_interaction_ids} onToggle={toggleTileInteraction} />
+        <EffectEditor title="Success effects" field="success_effects" effects={tileDraft.success_effects} options={successEffectOptions} onAdd={addEffect} onUpdate={updateEffect} onRemove={removeEffect} />
+        <EffectEditor title="Counter-attack effects" field="counter_attack_effects" effects={tileDraft.counter_attack_effects} options={successEffectOptions} onAdd={addEffect} onUpdate={updateEffect} onRemove={removeEffect} />
+        <EffectEditor title="Failure effects" field="failure_effects" effects={tileDraft.failure_effects} options={failureEffectOptions} onAdd={addEffect} onUpdate={updateEffect} onRemove={removeEffect} />
+        <button className="w-full rounded-md bg-teal-500 px-3 py-2 text-sm font-semibold text-white hover:bg-teal-600 disabled:opacity-60" disabled={busy} onClick={saveTile} type="button">{tileDraft.id ? "Update tile" : "Create tile"}</button>
+      </div>
+      <div className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3">
+        <h3 className="mb-3 text-sm font-semibold text-teal-950">Tile preview</h3>
+        <HexTilePreview event={eventsById[tileDraft.event_id]} interactionsById={interactionsById} tile={tileDraft} />
+      </div>
+      <TileList content={content} eventsById={eventsById} categoriesById={categoriesById} interactionsById={interactionsById} setTileDraft={setTileDraft} deleteItem={deleteItem} busy={busy} />
+    </div>
+  </section>
+);
+
+const CardsView = ({ cardCategories, content }) => (
+  <section className={panel}>
+    <h2 className="font-semibold text-teal-950">Generated Cards</h2>
+    <div className="mt-4 grid gap-3 md:grid-cols-2">
+      {content.cards.map((card) => (
+        <article className="rounded-md border border-cyan-200 bg-white p-3 shadow-sm" key={card.id}>
+          <div className="flex items-center gap-3">
+            {card.image_url ? <img alt="" className="h-12 w-12 rounded object-cover" src={buildApiUrl(card.image_url)} /> : null}
+            <h3 className="font-semibold text-teal-950">{card.name}</h3>
+          </div>
+          <div className="mt-3 grid gap-2 sm:grid-cols-2">
+            {cardCategories.map((category) => {
+              const resolved = card.resolves?.[category.id] || [];
+              return (
+                <div className={`rounded border p-2 ${category.special ? "border-fuchsia-200 bg-fuchsia-50" : "border-cyan-100 bg-cyan-50"}`} key={category.id}>
+                  <p className="text-xs font-semibold text-teal-900">{category.name}</p>
+                  {resolved.length ? (
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {resolved.map((entry) => (
+                        <span className="inline-flex items-center gap-1 rounded bg-white px-2 py-1 text-xs text-slate-700 shadow-sm" key={`${entry.tile_id}:${entry.event_id}:${entry.requirement_type}`}>
+                          {entry.event_image_url ? <img alt="" className="h-5 w-5 rounded object-cover" src={buildApiUrl(entry.event_image_url)} /> : null}
+                          {entry.event_name}
+                        </span>
+                      ))}
+                    </div>
+                  ) : <p className="mt-2 text-xs text-slate-400">None</p>}
+                </div>
+              );
+            })}
+          </div>
+        </article>
+      ))}
+      {content.cards.length === 0 ? <p className="text-sm text-slate-500">Create interaction types to generate cards.</p> : null}
+    </div>
+  </section>
+);
+
 const PlayerBoardEditor = ({
   boards,
+  events,
   interactions,
+  eventsById,
+  interactionsById,
   draft,
   setDraft,
   onSave,
@@ -494,73 +584,76 @@ const PlayerBoardEditor = ({
       </div>
 
       {draft.id ? (
-        <div className="mt-4 grid gap-4 lg:grid-cols-[18rem_1fr]">
-          <div className="space-y-3">
-            <label className="block text-sm">
-              <span className="text-slate-600">Board name</span>
-              <input className={`${input} mt-1`} value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} />
-            </label>
-            <label className="block text-sm">
-              <span className="text-slate-600">Default max cards in hand</span>
-              <input className={`${input} mt-1`} min="1" type="number" value={draft.default_max_cards_in_hand || 3} onChange={(event) => setDraft((current) => ({ ...current, default_max_cards_in_hand: Number(event.target.value) }))} />
-            </label>
-            <label className="block text-sm">
-              <span className="text-slate-600">Actions per control</span>
-              <input className={`${input} mt-1`} min="1" type="number" value={draft.actions_per_control || 3} onChange={(event) => setDraft((current) => ({ ...current, actions_per_control: Number(event.target.value) }))} />
-            </label>
-            <label className="block text-sm">
-              <span className="text-slate-600">Control takes per night</span>
-              <input className={`${input} mt-1`} min="1" type="number" value={draft.control_takes_per_night || 3} onChange={(event) => setDraft((current) => ({ ...current, control_takes_per_night: Number(event.target.value) }))} />
-            </label>
-            <button className={primaryButton} disabled={busy} onClick={onSave} type="button">Save player board</button>
+        <div className="mt-4 grid gap-2 xl:grid-rows-2">
+          <div className="grid gap-4 xl:grid-cols-4">
+            <div className="space-y-3">
+              <label className="block text-sm">
+                <span className="text-slate-600">Board name</span>
+                <input className={`${input} mt-1`} value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} />
+              </label>
+              <label className="block text-sm">
+                <span className="text-slate-600">Default max cards in hand</span>
+                <input className={`${input} mt-1`} min="1" type="number" value={draft.default_max_cards_in_hand || 3} onChange={(event) => setDraft((current) => ({ ...current, default_max_cards_in_hand: Number(event.target.value) }))} />
+              </label>
+              <label className="block text-sm">
+                <span className="text-slate-600">Actions per control</span>
+                <input className={`${input} mt-1`} min="1" type="number" value={draft.actions_per_control || 3} onChange={(event) => setDraft((current) => ({ ...current, actions_per_control: Number(event.target.value) }))} />
+              </label>
+              <label className="block text-sm">
+                <span className="text-slate-600">Control takes per night</span>
+                <input className={`${input} mt-1`} min="1" type="number" value={draft.control_takes_per_night || 3} onChange={(event) => setDraft((current) => ({ ...current, control_takes_per_night: Number(event.target.value) }))} />
+              </label>
+              <button className={primaryButton} disabled={busy} onClick={onSave} type="button">Save player board</button>
+            </div>
+              <div className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3">
+                <h3 className="text-sm font-semibold text-teal-950">Can initiate</h3>
+                <div className="mt-2 space-y-2">
+                  {events.map((event) => (
+                    <label className="flex items-center gap-2 text-sm text-slate-700" key={event.id}>
+                      <input checked={(draft.initiates_event_ids || []).includes(event.id)} onChange={() => onToggleInitiation(event.id)} type="checkbox" />
+                      {imageUrl(event) ? <img alt="" className="h-7 w-7 rounded object-cover" src={imageUrl(event)} /> : null}
+                      <span className="min-w-0 truncate">{event.name}</span>
+                    </label>
+                  ))}
+                  {events.length === 0 ? <p className="text-xs text-slate-500">Create events or animals first.</p> : null}
+                </div>
+              </div>
+
+              <div className="rounded-md border border-cyan-100 bg-white p-3">
+                <h3 className="text-sm font-semibold text-teal-950">Deck</h3>
+                <div className="mt-2 space-y-2">
+                  {interactions.map((interaction) => (
+                    <label className="flex items-center justify-between gap-3 text-sm text-slate-700" key={interaction.id}>
+                      <span className="min-w-0 flex-1 truncate">{interaction.name}</span>
+                      <input className="w-20 rounded border border-cyan-200 px-2 py-1 text-sm" min="0" type="number" value={deckByInteraction[interaction.id] || 0} onChange={(event) => onSetDeckCount(interaction.id, Number(event.target.value))} />
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              <div className="rounded-md border border-cyan-100 bg-white p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="text-sm font-semibold text-teal-950">Hand upgrades</h3>
+                  <button className={subtleButton} onClick={onAddUpgrade} type="button">Add</button>
+                </div>
+                <div className="mt-2 space-y-2">
+                  {(draft.hand_size_upgrades || []).map((upgrade, index) => (
+                    <div className="grid grid-cols-[1fr_1.5rem_1.5rem_auto] gap-1 rounded bg-cyan-50 p-2" key={index}>
+                      <select className="rounded border border-cyan-200 bg-white px-2 py-1 text-xs" value={upgrade.cost_resource || "energy"} onChange={(event) => onUpdateUpgrade(index, { cost_resource: event.target.value })}>
+                        <option value="energy">Energy</option>
+                        <option value="neurons">Neurons</option>
+                      </select>
+                      <input className="rounded border border-cyan-200 py-1 text-xs" min="1" type="number" value={upgrade.cost || 1} onChange={(event) => onUpdateUpgrade(index, { cost: Number(event.target.value) })} />
+                      <input className="rounded border border-cyan-200 py-1 text-xs" min="1" type="number" value={upgrade.hand_size_bonus || 1} onChange={(event) => onUpdateUpgrade(index, { hand_size_bonus: Number(event.target.value) })} />
+                      <button className="rounded border border-rose-200 bg-white px-2 py-1 text-xs text-rose-700" onClick={() => onRemoveUpgrade(index)} type="button">Remove</button>
+                    </div>
+                  ))}
+                  {(draft.hand_size_upgrades || []).length === 0 ? <p className="text-xs text-slate-500">No hand-size upgrades.</p> : null}
+                </div>
+              </div>
           </div>
-
-          <div className="grid gap-4 xl:grid-cols-3">
-            <div className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3">
-              <h3 className="text-sm font-semibold text-teal-950">Can initiate</h3>
-              <div className="mt-2 space-y-2">
-                {interactions.map((interaction) => (
-                  <label className="flex items-center gap-2 text-sm text-slate-700" key={interaction.id}>
-                    <input checked={(draft.initiates_interaction_ids || []).includes(interaction.id)} onChange={() => onToggleInitiation(interaction.id)} type="checkbox" />
-                    {interaction.name}
-                  </label>
-                ))}
-                {interactions.length === 0 ? <p className="text-xs text-slate-500">Create interactions first.</p> : null}
-              </div>
-            </div>
-
-            <div className="rounded-md border border-cyan-100 bg-white p-3">
-              <h3 className="text-sm font-semibold text-teal-950">Deck</h3>
-              <div className="mt-2 space-y-2">
-                {interactions.map((interaction) => (
-                  <label className="flex items-center justify-between gap-3 text-sm text-slate-700" key={interaction.id}>
-                    <span className="min-w-0 flex-1 truncate">{interaction.name}</span>
-                    <input className="w-20 rounded border border-cyan-200 px-2 py-1 text-sm" min="0" type="number" value={deckByInteraction[interaction.id] || 0} onChange={(event) => onSetDeckCount(interaction.id, Number(event.target.value))} />
-                  </label>
-                ))}
-              </div>
-            </div>
-
-            <div className="rounded-md border border-cyan-100 bg-white p-3">
-              <div className="flex items-center justify-between gap-2">
-                <h3 className="text-sm font-semibold text-teal-950">Hand upgrades</h3>
-                <button className={subtleButton} onClick={onAddUpgrade} type="button">Add</button>
-              </div>
-              <div className="mt-2 space-y-2">
-                {(draft.hand_size_upgrades || []).map((upgrade, index) => (
-                  <div className="grid grid-cols-[1fr_4.5rem_4.5rem_auto] gap-2 rounded bg-cyan-50 p-2" key={index}>
-                    <select className="rounded border border-cyan-200 bg-white px-2 py-1 text-xs" value={upgrade.cost_resource || "energy"} onChange={(event) => onUpdateUpgrade(index, { cost_resource: event.target.value })}>
-                      <option value="energy">Energy</option>
-                      <option value="neurons">Neurons</option>
-                    </select>
-                    <input className="rounded border border-cyan-200 px-2 py-1 text-xs" min="1" type="number" value={upgrade.cost || 1} onChange={(event) => onUpdateUpgrade(index, { cost: Number(event.target.value) })} />
-                    <input className="rounded border border-cyan-200 px-2 py-1 text-xs" min="1" type="number" value={upgrade.hand_size_bonus || 1} onChange={(event) => onUpdateUpgrade(index, { hand_size_bonus: Number(event.target.value) })} />
-                    <button className="rounded border border-rose-200 bg-white px-2 py-1 text-xs text-rose-700" onClick={() => onRemoveUpgrade(index)} type="button">Remove</button>
-                  </div>
-                ))}
-                {(draft.hand_size_upgrades || []).length === 0 ? <p className="text-xs text-slate-500">No hand-size upgrades.</p> : null}
-              </div>
-            </div>
+          <div className="xl:grid-cols-[18rem_22rem] space-y-3">
+            <PlayerBoardPreview board={draft} eventsById={eventsById} interactionsById={interactionsById} />
           </div>
         </div>
       ) : null}
@@ -594,10 +687,10 @@ const EffectEditor = ({ title, field, effects = [], options, onAdd, onUpdate, on
     </div>
     <div className="mt-2 space-y-2">
       {effects.map((effect, index) => {
-        const needsAmount = effect.type !== "half_ap" && effect.type !== "all_ap";
+        const needsAmount = !noAmountEffectTypes.has(effect.type);
         return (
           <div className="flex items-center gap-2 rounded bg-cyan-50 p-2" key={`${effect.type}:${index}`}>
-            <select className="min-w-0 flex-1 rounded border border-cyan-200 bg-white px-2 py-1 text-xs" value={effect.type} onChange={(event) => onUpdate(field, index, { type: event.target.value, amount: event.target.value === "half_ap" || event.target.value === "all_ap" ? null : effect.amount || 1 })}>
+            <select className="min-w-0 flex-1 rounded border border-cyan-200 bg-white px-2 py-1 text-xs" value={effect.type} onChange={(event) => onUpdate(field, index, { type: event.target.value, amount: noAmountEffectTypes.has(event.target.value) ? null : effect.amount || 1 })}>
               {options.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
             </select>
             {needsAmount ? <input className="w-16 rounded border border-cyan-200 bg-white px-2 py-1 text-xs" min="1" type="number" value={effect.amount || 1} onChange={(event) => onUpdate(field, index, { amount: Number(event.target.value) })} /> : null}
@@ -616,13 +709,9 @@ const TileList = ({ content, eventsById, categoriesById, interactionsById, setTi
       const event = eventsById[tile.event_id];
       return (
         <article className="rounded-md border border-cyan-200 bg-white p-3 shadow-sm" key={tile.id}>
-          <div className="flex gap-3">
-            {imageUrl(event) ? <img alt="" className="h-14 w-14 rounded object-cover" src={imageUrl(event)} /> : null}
-            <div className="min-w-0">
-              <h3 className="truncate font-semibold text-teal-950">{tile.name}</h3>
-              <p className="text-xs text-slate-500">{event?.name || "Missing event"} - {categoriesById[event?.category_id]?.name || "No category"}</p>
-            </div>
-          </div>
+          <HexTilePreview className="max-w-[13rem]" event={event} interactionsById={interactionsById} tile={tile} />
+          <h3 className="mt-3 truncate font-semibold text-teal-950">{tile.name}</h3>
+          <p className="text-xs text-slate-500">{event?.name || "Missing event"} - {categoriesById[event?.category_id]?.name || "No category"}</p>
           <p className="mt-3 text-xs text-slate-600">Success: {(tile.interaction_ids || []).map((id) => interactionsById[id]?.name || id).join(", ")}</p>
           <p className="mt-1 text-xs text-slate-600">Counter: {(tile.counter_attack_interaction_ids || []).map((id) => interactionsById[id]?.name || id).join(", ") || "None"}</p>
           <div className="mt-3 flex gap-2">
