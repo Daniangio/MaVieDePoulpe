@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 from fastapi import WebSocket
 
+from .game_content_service import get_player_board_configs
 from .map_service import DEFAULT_MAP_ID, get_map
 from .server_models import User
 
@@ -149,18 +150,25 @@ def _setup_state(room_id: str, *, map_id: str | None = None) -> dict[str, Any]:
 
 
 def _initial_capabilities() -> dict[str, dict[str, Any]]:
-    return {
-        capability_id: {
+    board_configs = {board["id"]: board for board in get_player_board_configs()}
+    capabilities = {}
+    for capability_id in CAPABILITY_ORDER:
+        board = board_configs.get(capability_id, {})
+        capabilities[capability_id] = {
             "id": capability_id,
-            "name": CAPABILITY_NAMES[capability_id],
+            "name": board.get("name") or CAPABILITY_NAMES[capability_id],
             "pa": 0,
             "control_takes_this_night": 0,
             "actions_taken_this_control": 0,
-            "max_actions_per_control": 3,
-            "max_control_takes_per_night": 3,
+            "max_actions_per_control": int(board.get("actions_per_control") or 3),
+            "max_control_takes_per_night": int(board.get("control_takes_per_night") or 3),
+            "default_max_cards_in_hand": int(board.get("default_max_cards_in_hand") or 3),
+            "current_max_cards_in_hand": int(board.get("default_max_cards_in_hand") or 3),
+            "initiates_interaction_ids": list(board.get("initiates_interaction_ids") or []),
+            "deck": deepcopy(board.get("deck") or []),
+            "hand_size_upgrades": deepcopy(board.get("hand_size_upgrades") or []),
         }
-        for capability_id in CAPABILITY_ORDER
-    }
+    return capabilities
 
 
 def _goldfish_state(room_id: str, *, map_id: str | None = None) -> dict[str, Any]:

@@ -10,8 +10,8 @@ body,
 
 body {
   margin: 0;
-  background: #020617;
-  color: #e2e8f0;
+  background: #ecfeff;
+  color: #164e63;
   font-family:
     Inter,
     ui-sans-serif,
@@ -38,4 +38,57 @@ select {
     BlinkMacSystemFont,
     "Segoe UI",
     sans-serif;
+}
+
+@layer utilities {
+  .bg-slate-950,
+  .bg-slate-950\/95,
+  .bg-slate-950\/90,
+  .bg-slate-950\/85,
+  .bg-slate-950\/75,
+  .bg-slate-950\/60 {
+    background-color: rgb(236 254 255 / var(--tw-bg-opacity, 1));
+  }
+
+  .bg-slate-900,
+  .bg-slate-900\/95,
+  .bg-slate-900\/90,
+  .bg-slate-900\/70,
+  .bg-slate-900\/60 {
+    background-color: rgb(255 255 255 / var(--tw-bg-opacity, 1));
+  }
+
+  .bg-slate-800,
+  .bg-slate-800\/90,
+  .bg-slate-800\/70 {
+    background-color: rgb(207 250 254 / var(--tw-bg-opacity, 1));
+  }
+
+  .border-slate-800,
+  .border-slate-700,
+  .border-white\/10 {
+    border-color: rgb(165 243 252 / var(--tw-border-opacity, 1));
+  }
+
+  .text-slate-100,
+  .text-slate-200,
+  .text-slate-300,
+  .text-white {
+    color: rgb(19 78 74 / var(--tw-text-opacity, 1));
+  }
+
+  .text-slate-400,
+  .text-slate-500 {
+    color: rgb(71 85 105 / var(--tw-text-opacity, 1));
+  }
+
+  .hover\:bg-slate-950:hover,
+  .hover\:bg-slate-900:hover,
+  .hover\:bg-slate-800:hover {
+    background-color: rgb(207 250 254 / var(--tw-bg-opacity, 1));
+  }
+
+  .hover\:text-white:hover {
+    color: rgb(15 118 110 / var(--tw-text-opacity, 1));
+  }
 }

@@ -21,6 +21,16 @@ const emptyTile = {
   counter_attack_effects: [],
   failure_effects: [],
 };
+const emptyPlayerBoard = {
+  id: "",
+  name: "",
+  initiates_interaction_ids: [],
+  deck: [],
+  default_max_cards_in_hand: 3,
+  hand_size_upgrades: [],
+  actions_per_control: 3,
+  control_takes_per_night: 3,
+};
 
 const successEffectOptions = [
   ["gain_energy", "Gain energy"],
@@ -46,11 +56,12 @@ const dangerButton = "rounded-md border border-rose-300 bg-white px-3 py-2 text-
 
 const AdminContentPage = () => {
   const { token, user } = useStore();
-  const [content, setContent] = useState({ categories: [], card_categories: [], interactions: [], events: [], tiles: [], cards: [] });
+  const [content, setContent] = useState({ categories: [], card_categories: [], interactions: [], events: [], tiles: [], player_boards: [], cards: [] });
   const [categoryName, setCategoryName] = useState("");
   const [interactionDraft, setInteractionDraft] = useState(emptyInteraction);
   const [eventDraft, setEventDraft] = useState(emptyEvent);
   const [tileDraft, setTileDraft] = useState(emptyTile);
+  const [playerBoardDraft, setPlayerBoardDraft] = useState(emptyPlayerBoard);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const interactionImageRef = useRef(null);
@@ -84,6 +95,12 @@ const AdminContentPage = () => {
   useEffect(() => {
     void loadContent();
   }, [token]);
+
+  useEffect(() => {
+    if (!playerBoardDraft.id && content.player_boards?.length) {
+      setPlayerBoardDraft({ ...emptyPlayerBoard, ...content.player_boards[0] });
+    }
+  }, [content.player_boards, playerBoardDraft.id]);
 
   const resetInteraction = () => {
     setInteractionDraft(emptyInteraction);
@@ -198,6 +215,28 @@ const AdminContentPage = () => {
     }
   };
 
+  const savePlayerBoard = async () => {
+    if (!playerBoardDraft.id) return;
+    setBusy(true);
+    setError("");
+    try {
+      const form = new FormData();
+      form.set("name", playerBoardDraft.name);
+      form.set("initiates_interaction_ids_json", JSON.stringify(playerBoardDraft.initiates_interaction_ids || []));
+      form.set("deck_json", JSON.stringify((playerBoardDraft.deck || []).filter((entry) => Number(entry.count || 0) > 0)));
+      form.set("default_max_cards_in_hand", String(playerBoardDraft.default_max_cards_in_hand || 3));
+      form.set("hand_size_upgrades_json", JSON.stringify(playerBoardDraft.hand_size_upgrades || []));
+      form.set("actions_per_control", String(playerBoardDraft.actions_per_control || 3));
+      form.set("control_takes_per_night", String(playerBoardDraft.control_takes_per_night || 3));
+      await request(`/api/admin/content/player-boards/${playerBoardDraft.id}`, { method: "PUT", body: form });
+      await loadContent();
+    } catch (saveError) {
+      setError(saveError.message || "Failed to save player board.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const toggleTileInteraction = (field, interactionId) => {
     setTileDraft((current) => {
       const selected = new Set(current[field] || []);
@@ -220,6 +259,44 @@ const AdminContentPage = () => {
 
   const removeEffect = (field, index) => {
     setTileDraft((current) => ({ ...current, [field]: (current[field] || []).filter((_effect, effectIndex) => effectIndex !== index) }));
+  };
+
+  const togglePlayerBoardInitiation = (interactionId) => {
+    setPlayerBoardDraft((current) => {
+      const selected = new Set(current.initiates_interaction_ids || []);
+      if (selected.has(interactionId)) selected.delete(interactionId);
+      else selected.add(interactionId);
+      return { ...current, initiates_interaction_ids: Array.from(selected) };
+    });
+  };
+
+  const setDeckCount = (interactionId, count) => {
+    setPlayerBoardDraft((current) => {
+      const nextDeck = (current.deck || []).filter((entry) => entry.interaction_id !== interactionId);
+      if (count > 0) nextDeck.push({ interaction_id: interactionId, count });
+      return { ...current, deck: nextDeck };
+    });
+  };
+
+  const addUpgrade = () => {
+    setPlayerBoardDraft((current) => ({
+      ...current,
+      hand_size_upgrades: [...(current.hand_size_upgrades || []), { cost_resource: "energy", cost: 1, hand_size_bonus: 1 }],
+    }));
+  };
+
+  const updateUpgrade = (index, patch) => {
+    setPlayerBoardDraft((current) => ({
+      ...current,
+      hand_size_upgrades: (current.hand_size_upgrades || []).map((upgrade, upgradeIndex) => (upgradeIndex === index ? { ...upgrade, ...patch } : upgrade)),
+    }));
+  };
+
+  const removeUpgrade = (index) => {
+    setPlayerBoardDraft((current) => ({
+      ...current,
+      hand_size_upgrades: (current.hand_size_upgrades || []).filter((_upgrade, upgradeIndex) => upgradeIndex !== index),
+    }));
   };
 
   if (!user?.is_admin) {
@@ -301,6 +378,20 @@ const AdminContentPage = () => {
         </aside>
 
         <div className="space-y-4">
+          <PlayerBoardEditor
+            boards={content.player_boards || []}
+            interactions={content.interactions}
+            draft={playerBoardDraft}
+            setDraft={setPlayerBoardDraft}
+            onSave={savePlayerBoard}
+            busy={busy}
+            onToggleInitiation={togglePlayerBoardInitiation}
+            onSetDeckCount={setDeckCount}
+            onAddUpgrade={addUpgrade}
+            onUpdateUpgrade={updateUpgrade}
+            onRemoveUpgrade={removeUpgrade}
+          />
+
           <section className={panel}>
             <div className="flex flex-wrap items-center justify-between gap-3">
               <h2 className="font-semibold text-teal-950">Tiles</h2>
@@ -375,6 +466,107 @@ const EditorPanel = ({ title, children }) => (
     <div className="mt-3">{children}</div>
   </div>
 );
+
+const PlayerBoardEditor = ({
+  boards,
+  interactions,
+  draft,
+  setDraft,
+  onSave,
+  busy,
+  onToggleInitiation,
+  onSetDeckCount,
+  onAddUpgrade,
+  onUpdateUpgrade,
+  onRemoveUpgrade,
+}) => {
+  const deckByInteraction = Object.fromEntries((draft.deck || []).map((entry) => [entry.interaction_id, Number(entry.count || 0)]));
+  return (
+    <section className={panel}>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="font-semibold text-teal-950">Player Boards</h2>
+          <p className="mt-1 text-xs text-slate-500">There are always exactly five boards. Configure their decks and limits here.</p>
+        </div>
+        <select className="rounded-md border border-cyan-200 bg-white px-3 py-2 text-sm text-slate-800" value={draft.id} onChange={(event) => setDraft({ ...emptyPlayerBoard, ...(boards.find((board) => board.id === event.target.value) || {}) })}>
+          {boards.map((board) => <option key={board.id} value={board.id}>{board.name}</option>)}
+        </select>
+      </div>
+
+      {draft.id ? (
+        <div className="mt-4 grid gap-4 lg:grid-cols-[18rem_1fr]">
+          <div className="space-y-3">
+            <label className="block text-sm">
+              <span className="text-slate-600">Board name</span>
+              <input className={`${input} mt-1`} value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} />
+            </label>
+            <label className="block text-sm">
+              <span className="text-slate-600">Default max cards in hand</span>
+              <input className={`${input} mt-1`} min="1" type="number" value={draft.default_max_cards_in_hand || 3} onChange={(event) => setDraft((current) => ({ ...current, default_max_cards_in_hand: Number(event.target.value) }))} />
+            </label>
+            <label className="block text-sm">
+              <span className="text-slate-600">Actions per control</span>
+              <input className={`${input} mt-1`} min="1" type="number" value={draft.actions_per_control || 3} onChange={(event) => setDraft((current) => ({ ...current, actions_per_control: Number(event.target.value) }))} />
+            </label>
+            <label className="block text-sm">
+              <span className="text-slate-600">Control takes per night</span>
+              <input className={`${input} mt-1`} min="1" type="number" value={draft.control_takes_per_night || 3} onChange={(event) => setDraft((current) => ({ ...current, control_takes_per_night: Number(event.target.value) }))} />
+            </label>
+            <button className={primaryButton} disabled={busy} onClick={onSave} type="button">Save player board</button>
+          </div>
+
+          <div className="grid gap-4 xl:grid-cols-3">
+            <div className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3">
+              <h3 className="text-sm font-semibold text-teal-950">Can initiate</h3>
+              <div className="mt-2 space-y-2">
+                {interactions.map((interaction) => (
+                  <label className="flex items-center gap-2 text-sm text-slate-700" key={interaction.id}>
+                    <input checked={(draft.initiates_interaction_ids || []).includes(interaction.id)} onChange={() => onToggleInitiation(interaction.id)} type="checkbox" />
+                    {interaction.name}
+                  </label>
+                ))}
+                {interactions.length === 0 ? <p className="text-xs text-slate-500">Create interactions first.</p> : null}
+              </div>
+            </div>
+
+            <div className="rounded-md border border-cyan-100 bg-white p-3">
+              <h3 className="text-sm font-semibold text-teal-950">Deck</h3>
+              <div className="mt-2 space-y-2">
+                {interactions.map((interaction) => (
+                  <label className="flex items-center justify-between gap-3 text-sm text-slate-700" key={interaction.id}>
+                    <span className="min-w-0 flex-1 truncate">{interaction.name}</span>
+                    <input className="w-20 rounded border border-cyan-200 px-2 py-1 text-sm" min="0" type="number" value={deckByInteraction[interaction.id] || 0} onChange={(event) => onSetDeckCount(interaction.id, Number(event.target.value))} />
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-md border border-cyan-100 bg-white p-3">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-sm font-semibold text-teal-950">Hand upgrades</h3>
+                <button className={subtleButton} onClick={onAddUpgrade} type="button">Add</button>
+              </div>
+              <div className="mt-2 space-y-2">
+                {(draft.hand_size_upgrades || []).map((upgrade, index) => (
+                  <div className="grid grid-cols-[1fr_4.5rem_4.5rem_auto] gap-2 rounded bg-cyan-50 p-2" key={index}>
+                    <select className="rounded border border-cyan-200 bg-white px-2 py-1 text-xs" value={upgrade.cost_resource || "energy"} onChange={(event) => onUpdateUpgrade(index, { cost_resource: event.target.value })}>
+                      <option value="energy">Energy</option>
+                      <option value="neurons">Neurons</option>
+                    </select>
+                    <input className="rounded border border-cyan-200 px-2 py-1 text-xs" min="1" type="number" value={upgrade.cost || 1} onChange={(event) => onUpdateUpgrade(index, { cost: Number(event.target.value) })} />
+                    <input className="rounded border border-cyan-200 px-2 py-1 text-xs" min="1" type="number" value={upgrade.hand_size_bonus || 1} onChange={(event) => onUpdateUpgrade(index, { hand_size_bonus: Number(event.target.value) })} />
+                    <button className="rounded border border-rose-200 bg-white px-2 py-1 text-xs text-rose-700" onClick={() => onRemoveUpgrade(index)} type="button">Remove</button>
+                  </div>
+                ))}
+                {(draft.hand_size_upgrades || []).length === 0 ? <p className="text-xs text-slate-500">No hand-size upgrades.</p> : null}
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+};
 
 const InteractionChecklist = ({ title, field, interactions, selected = [], onToggle }) => (
   <div className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3">

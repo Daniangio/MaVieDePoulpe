@@ -25,6 +25,15 @@ COUNTER_ATTACK_CATEGORY_ID = "__counter_attack__"
 COUNTER_ATTACK_CATEGORY = {"id": COUNTER_ATTACK_CATEGORY_ID, "name": "Counter-attack", "special": True}
 SUCCESS_EFFECT_TYPES = {"gain_energy", "gain_neurons", "gain_seashells"}
 FAILURE_EFFECT_TYPES = {"lose_energy", "lose_neurons", "lose_seashells", "lose_ap", "half_ap", "all_ap"}
+PLAYER_BOARD_ORDER = ["agility", "camouflage", "force", "propulsion", "intelligence"]
+PLAYER_BOARD_DEFAULT_NAMES = {
+    "agility": "Agility",
+    "camouflage": "Camouflage",
+    "force": "Force",
+    "propulsion": "Propulsion",
+    "intelligence": "Intelligence",
+}
+UPGRADE_COST_RESOURCES = {"energy", "neurons"}
 
 
 def _slug(value: str) -> str:
@@ -38,6 +47,7 @@ def _empty_content() -> dict[str, Any]:
         "interactions": [],
         "events": [],
         "tiles": [],
+        "player_boards": _default_player_boards(),
     }
 
 
@@ -63,6 +73,7 @@ def _read_content() -> dict[str, Any]:
     content.setdefault("interactions", [])
     content.setdefault("events", [])
     content.setdefault("tiles", [])
+    content["player_boards"] = _normalize_player_boards(content.get("player_boards") or [])
     for tile in content["tiles"]:
         tile.setdefault("interaction_ids", [])
         tile.setdefault("counter_attack_interaction_ids", [])
@@ -70,6 +81,51 @@ def _read_content() -> dict[str, Any]:
         tile.setdefault("counter_attack_effects", [])
         tile.setdefault("failure_effects", [])
     return content
+
+
+def _default_player_boards() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": board_id,
+            "name": PLAYER_BOARD_DEFAULT_NAMES[board_id],
+            "initiates_interaction_ids": [],
+            "deck": [],
+            "default_max_cards_in_hand": 3,
+            "hand_size_upgrades": [],
+            "actions_per_control": 3,
+            "control_takes_per_night": 3,
+        }
+        for board_id in PLAYER_BOARD_ORDER
+    ]
+
+
+def _normalize_player_boards(raw_boards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_id = {str(board.get("id")): dict(board) for board in raw_boards if isinstance(board, dict)}
+    boards = []
+    for default in _default_player_boards():
+        current = {**default, **by_id.get(default["id"], {})}
+        current["id"] = default["id"]
+        current["name"] = _normalize_name(current.get("name") or default["name"])
+        current["initiates_interaction_ids"] = [str(item) for item in current.get("initiates_interaction_ids") or []]
+        current["deck"] = [
+            {"interaction_id": str(entry.get("interaction_id") or ""), "count": max(0, int(entry.get("count") or 0))}
+            for entry in current.get("deck") or []
+            if isinstance(entry, dict) and str(entry.get("interaction_id") or "")
+        ]
+        current["default_max_cards_in_hand"] = max(1, int(current.get("default_max_cards_in_hand") or 3))
+        current["hand_size_upgrades"] = [
+            {
+                "cost_resource": str(entry.get("cost_resource") or "energy"),
+                "cost": max(1, int(entry.get("cost") or 1)),
+                "hand_size_bonus": max(1, int(entry.get("hand_size_bonus") or 1)),
+            }
+            for entry in current.get("hand_size_upgrades") or []
+            if isinstance(entry, dict)
+        ]
+        current["actions_per_control"] = max(1, int(current.get("actions_per_control") or 3))
+        current["control_takes_per_night"] = max(1, int(current.get("control_takes_per_night") or 3))
+        boards.append(current)
+    return boards
 
 
 def _public_image_url(filename: str | None) -> str | None:
@@ -176,8 +232,13 @@ def get_content_state() -> dict[str, Any]:
         "interactions": [_with_urls(interaction) for interaction in content.get("interactions", [])],
         "events": [_with_urls(event) for event in content.get("events", [])],
         "tiles": [dict(tile) for tile in content.get("tiles", [])],
+        "player_boards": [dict(board) for board in content.get("player_boards", [])],
         "cards": _generated_cards(content),
     }
+
+
+def get_player_board_configs() -> list[dict[str, Any]]:
+    return [dict(board) for board in _read_content().get("player_boards", [])]
 
 
 def create_category(*, name: str) -> dict[str, Any]:
@@ -240,6 +301,10 @@ def delete_interaction(interaction_id: str) -> None:
         interaction_id in (tile.get("interaction_ids") or [])
         or interaction_id in (tile.get("counter_attack_interaction_ids") or [])
         for tile in content["tiles"]
+    ) or any(
+        interaction_id in (board.get("initiates_interaction_ids") or [])
+        or any(entry.get("interaction_id") == interaction_id for entry in board.get("deck") or [])
+        for board in content["player_boards"]
     ):
         raise ValueError("Interaction is used by one or more tiles.")
     index = _find_index(content["interactions"], interaction_id)
@@ -355,6 +420,66 @@ def delete_tile(tile_id: str) -> None:
     index = _find_index(content["tiles"], tile_id)
     del content["tiles"][index]
     _write_content(content)
+
+
+def save_player_board(
+    *,
+    board_id: str,
+    name: str,
+    initiates_interaction_ids: list[str],
+    deck: list[dict[str, Any]],
+    default_max_cards_in_hand: int,
+    hand_size_upgrades: list[dict[str, Any]],
+    actions_per_control: int,
+    control_takes_per_night: int,
+) -> dict[str, Any]:
+    content = _read_content()
+    if board_id not in PLAYER_BOARD_ORDER:
+        raise ValueError("Unknown player board.")
+    interaction_set = {interaction.get("id") for interaction in content["interactions"]}
+    normalized_initiates = _normalize_interaction_ids(initiates_interaction_ids, interaction_set)
+    normalized_deck = []
+    for entry in deck or []:
+        if not isinstance(entry, dict):
+            raise ValueError("Deck entries must be objects.")
+        interaction_id = str(entry.get("interaction_id") or "")
+        if interaction_id not in interaction_set:
+            raise ValueError("Deck references an unknown interaction.")
+        count = int(entry.get("count") or 0)
+        if count < 0:
+            raise ValueError("Deck counts cannot be negative.")
+        if count:
+            normalized_deck.append({"interaction_id": interaction_id, "count": count})
+    normalized_upgrades = []
+    for entry in hand_size_upgrades or []:
+        if not isinstance(entry, dict):
+            raise ValueError("Upgrade entries must be objects.")
+        cost_resource = str(entry.get("cost_resource") or "")
+        if cost_resource not in UPGRADE_COST_RESOURCES:
+            raise ValueError("Upgrade cost resource must be energy or neurons.")
+        cost = int(entry.get("cost") or 0)
+        hand_size_bonus = int(entry.get("hand_size_bonus") or 1)
+        if cost < 1 or hand_size_bonus < 1:
+            raise ValueError("Upgrade cost and hand size bonus must be positive.")
+        normalized_upgrades.append(
+            {"cost_resource": cost_resource, "cost": cost, "hand_size_bonus": hand_size_bonus}
+        )
+    next_board = {
+        "id": board_id,
+        "name": _normalize_name(name),
+        "initiates_interaction_ids": normalized_initiates,
+        "deck": normalized_deck,
+        "default_max_cards_in_hand": max(1, int(default_max_cards_in_hand or 3)),
+        "hand_size_upgrades": normalized_upgrades,
+        "actions_per_control": max(1, int(actions_per_control or 3)),
+        "control_takes_per_night": max(1, int(control_takes_per_night or 3)),
+    }
+    content["player_boards"] = [
+        next_board if board.get("id") == board_id else board
+        for board in _normalize_player_boards(content.get("player_boards") or [])
+    ]
+    _write_content(content)
+    return dict(next_board)
 
 
 def clear_content_images_for_tests() -> None:

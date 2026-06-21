@@ -45,3 +45,36 @@ def test_generated_cards_group_tile_events_by_category(tmp_path, monkeypatch):
     assert [entry["event_name"] for entry in cards["tighten"]["resolves"]["threat"]] == ["Shark"]
     assert cards["tighten"]["resolves"][service.COUNTER_ATTACK_CATEGORY_ID] == []
     assert service.get_content_state()["tiles"][0]["failure_effects"] == [{"type": "half_ap", "amount": None}]
+
+
+def test_player_board_config_is_fixed_to_five_boards_and_validates_interactions(tmp_path, monkeypatch):
+    monkeypatch.setattr(service, "CONTENT_ROOT", tmp_path)
+    monkeypatch.setattr(service, "CONTENT_IMAGES_ROOT", tmp_path / "images")
+    monkeypatch.setattr(service, "CONTENT_JSON_PATH", tmp_path / "content.json")
+
+    service._write_content(
+        {
+            "categories": [],
+            "interactions": [{"id": "charge", "name": "Charge", "image_filename": "charge.png"}],
+            "events": [],
+            "tiles": [],
+            "player_boards": [],
+        }
+    )
+
+    board = service.save_player_board(
+        board_id="agility",
+        name="Agility",
+        initiates_interaction_ids=["charge"],
+        deck=[{"interaction_id": "charge", "count": 4}],
+        default_max_cards_in_hand=3,
+        hand_size_upgrades=[{"cost_resource": "energy", "cost": 2, "hand_size_bonus": 1}],
+        actions_per_control=2,
+        control_takes_per_night=4,
+    )
+    state = service.get_content_state()
+
+    assert board["deck"] == [{"interaction_id": "charge", "count": 4}]
+    assert len(state["player_boards"]) == 5
+    assert state["player_boards"][0]["initiates_interaction_ids"] == ["charge"]
+    assert state["player_boards"][0]["actions_per_control"] == 2

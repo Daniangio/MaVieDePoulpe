@@ -20,6 +20,7 @@ from .game_content_service import (
     delete_tile,
     get_content_state,
     save_tile,
+    save_player_board,
     update_category,
     update_event,
     update_interaction,
@@ -509,3 +510,32 @@ async def admin_delete_tile(tile_id: str, _admin: User = Depends(require_admin))
         return {"status": "deleted"}
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.put("/admin/content/player-boards/{board_id}")
+async def admin_update_player_board(
+    board_id: str,
+    name: str = Form(...),
+    initiates_interaction_ids_json: str = Form(default="[]"),
+    deck_json: str = Form(default="[]"),
+    default_max_cards_in_hand: int = Form(default=3),
+    hand_size_upgrades_json: str = Form(default="[]"),
+    actions_per_control: int = Form(default=3),
+    control_takes_per_night: int = Form(default=3),
+    _admin: User = Depends(require_admin),
+):
+    try:
+        return save_player_board(
+            board_id=board_id,
+            name=name,
+            initiates_interaction_ids=[
+                str(item) for item in _json_form_list(initiates_interaction_ids_json, "initiates_interaction_ids_json")
+            ],
+            deck=_json_form_list(deck_json, "deck_json"),
+            default_max_cards_in_hand=default_max_cards_in_hand,
+            hand_size_upgrades=_json_form_list(hand_size_upgrades_json, "hand_size_upgrades_json"),
+            actions_per_control=actions_per_control,
+            control_takes_per_night=control_takes_per_night,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
