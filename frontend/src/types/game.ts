@@ -8,6 +8,11 @@ export type BoardNode = {
 };
 
 export type MapProjection = {
+  id?: string;
+  name?: string;
+  image_url?: string | null;
+  image_width?: number | null;
+  image_height?: number | null;
   nodes: Record<NodeId, BoardNode>;
   adjacency: Record<NodeId, NodeId[]>;
 };
@@ -25,6 +30,7 @@ export type GameProjection = {
   version: number;
   phase: "setup" | "night_action" | "game_over";
   level_id: string;
+  selected_map_id?: string;
   active_capability_id: string | null;
   last_active_capability_id: string | null;
   map: MapProjection;

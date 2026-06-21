@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
 
 from .database import SessionLocal
+from .map_service import list_maps
 from .runtime_state import get_game_room_service
 from .schemas import (
     GameCommandQueuedResponse,
@@ -33,7 +34,15 @@ async def create_game_room(
     payload: GameRoomCreateRequest,
     current_user: User = Depends(get_current_user),
 ):
-    return await _service().create_room(user=current_user, game_type=payload.game_type)
+    try:
+        return await _service().create_room(user=current_user, game_type=payload.game_type, map_id=payload.map_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/game/maps")
+async def list_game_maps(current_user: User = Depends(get_current_user)):
+    return {"maps": list_maps()}
 
 
 @router.get("/game/rooms/{room_id}", response_model=GameRoomResponse)

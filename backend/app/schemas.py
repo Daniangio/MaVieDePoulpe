@@ -63,6 +63,7 @@ class LobbyStateResponse(BaseModel):
 class GameRoomCreateRequest(BaseModel):
     mode: str = "solo"
     game_type: str = "goldfish"
+    map_id: Optional[str] = None
 
 
 class GameRoomResponse(BaseModel):
@@ -75,6 +76,7 @@ class GameRoomResponse(BaseModel):
     started_at: str
     ended_at: Optional[str] = None
     result_id: Optional[str] = None
+    map_id: Optional[str] = None
 
 
 class GameRoomJoinResponse(BaseModel):

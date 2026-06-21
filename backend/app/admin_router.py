@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+import json
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -8,6 +10,7 @@ from sqlalchemy.orm import Session
 from .database import get_db
 from .db_models import AdminAuditLogRecord, UserProfileRecord
 from .friend_service import list_friends_summary
+from .map_service import create_map, delete_map, get_map, list_maps, update_map
 from .runtime_state import get_presence_service
 from .schemas import (
     AdminAuditLogEntry,
@@ -213,3 +216,91 @@ async def admin_list_audit_logs(
 @router.get("/admin/health", response_model=AdminMutationStatus)
 async def admin_health(_admin: User = Depends(require_admin)):
     return AdminMutationStatus(status="ok", message="Admin backoffice is available.")
+
+
+def _json_form_object(value: str, label: str) -> dict:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"{label} must be valid JSON.") from exc
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=400, detail=f"{label} must be a JSON object.")
+    return parsed
+
+
+@router.get("/admin/maps")
+async def admin_list_maps(_admin: User = Depends(require_admin)):
+    return {"maps": list_maps()}
+
+
+@router.get("/admin/maps/{map_id}")
+async def admin_get_map(map_id: str, _admin: User = Depends(require_admin)):
+    try:
+        return get_map(map_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/admin/maps")
+async def admin_create_map(
+    name: str = Form(...),
+    nodes_json: str = Form(...),
+    adjacency_json: str = Form(...),
+    image_width: int | None = Form(default=None),
+    image_height: int | None = Form(default=None),
+    starting_node_id: str | None = Form(default=None),
+    image: UploadFile = File(...),
+    _admin: User = Depends(require_admin),
+):
+    try:
+        return await create_map(
+            name=name,
+            image=image,
+            nodes=_json_form_object(nodes_json, "nodes_json"),
+            adjacency=_json_form_object(adjacency_json, "adjacency_json"),
+            image_width=image_width,
+            image_height=image_height,
+            starting_node_id=starting_node_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/admin/maps/{map_id}")
+async def admin_update_map(
+    map_id: str,
+    name: str = Form(...),
+    nodes_json: str = Form(...),
+    adjacency_json: str = Form(...),
+    image_width: int | None = Form(default=None),
+    image_height: int | None = Form(default=None),
+    starting_node_id: str | None = Form(default=None),
+    image: UploadFile | None = File(default=None),
+    _admin: User = Depends(require_admin),
+):
+    try:
+        return await update_map(
+            map_id=map_id,
+            name=name,
+            image=image,
+            nodes=_json_form_object(nodes_json, "nodes_json"),
+            adjacency=_json_form_object(adjacency_json, "adjacency_json"),
+            image_width=image_width,
+            image_height=image_height,
+            starting_node_id=starting_node_id,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/admin/maps/{map_id}")
+async def admin_delete_map(map_id: str, _admin: User = Depends(require_admin)):
+    try:
+        delete_map(map_id)
+        return {"status": "deleted"}
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

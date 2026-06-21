@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { PageSubnavigation } from "../components/AuthenticatedLayout.jsx";
 import { useStore } from "../store.js";
@@ -13,6 +13,29 @@ const SoloPlayPage = () => {
   const navigate = useNavigate();
   const [error, setError] = useState("");
   const [creating, setCreating] = useState(false);
+  const [maps, setMaps] = useState([]);
+  const [selectedMapId, setSelectedMapId] = useState("default-16");
+
+  useEffect(() => {
+    const loadMaps = async () => {
+      if (!token) return;
+      try {
+        const response = await fetch(buildApiUrl("/api/game/maps"), {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.detail || "Failed to load maps.");
+        const loadedMaps = payload.maps || [];
+        setMaps(loadedMaps);
+        if (loadedMaps.length && !loadedMaps.some((entry) => entry.id === selectedMapId)) {
+          setSelectedMapId(loadedMaps[0].id);
+        }
+      } catch (loadError) {
+        setError(loadError.message || "Failed to load maps.");
+      }
+    };
+    void loadMaps();
+  }, [token]);
 
   const createQuickMatch = async () => {
     if (!token || creating) return;
@@ -25,7 +48,7 @@ const SoloPlayPage = () => {
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ mode: "solo", game_type: "goldfish" }),
+        body: JSON.stringify({ mode: "solo", game_type: "goldfish", map_id: selectedMapId }),
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.detail || "Failed to create game room.");
@@ -49,6 +72,23 @@ const SoloPlayPage = () => {
       </section>
 
       {error ? <p className="mb-4 rounded-md bg-rose-950/70 px-3 py-2 text-sm text-rose-200">{error}</p> : null}
+
+      <section className="mb-4 rounded-lg border border-slate-800 bg-slate-900 p-4">
+        <label className="block max-w-lg text-sm">
+          <span className="font-medium text-slate-300">Map</span>
+          <select
+            className="mt-2 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-white"
+            value={selectedMapId}
+            onChange={(event) => setSelectedMapId(event.target.value)}
+          >
+            {maps.map((map) => (
+              <option key={map.id} value={map.id}>
+                {map.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      </section>
 
       <section className="grid gap-4 md:grid-cols-3">
         <ModeCard

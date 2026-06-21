@@ -2,6 +2,7 @@ import asyncio
 
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from .connection_manager import ConnectionManager
 from .chat_service import ChatService
@@ -19,6 +20,7 @@ from .presence_service import PresenceService
 from .websocket_session_router import WebSocketSessionRouter
 from .websocket_gateway import WebSocketGateway
 from .runtime_state import set_connection_manager, set_game_room_service, set_presence_service
+from .map_service import MAPS_ROOT
 
 app = FastAPI()
 
@@ -38,6 +40,8 @@ app.include_router(auth_router, prefix="/api")
 app.include_router(player_router, prefix="/api")
 app.include_router(admin_router, prefix="/api")
 app.include_router(game_router, prefix="/api")
+MAPS_ROOT.mkdir(parents=True, exist_ok=True)
+app.mount("/static/maps", StaticFiles(directory=str(MAPS_ROOT)), name="maps")
 
 connection_manager = ConnectionManager()
 presence_service = PresenceService(ttl_seconds=settings.PRESENCE_TTL_SECONDS)

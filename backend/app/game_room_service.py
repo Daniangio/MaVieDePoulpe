@@ -7,11 +7,11 @@ import uuid
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import WebSocket
 
+from .map_service import DEFAULT_MAP_ID, get_map
 from .server_models import User
 
 
@@ -51,36 +51,25 @@ def _public_room(room: dict[str, Any]) -> dict[str, Any]:
         "started_at": room.get("started_at") or "",
         "ended_at": room.get("ended_at") or None,
         "result_id": room.get("result_id") or None,
+        "map_id": room.get("map_id") or DEFAULT_MAP_ID,
     }
-
-
-def _load_map_config() -> dict[str, Any]:
-    path = Path(__file__).resolve().parent / "content" / "map.json"
-    with path.open("r", encoding="utf-8") as handle:
-        config = json.load(handle)
-    _validate_map_config(config)
-    return config
 
 
 def _validate_map_config(config: dict[str, Any]) -> None:
     nodes = config.get("nodes") or {}
-    if len(nodes) != 16:
-        raise ValueError("Map config must define exactly 16 nodes.")
     starting_node_id = str(config.get("starting_node_id") or "")
     if starting_node_id not in nodes:
         raise ValueError("Map starting_node_id must reference an existing node.")
+    adjacency = config.get("adjacency") or {}
     for node_id, node in nodes.items():
         tier = int(node.get("tier") or 0)
         if tier < 1:
             raise ValueError(f"Map node {node_id} has an invalid tier.")
-        for adjacent_id in node.get("adjacent") or []:
+        for adjacent_id in adjacency.get(node_id) or []:
             if adjacent_id not in nodes:
                 raise ValueError(f"Map node {node_id} references unknown adjacent node {adjacent_id}.")
-            if node_id not in (nodes[adjacent_id].get("adjacent") or []):
+            if node_id not in (adjacency.get(adjacent_id) or []):
                 raise ValueError(f"Map adjacency must be symmetric between {node_id} and {adjacent_id}.")
-
-
-MAP_CONFIG = _load_map_config()
 
 
 @dataclass
@@ -105,43 +94,55 @@ class CommandRejection(Exception):
         return data
 
 
-def _setup_state(room_id: str) -> dict[str, Any]:
+def _setup_state(room_id: str, *, map_id: str | None = None) -> dict[str, Any]:
     return {
         "room_id": room_id,
         "mode": "goldfish",
         "version": 0,
         "phase": PHASE_SETUP,
         "level_id": "goldfish_movement",
+        "selected_map_id": map_id or DEFAULT_MAP_ID,
         "active_capability_id": None,
         "last_active_capability_id": None,
-        "map": {"nodes": {}, "adjacency": {}},
+        "map": {"nodes": {}, "adjacency": {}, "image_url": None, "image_width": None, "image_height": None},
         "poulpita": {"node_id": None, "previous_node_id": None},
         "event_log": [],
     }
 
 
-def _goldfish_state(room_id: str) -> dict[str, Any]:
+def _goldfish_state(room_id: str, *, map_id: str | None = None) -> dict[str, Any]:
+    map_config = get_map(map_id)
+    _validate_map_config(map_config)
     nodes = {}
     adjacency = {}
-    for node_id, node in MAP_CONFIG["nodes"].items():
+    for node_id, node in map_config["nodes"].items():
         nodes[node_id] = {
             "id": node_id,
             "tier": int(node["tier"]),
-            "x": int(node.get("x") or 0),
-            "y": int(node.get("y") or 0),
+            "x": float(node.get("x") or 0),
+            "y": float(node.get("y") or 0),
         }
-        adjacency[node_id] = list(node.get("adjacent") or [])
+        adjacency[node_id] = list((map_config.get("adjacency") or {}).get(node_id) or [])
     return {
         "room_id": room_id,
         "mode": "goldfish",
         "version": 1,
         "phase": PHASE_NIGHT_ACTION,
         "level_id": "goldfish_movement",
+        "selected_map_id": map_config["id"],
         "active_capability_id": DEFAULT_ACTIVE_CAPABILITY_ID,
         "last_active_capability_id": None,
-        "map": {"nodes": nodes, "adjacency": adjacency},
+        "map": {
+            "id": map_config["id"],
+            "name": map_config["name"],
+            "nodes": nodes,
+            "adjacency": adjacency,
+            "image_url": map_config.get("image_url"),
+            "image_width": map_config.get("image_width"),
+            "image_height": map_config.get("image_height"),
+        },
         "poulpita": {
-            "node_id": str(MAP_CONFIG["starting_node_id"]),
+            "node_id": str(map_config["starting_node_id"]),
             "previous_node_id": None,
         },
         "event_log": [
@@ -164,6 +165,7 @@ def _project_state(state: dict[str, Any]) -> dict[str, Any]:
         "version": int(state["version"]),
         "phase": state["phase"],
         "level_id": state["level_id"],
+        "selected_map_id": state.get("selected_map_id") or DEFAULT_MAP_ID,
         "active_capability_id": state.get("active_capability_id"),
         "last_active_capability_id": state.get("last_active_capability_id"),
         "map": deepcopy(state["map"]),
@@ -185,8 +187,9 @@ class GameRoomService:
     def configure_redis(self, redis_client) -> None:
         self.redis = redis_client
 
-    async def create_room(self, *, user: User, game_type: str = "goldfish") -> dict[str, Any]:
+    async def create_room(self, *, user: User, game_type: str = "goldfish", map_id: str | None = None) -> dict[str, Any]:
         normalized_game_type = str(game_type or "goldfish").strip() or "goldfish"
+        selected_map = get_map(map_id)
         room_id = f"room_{uuid.uuid4().hex[:16]}"
         now = _now_iso()
         room = {
@@ -200,9 +203,10 @@ class GameRoomService:
             "started_at": "",
             "ended_at": "",
             "result_id": "",
+            "map_id": selected_map["id"],
         }
         self._memory_rooms[room_id] = room
-        self._memory_states[room_id] = _setup_state(room_id)
+        self._memory_states[room_id] = _setup_state(room_id, map_id=selected_map["id"])
         self._room_locks[room_id] = asyncio.Lock()
         return _public_room(room)
 
@@ -244,7 +248,7 @@ class GameRoomService:
         async with lock:
             state = self._memory_states[room_id]
             try:
-                next_state, events = self._reduce(state, command, user=user, room_id=room_id)
+                next_state, events = self._reduce(state, command, user=user, room_id=room_id, room=room)
             except CommandRejection as rejection:
                 return rejection.payload(_project_state(state))
             self._memory_states[room_id] = next_state
@@ -278,6 +282,7 @@ class GameRoomService:
         *,
         user: User,
         room_id: str,
+        room: dict[str, Any],
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         command_id = str(command.get("command_id") or "").strip() or f"cmd_{uuid.uuid4().hex}"
         command_type = str(command.get("type") or "").strip()
@@ -304,7 +309,7 @@ class GameRoomService:
         if command_type == "start_goldfish_game":
             if state["phase"] != PHASE_SETUP:
                 self._reject(state, command_id, "game_already_started", "This goldfish game has already started.")
-            next_state = _goldfish_state(room_id)
+            next_state = _goldfish_state(room_id, map_id=room.get("map_id") or state.get("selected_map_id"))
             event = next_state["event_log"][0]
             return next_state, [event]
 
@@ -390,7 +395,7 @@ class GameRoomService:
         if room.get("state") == ROOM_STATE_FINISHED:
             return await self.get_result(room_id=room_id, user_id=user_id)
         now = _now_iso()
-        state = self._memory_states.get(room_id) or _setup_state(room_id)
+        state = self._memory_states.get(room_id) or _setup_state(room_id, map_id=room.get("map_id"))
         result = {
             "id": room_id,
             "room_id": room_id,
