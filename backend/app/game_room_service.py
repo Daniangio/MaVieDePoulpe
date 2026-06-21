@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import time
 import uuid
 from copy import deepcopy
@@ -11,7 +12,7 @@ from typing import Any, Optional
 
 from fastapi import WebSocket
 
-from .game_content_service import get_player_board_configs
+from .game_content_service import get_game_content_catalog, get_level_config, get_player_board_configs
 from .map_service import get_map
 from .server_models import User
 
@@ -63,6 +64,7 @@ def _public_room(room: dict[str, Any]) -> dict[str, Any]:
         "ended_at": room.get("ended_at") or None,
         "result_id": room.get("result_id") or None,
         "map_id": room.get("map_id") or "",
+        "level_id": room.get("level_id") or "",
     }
 
 
@@ -127,15 +129,17 @@ class CommandRejection(Exception):
         return data
 
 
-def _setup_state(room_id: str, *, map_id: str | None = None) -> dict[str, Any]:
-    map_config = get_map(map_id)
+def _setup_state(room_id: str, *, level_id: str | None = None) -> dict[str, Any]:
+    level_config = get_level_config(level_id)
+    map_config = get_map(level_config["map_id"])
     _validate_map_config(map_config)
     return {
         "room_id": room_id,
         "mode": "goldfish",
         "version": 0,
         "phase": PHASE_SETUP,
-        "level_id": "goldfish_movement",
+        "level_id": level_config["id"],
+        "selected_level_id": level_config["id"],
         "day_index": 1,
         "night_time_spent": 0,
         "selected_map_id": map_config["id"],
@@ -145,15 +149,31 @@ def _setup_state(room_id: str, *, map_id: str | None = None) -> dict[str, Any]:
         "map": _map_projection(map_config),
         "poulpita": {"node_id": None, "previous_node_id": None, "energy": 0, "neurons": 0, "seashells": 0},
         "capabilities": _initial_capabilities(),
+        "tiles": {},
+        "tile_catalog": {},
+        "interaction": None,
         "event_log": [],
     }
 
 
-def _initial_capabilities() -> dict[str, dict[str, Any]]:
+def _expand_deck(deck_config: list[dict[str, Any]], capability_id: str) -> list[dict[str, Any]]:
+    cards = []
+    for entry in deck_config or []:
+        interaction_id = str(entry.get("interaction_id") or "")
+        for _index in range(max(0, int(entry.get("count") or 0))):
+            cards.append({"card_id": f"card_{uuid.uuid4().hex}", "interaction_id": interaction_id, "owner_capability_id": capability_id})
+    random.shuffle(cards)
+    return cards
+
+
+def _initial_capabilities(*, deal_hands: bool = False) -> dict[str, dict[str, Any]]:
     board_configs = {board["id"]: board for board in get_player_board_configs()}
     capabilities = {}
     for capability_id in CAPABILITY_ORDER:
         board = board_configs.get(capability_id, {})
+        draw_pile = _expand_deck(board.get("deck") or [], capability_id)
+        hand_limit = int(board.get("default_max_cards_in_hand") or 3)
+        hand = draw_pile[:hand_limit] if deal_hands else []
         capabilities[capability_id] = {
             "id": capability_id,
             "name": board.get("name") or CAPABILITY_NAMES[capability_id],
@@ -166,20 +186,61 @@ def _initial_capabilities() -> dict[str, dict[str, Any]]:
             "current_max_cards_in_hand": int(board.get("default_max_cards_in_hand") or 3),
             "initiates_event_ids": list(board.get("initiates_event_ids") or []),
             "deck": deepcopy(board.get("deck") or []),
+            "draw_pile": draw_pile[hand_limit:] if deal_hands else draw_pile,
+            "hand": hand,
+            "discard": [],
             "hand_size_upgrades": deepcopy(board.get("hand_size_upgrades") or []),
         }
     return capabilities
 
 
-def _goldfish_state(room_id: str, *, map_id: str | None = None) -> dict[str, Any]:
-    map_config = get_map(map_id)
+def _tile_public(tile: dict[str, Any], catalog: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    event = catalog["events"].get(tile.get("event_id")) or {}
+    return {
+        **tile,
+        "event": event,
+        "image_url": event.get("image_url"),
+    }
+
+
+def _build_tile_catalog() -> dict[str, Any]:
+    catalog = get_game_content_catalog()
+    public_tiles = {}
+    for tile_id, tile in catalog["tiles"].items():
+        public_tiles[tile_id] = _tile_public(tile, catalog)
+    return {"tiles": public_tiles, "events": catalog["events"], "interactions": catalog["interactions"]}
+
+
+def _level_tiles(level_config: dict[str, Any], catalog: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    node_tiles = {node_id: [] for node_id in level_config.get("node_tile_counts") or {}}
+    for group in level_config.get("groups") or []:
+        expanded = []
+        for tile_id, count in (group.get("tile_counts") or {}).items():
+            for _index in range(max(0, int(count or 0))):
+                tile = catalog["tiles"].get(tile_id)
+                if tile:
+                    expanded.append({"instance_id": f"tile_{uuid.uuid4().hex}", "tile_id": tile_id, "face_up": True})
+        random.shuffle(expanded)
+        group_node_ids = [node_id for node_id, group_id in (level_config.get("node_group_ids") or {}).items() if group_id == group["id"]]
+        for node_id in group_node_ids:
+            count = int((level_config.get("node_tile_counts") or {}).get(node_id) or 0)
+            node_tiles.setdefault(node_id, []).extend(expanded[:count])
+            expanded = expanded[count:]
+    return node_tiles
+
+
+def _goldfish_state(room_id: str, *, level_id: str | None = None) -> dict[str, Any]:
+    level_config = get_level_config(level_id)
+    map_config = get_map(level_config["map_id"])
     _validate_map_config(map_config)
+    tile_catalog = _build_tile_catalog()
     return {
         "room_id": room_id,
         "mode": "goldfish",
         "version": 1,
         "phase": PHASE_NIGHT_IDLE,
-        "level_id": "goldfish_movement",
+        "level_id": level_config["id"],
+        "selected_level_id": level_config["id"],
         "day_index": 1,
         "night_time_spent": 0,
         "selected_map_id": map_config["id"],
@@ -194,7 +255,10 @@ def _goldfish_state(room_id: str, *, map_id: str | None = None) -> dict[str, Any
             "neurons": 0,
             "seashells": 0,
         },
-        "capabilities": _initial_capabilities(),
+        "capabilities": _initial_capabilities(deal_hands=True),
+        "tiles": _level_tiles(level_config, tile_catalog),
+        "tile_catalog": tile_catalog,
+        "interaction": None,
         "event_log": [
             {
                 "event_id": f"evt_{uuid.uuid4().hex}",
@@ -218,6 +282,7 @@ def _project_state(state: dict[str, Any]) -> dict[str, Any]:
         "version": int(state["version"]),
         "phase": state["phase"],
         "level_id": state["level_id"],
+        "selected_level_id": state.get("selected_level_id") or state.get("level_id"),
         "day_index": int(state.get("day_index") or 1),
         "night_time_spent": int(state.get("night_time_spent") or 0),
         "selected_map_id": state.get("selected_map_id") or "",
@@ -238,8 +303,92 @@ def _project_state(state: dict[str, Any]) -> dict[str, Any]:
         "player_boards": player_boards,
         "map": deepcopy(state["map"]),
         "poulpita": deepcopy(state["poulpita"]),
+        "tiles": deepcopy(state.get("tiles") or {}),
+        "tile_catalog": deepcopy(state.get("tile_catalog") or {}),
+        "interaction": deepcopy(state.get("interaction")),
         "events": list(state.get("event_log") or [])[-20:],
     }
+
+
+def _require_active_action(service: "GameRoomService", state: dict[str, Any], command_id: str, capability_id: str, *, ap_cost: int = 0) -> dict[str, Any]:
+    if state["phase"] != PHASE_NIGHT_ACTION:
+        service._reject(state, command_id, "phase_not_actionable", "Take control before taking actions.")
+    if capability_id != state.get("active_capability_id"):
+        service._reject(state, command_id, "not_active_capability", "Only the active capability can take this action.")
+    capability = (state.get("capabilities") or {}).get(capability_id)
+    if capability is None:
+        service._reject(state, command_id, "unknown_capability", "Unknown capability.")
+    if int(capability.get("pa") or 0) < ap_cost:
+        service._reject(state, command_id, "insufficient_pa", f"This action costs {ap_cost} AP.")
+    if int(capability.get("actions_taken_this_control") or 0) >= int(capability.get("max_actions_per_control") or 3):
+        service._reject(state, command_id, "action_limit_reached", "This capability has already taken all actions during this control.")
+    return capability
+
+
+def _spend_action(next_state: dict[str, Any], capability_id: str, *, ap_cost: int = 0) -> None:
+    capability = next_state["capabilities"][capability_id]
+    capability["pa"] = int(capability.get("pa") or 0) - ap_cost
+    capability["actions_taken_this_control"] = int(capability.get("actions_taken_this_control") or 0) + 1
+
+
+def _find_tile_instance(state: dict[str, Any], tile_instance_id: str) -> tuple[str, dict[str, Any]] | tuple[None, None]:
+    for node_id, tiles in (state.get("tiles") or {}).items():
+        for tile_instance in tiles or []:
+            if tile_instance.get("instance_id") == tile_instance_id:
+                return node_id, tile_instance
+    return None, None
+
+
+def _played_interactions(state: dict[str, Any]) -> list[str]:
+    interactions = []
+    for card in ((state.get("interaction") or {}).get("played_cards") or []):
+        interactions.append(str(card.get("interaction_id") or ""))
+    return interactions
+
+
+def _criteria_met(required: list[str], played: list[str]) -> bool:
+    remaining = list(required or [])
+    for interaction_id in played:
+        if interaction_id in remaining:
+            remaining.remove(interaction_id)
+    return not remaining
+
+
+def _apply_effects(next_state: dict[str, Any], effects: list[dict[str, Any]]) -> None:
+    for effect in effects or []:
+        effect_type = str(effect.get("type") or "")
+        amount = int(effect.get("amount") or 0)
+        if effect_type == "gain_energy":
+            next_state["poulpita"]["energy"] = int(next_state["poulpita"].get("energy") or 0) + amount
+        elif effect_type == "gain_neurons":
+            next_state["poulpita"]["neurons"] = int(next_state["poulpita"].get("neurons") or 0) + amount
+        elif effect_type == "gain_seashells":
+            next_state["poulpita"]["seashells"] = int(next_state["poulpita"].get("seashells") or 0) + amount
+
+
+def _apply_failure_effects(next_state: dict[str, Any], effects: list[dict[str, Any]], interaction: dict[str, Any]) -> None:
+    for effect in effects or []:
+        effect_type = str(effect.get("type") or "")
+        amount = int(effect.get("amount") or 0)
+        if effect_type == "lose_energy":
+            next_state["poulpita"]["energy"] = max(0, int(next_state["poulpita"].get("energy") or 0) - amount)
+        elif effect_type == "lose_neurons":
+            next_state["poulpita"]["neurons"] = max(0, int(next_state["poulpita"].get("neurons") or 0) - amount)
+        elif effect_type == "lose_seashells":
+            next_state["poulpita"]["seashells"] = max(0, int(next_state["poulpita"].get("seashells") or 0) - amount)
+        elif effect_type == "lose_ap":
+            for capability in (next_state.get("capabilities") or {}).values():
+                capability["pa"] = max(0, int(capability.get("pa") or 0) - amount)
+        elif effect_type == "half_ap":
+            for capability in (next_state.get("capabilities") or {}).values():
+                capability["pa"] = max(0, int(capability.get("pa") or 0) // 2)
+        elif effect_type == "all_ap":
+            for capability in (next_state.get("capabilities") or {}).values():
+                capability["pa"] = 0
+        elif effect_type == "remove_tile":
+            node_id = interaction.get("node_id")
+            node_tiles = next_state.get("tiles", {}).get(node_id) or []
+            next_state["tiles"][node_id] = [entry for entry in node_tiles if entry.get("instance_id") != interaction.get("tile_instance_id")]
 
 
 class GameRoomService:
@@ -255,9 +404,10 @@ class GameRoomService:
     def configure_redis(self, redis_client) -> None:
         self.redis = redis_client
 
-    async def create_room(self, *, user: User, game_type: str = "goldfish", map_id: str | None = None) -> dict[str, Any]:
+    async def create_room(self, *, user: User, game_type: str = "goldfish", map_id: str | None = None, level_id: str | None = None) -> dict[str, Any]:
         normalized_game_type = str(game_type or "goldfish").strip() or "goldfish"
-        selected_map = get_map(map_id)
+        selected_level = get_level_config(level_id)
+        selected_map = get_map(selected_level["map_id"])
         room_id = f"room_{uuid.uuid4().hex[:16]}"
         now = _now_iso()
         room = {
@@ -272,9 +422,10 @@ class GameRoomService:
             "ended_at": "",
             "result_id": "",
             "map_id": selected_map["id"],
+            "level_id": selected_level["id"],
         }
         self._memory_rooms[room_id] = room
-        self._memory_states[room_id] = _setup_state(room_id, map_id=selected_map["id"])
+        self._memory_states[room_id] = _setup_state(room_id, level_id=selected_level["id"])
         self._room_locks[room_id] = asyncio.Lock()
         return _public_room(room)
 
@@ -377,31 +528,36 @@ class GameRoomService:
         if command_type == "start_goldfish_game":
             if state["phase"] != PHASE_SETUP:
                 self._reject(state, command_id, "game_already_started", "This goldfish game has already started.")
-            next_state = _goldfish_state(room_id, map_id=room.get("map_id") or state.get("selected_map_id"))
+            next_state = _goldfish_state(room_id, level_id=room.get("level_id") or state.get("selected_level_id"))
             event = next_state["event_log"][0]
             return next_state, [event]
 
-        if command_type == "select_map":
+        if command_type == "select_level":
             if state["phase"] != PHASE_SETUP:
-                self._reject(state, command_id, "game_already_started", "Map can be changed only before the game starts.")
+                self._reject(state, command_id, "game_already_started", "Level can be changed only before the game starts.")
             payload = command.get("payload") or {}
             if not isinstance(payload, dict):
                 self._reject(state, command_id, "invalid_payload", "Command payload must be an object.")
-            map_id = str(payload.get("map_id") or "")
+            level_id = str(payload.get("level_id") or "")
             try:
-                map_config = get_map(map_id)
+                level_config = get_level_config(level_id)
+                map_config = get_map(level_config["map_id"])
                 _validate_map_config(map_config)
             except (LookupError, ValueError):
-                self._reject(state, command_id, "unknown_map", "Selected map does not exist or is invalid.")
+                self._reject(state, command_id, "unknown_level", "Selected level does not exist or is invalid.")
             next_state = deepcopy(state)
             next_state["version"] = int(state["version"]) + 1
+            next_state["level_id"] = level_config["id"]
+            next_state["selected_level_id"] = level_config["id"]
             next_state["selected_map_id"] = map_config["id"]
             next_state["map"] = _map_projection(map_config)
             room["map_id"] = map_config["id"]
+            room["level_id"] = level_config["id"]
             event = {
                 "event_id": f"evt_{uuid.uuid4().hex}",
-                "type": "map_selected",
+                "type": "level_selected",
                 "command_id": command_id,
+                "level_id": level_config["id"],
                 "map_id": map_config["id"],
                 "version": int(next_state["version"]),
                 "created_at": _now_iso(),
@@ -417,15 +573,7 @@ class GameRoomService:
                 self._reject(state, command_id, "invalid_payload", "Command payload must be an object.")
             capability_id = str(payload.get("capability_id") or "")
             target_node_id = str(payload.get("target_node_id") or "")
-            if capability_id != state.get("active_capability_id"):
-                self._reject(state, command_id, "not_active_capability", "Only the active capability can move Poulpita.")
-            capability = (state.get("capabilities") or {}).get(capability_id)
-            if capability is None:
-                self._reject(state, command_id, "unknown_capability", "Unknown capability.")
-            if int(capability.get("pa") or 0) < 1:
-                self._reject(state, command_id, "insufficient_pa", "Moving costs 1 AP.")
-            if int(capability.get("actions_taken_this_control") or 0) >= int(capability.get("max_actions_per_control") or 3):
-                self._reject(state, command_id, "action_limit_reached", "This capability has already taken 3 actions during this control.")
+            _require_active_action(self, state, command_id, capability_id, ap_cost=1)
             nodes = state["map"]["nodes"]
             if target_node_id not in nodes:
                 self._reject(state, command_id, "unknown_target_node", "Target node does not exist.")
@@ -436,9 +584,7 @@ class GameRoomService:
             next_state["version"] = int(state["version"]) + 1
             next_state["poulpita"]["previous_node_id"] = current_node_id
             next_state["poulpita"]["node_id"] = target_node_id
-            next_capability = next_state["capabilities"][capability_id]
-            next_capability["pa"] = int(next_capability.get("pa") or 0) - 1
-            next_capability["actions_taken_this_control"] = int(next_capability.get("actions_taken_this_control") or 0) + 1
+            _spend_action(next_state, capability_id, ap_cost=1)
             next_state["night_time_spent"] = int(next_state.get("night_time_spent") or 0) + 1
             event = {
                 "event_id": f"evt_{uuid.uuid4().hex}",
@@ -491,20 +637,12 @@ class GameRoomService:
             return next_state, [event]
 
         if command_type == "collect_action_points":
-            if state["phase"] != PHASE_NIGHT_ACTION:
-                self._reject(state, command_id, "phase_not_actionable", "Take control before collecting AP.")
             payload = command.get("payload") or {}
             if not isinstance(payload, dict):
                 self._reject(state, command_id, "invalid_payload", "Command payload must be an object.")
             capability_id = str(payload.get("capability_id") or "")
-            if capability_id != state.get("active_capability_id"):
-                self._reject(state, command_id, "not_active_capability", "Only the active capability can collect AP.")
-            capability = (state.get("capabilities") or {}).get(capability_id)
-            if capability is None:
-                self._reject(state, command_id, "unknown_capability", "Unknown capability.")
-            if int(capability.get("actions_taken_this_control") or 0) >= int(capability.get("max_actions_per_control") or 3):
-                self._reject(state, command_id, "action_limit_reached", "This capability has already taken 3 actions during this control.")
-            amount = 1
+            _require_active_action(self, state, command_id, capability_id)
+            amount = random.randint(1, 6)
             next_state = deepcopy(state)
             next_state["version"] = int(state["version"]) + 1
             next_capability = next_state["capabilities"][capability_id]
@@ -516,6 +654,160 @@ class GameRoomService:
                 "command_id": command_id,
                 "capability_id": capability_id,
                 "amount": amount,
+                "version": int(next_state["version"]),
+                "created_at": _now_iso(),
+            }
+            next_state.setdefault("event_log", []).append(event)
+            return next_state, [event]
+
+        if command_type == "draw_action_card":
+            payload = command.get("payload") or {}
+            if not isinstance(payload, dict):
+                self._reject(state, command_id, "invalid_payload", "Command payload must be an object.")
+            capability_id = str(payload.get("capability_id") or "")
+            capability = _require_active_action(self, state, command_id, capability_id, ap_cost=1)
+            if len(capability.get("hand") or []) >= int(capability.get("current_max_cards_in_hand") or 3):
+                self._reject(state, command_id, "hand_limit_reached", "Drawing would exceed this ability hand limit.")
+            if not (capability.get("draw_pile") or []):
+                self._reject(state, command_id, "empty_deck", "This ability has no cards left to draw.")
+            next_state = deepcopy(state)
+            next_capability = next_state["capabilities"][capability_id]
+            card = next_capability["draw_pile"].pop(0)
+            next_capability.setdefault("hand", []).append(card)
+            _spend_action(next_state, capability_id, ap_cost=1)
+            next_state["version"] = int(state["version"]) + 1
+            event = {
+                "event_id": f"evt_{uuid.uuid4().hex}",
+                "type": "action_card_drawn",
+                "command_id": command_id,
+                "capability_id": capability_id,
+                "interaction_id": card.get("interaction_id"),
+                "version": int(next_state["version"]),
+                "created_at": _now_iso(),
+            }
+            next_state.setdefault("event_log", []).append(event)
+            return next_state, [event]
+
+        if command_type == "start_interaction":
+            payload = command.get("payload") or {}
+            if not isinstance(payload, dict):
+                self._reject(state, command_id, "invalid_payload", "Command payload must be an object.")
+            capability_id = str(payload.get("capability_id") or "")
+            tile_instance_id = str(payload.get("tile_instance_id") or "")
+            _require_active_action(self, state, command_id, capability_id)
+            if state.get("interaction"):
+                self._reject(state, command_id, "interaction_already_active", "Resolve or fail the current interaction first.")
+            node_id, tile_instance = _find_tile_instance(state, tile_instance_id)
+            if not tile_instance:
+                self._reject(state, command_id, "unknown_tile", "Tile not found.")
+            if node_id != state.get("poulpita", {}).get("node_id"):
+                self._reject(state, command_id, "tile_not_on_poulpita_node", "Poulpita must be on the tile node.")
+            tile = (state.get("tile_catalog") or {}).get("tiles", {}).get(tile_instance.get("tile_id"))
+            if not tile:
+                self._reject(state, command_id, "unknown_tile", "Tile definition not found.")
+            capability = (state.get("capabilities") or {}).get(capability_id) or {}
+            if tile.get("event_id") not in (capability.get("initiates_event_ids") or []):
+                self._reject(state, command_id, "cannot_initiate_interaction", "This ability cannot initiate interaction with this event.")
+            next_state = deepcopy(state)
+            next_state["interaction"] = {
+                "tile_instance_id": tile_instance_id,
+                "tile_id": tile_instance.get("tile_id"),
+                "node_id": node_id,
+                "initiator_capability_id": capability_id,
+                "played_cards": [],
+            }
+            next_state["version"] = int(state["version"]) + 1
+            event = {
+                "event_id": f"evt_{uuid.uuid4().hex}",
+                "type": "interaction_started",
+                "command_id": command_id,
+                "capability_id": capability_id,
+                "tile_instance_id": tile_instance_id,
+                "version": int(next_state["version"]),
+                "created_at": _now_iso(),
+            }
+            next_state.setdefault("event_log", []).append(event)
+            return next_state, [event]
+
+        if command_type in {"play_interaction_card", "withdraw_interaction_card"}:
+            payload = command.get("payload") or {}
+            if not isinstance(payload, dict):
+                self._reject(state, command_id, "invalid_payload", "Command payload must be an object.")
+            capability_id = str(payload.get("capability_id") or "")
+            card_id = str(payload.get("card_id") or "")
+            if capability_id != state.get("active_capability_id"):
+                self._reject(state, command_id, "not_active_capability", "Only the active capability can play or withdraw cards.")
+            if not state.get("interaction"):
+                self._reject(state, command_id, "no_active_interaction", "No interaction is active.")
+            next_state = deepcopy(state)
+            next_interaction = next_state["interaction"]
+            capability = next_state["capabilities"].get(capability_id)
+            if capability is None:
+                self._reject(state, command_id, "unknown_capability", "Unknown capability.")
+            if command_type == "play_interaction_card":
+                card = next((entry for entry in capability.get("hand") or [] if entry.get("card_id") == card_id), None)
+                if card is None:
+                    self._reject(state, command_id, "unknown_card", "Card is not in this ability hand.")
+                capability["hand"] = [entry for entry in capability.get("hand") or [] if entry.get("card_id") != card_id]
+                next_interaction.setdefault("played_cards", []).append({**card, "capability_id": capability_id})
+                event_type = "interaction_card_played"
+            else:
+                card = next((entry for entry in next_interaction.get("played_cards") or [] if entry.get("card_id") == card_id and entry.get("capability_id") == capability_id), None)
+                if card is None:
+                    self._reject(state, command_id, "unknown_played_card", "This played card cannot be withdrawn by the active ability.")
+                next_interaction["played_cards"] = [entry for entry in next_interaction.get("played_cards") or [] if entry.get("card_id") != card_id]
+                capability.setdefault("hand", []).append({"card_id": card["card_id"], "interaction_id": card["interaction_id"], "owner_capability_id": capability_id})
+                event_type = "interaction_card_withdrawn"
+            next_state["version"] = int(state["version"]) + 1
+            event = {
+                "event_id": f"evt_{uuid.uuid4().hex}",
+                "type": event_type,
+                "command_id": command_id,
+                "capability_id": capability_id,
+                "card_id": card_id,
+                "version": int(next_state["version"]),
+                "created_at": _now_iso(),
+            }
+            next_state.setdefault("event_log", []).append(event)
+            return next_state, [event]
+
+        if command_type in {"resolve_interaction", "fail_interaction"}:
+            if not state.get("interaction"):
+                self._reject(state, command_id, "no_active_interaction", "No interaction is active.")
+            interaction = state["interaction"]
+            tile = (state.get("tile_catalog") or {}).get("tiles", {}).get(interaction.get("tile_id")) or {}
+            next_state = deepcopy(state)
+            success = False
+            counter_success = False
+            if command_type == "resolve_interaction":
+                played = _played_interactions(state)
+                success = _criteria_met(tile.get("interaction_ids") or [], played)
+                counter_required = tile.get("counter_attack_interaction_ids") or []
+                counter_success = success and bool(counter_required) and _criteria_met(counter_required, played)
+                if not success:
+                    self._reject(state, command_id, "interaction_incomplete", "Required cards for normal success are missing.")
+                _apply_effects(next_state, tile.get("success_effects") or [])
+                if counter_success:
+                    _apply_effects(next_state, tile.get("counter_attack_effects") or [])
+                node_tiles = next_state.get("tiles", {}).get(interaction.get("node_id")) or []
+                next_state["tiles"][interaction.get("node_id")] = [entry for entry in node_tiles if entry.get("instance_id") != interaction.get("tile_instance_id")]
+                event_type = "interaction_resolved"
+            else:
+                _apply_failure_effects(next_state, tile.get("failure_effects") or [], interaction)
+                event_type = "interaction_failed"
+            for card in interaction.get("played_cards") or []:
+                capability = next_state["capabilities"].get(card.get("capability_id"))
+                if capability is not None:
+                    capability.setdefault("discard", []).append({"card_id": card["card_id"], "interaction_id": card["interaction_id"], "owner_capability_id": card.get("capability_id")})
+            next_state["interaction"] = None
+            next_state["version"] = int(state["version"]) + 1
+            event = {
+                "event_id": f"evt_{uuid.uuid4().hex}",
+                "type": event_type,
+                "command_id": command_id,
+                "tile_instance_id": interaction.get("tile_instance_id"),
+                "success": success,
+                "counter_success": counter_success,
                 "version": int(next_state["version"]),
                 "created_at": _now_iso(),
             }
@@ -572,7 +864,7 @@ class GameRoomService:
         if room.get("state") == ROOM_STATE_FINISHED:
             return await self.get_result(room_id=room_id, user_id=user_id)
         now = _now_iso()
-        state = self._memory_states.get(room_id) or _setup_state(room_id, map_id=room.get("map_id"))
+        state = self._memory_states.get(room_id) or _setup_state(room_id, level_id=room.get("level_id"))
         result = {
             "id": room_id,
             "room_id": room_id,

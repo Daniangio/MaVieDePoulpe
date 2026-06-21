@@ -64,6 +64,7 @@ class GameRoomCreateRequest(BaseModel):
     mode: str = "solo"
     game_type: str = "goldfish"
     map_id: Optional[str] = None
+    level_id: Optional[str] = None
 
 
 class GameRoomResponse(BaseModel):
@@ -77,6 +78,7 @@ class GameRoomResponse(BaseModel):
     ended_at: Optional[str] = None
     result_id: Optional[str] = None
     map_id: Optional[str] = None
+    level_id: Optional[str] = None
 
 
 class GameRoomJoinResponse(BaseModel):
@@ -117,6 +119,7 @@ class GameStateResponse(BaseModel):
     privacy_enforced: bool = False
     mode: str = "goldfish"
     level_id: str
+    selected_level_id: Optional[str] = None
     day_index: int = 1
     night_time_spent: int = 0
     selected_map_id: Optional[str] = None

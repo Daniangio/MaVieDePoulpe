@@ -264,6 +264,31 @@ def get_player_board_configs() -> list[dict[str, Any]]:
     return [dict(board) for board in _read_content().get("player_boards", [])]
 
 
+def get_level_configs() -> list[dict[str, Any]]:
+    return [dict(level) for level in _read_content().get("levels", [])]
+
+
+def get_level_config(level_id: str | None = None) -> dict[str, Any]:
+    levels = get_level_configs()
+    if not levels:
+        raise LookupError("No levels available. Create a level in the admin console first.")
+    if not level_id:
+        return dict(levels[0])
+    for level in levels:
+        if level.get("id") == level_id:
+            return dict(level)
+    raise LookupError("Level not found.")
+
+
+def get_game_content_catalog() -> dict[str, dict[str, Any]]:
+    content = _read_content()
+    return {
+        "tiles": {tile["id"]: dict(tile) for tile in content.get("tiles", [])},
+        "events": {event["id"]: _with_urls(event) for event in content.get("events", [])},
+        "interactions": {interaction["id"]: _with_urls(interaction) for interaction in content.get("interactions", [])},
+    }
+
+
 def create_category(*, name: str) -> dict[str, Any]:
     content = _read_content()
     normalized_name = _normalize_name(name)

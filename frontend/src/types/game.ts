@@ -20,6 +20,16 @@ export type MapProjection = {
 export type PoulpitaProjection = {
   node_id: NodeId | null;
   previous_node_id: NodeId | null;
+  energy?: number;
+  neurons?: number;
+  seashells?: number;
+};
+
+export type CardProjection = {
+  card_id: string;
+  interaction_id: string;
+  owner_capability_id?: string;
+  capability_id?: string;
 };
 
 export type CapabilityProjection = {
@@ -30,6 +40,11 @@ export type CapabilityProjection = {
   actions_taken_this_control: number;
   max_actions_per_control: number;
   max_control_takes_per_night: number;
+  current_max_cards_in_hand?: number;
+  initiates_event_ids?: string[];
+  draw_pile?: CardProjection[];
+  hand?: CardProjection[];
+  discard?: CardProjection[];
 };
 
 export type PlayerProjection = {
@@ -48,6 +63,7 @@ export type GameProjection = {
   level_id: string;
   day_index: number;
   night_time_spent: number;
+  selected_level_id?: string;
   selected_map_id?: string;
   active_capability_id: string | null;
   last_active_capability_id: string | null;
@@ -58,6 +74,13 @@ export type GameProjection = {
   player_boards: CapabilityProjection[];
   map: MapProjection;
   poulpita: PoulpitaProjection;
+  tiles?: Record<NodeId, Array<{ instance_id: string; tile_id: string; face_up?: boolean }>>;
+  tile_catalog?: {
+    tiles?: Record<string, any>;
+    events?: Record<string, any>;
+    interactions?: Record<string, any>;
+  };
+  interaction?: any;
   events: Array<Record<string, unknown>>;
 };
 

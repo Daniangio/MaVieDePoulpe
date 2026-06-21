@@ -47,6 +47,15 @@ TEST_MAP = {
     },
 }
 
+TEST_LEVEL = {
+    "id": "test-level",
+    "name": "Test level",
+    "map_id": "test-map",
+    "node_tile_counts": {node_id: 0 for node_id in TEST_MAP["nodes"]},
+    "node_group_ids": {node_id: "main" for node_id in TEST_MAP["nodes"]},
+    "groups": [{"id": "main", "name": "Main", "tile_counts": {}}],
+}
+
 
 @pytest.fixture(autouse=True)
 def explicit_test_map(monkeypatch):
@@ -56,6 +65,12 @@ def explicit_test_map(monkeypatch):
         raise LookupError("Map not found.")
 
     monkeypatch.setattr("backend.app.game_room_service.get_map", get_test_map)
+    monkeypatch.setattr("backend.app.game_room_service.get_level_config", lambda level_id=None: TEST_LEVEL)
+    monkeypatch.setattr(
+        "backend.app.game_room_service.get_game_content_catalog",
+        lambda: {"tiles": {}, "events": {}, "interactions": {}},
+    )
+    monkeypatch.setattr("backend.app.game_room_service.random.randint", lambda _min, _max: 1)
 
 
 def run(coro):

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import BoardView from "../components/BoardView";
 import { useStore } from "../store.js";
-import type { CapabilityProjection, CommandRejection, GameProjection, NodeId } from "../types/game";
+import type { CapabilityProjection, CardProjection, CommandRejection, GameProjection, NodeId } from "../types/game";
 import { buildApiUrl, buildWsUrl } from "../utils/connection.js";
 
 const makeCommandId = () =>
@@ -25,6 +25,7 @@ const CapabilityBoard = ({
   onFocus,
   onTakeControl,
   onCollect,
+  onDraw,
   onMoveMode,
 }: {
   capability: CapabilityProjection;
@@ -36,6 +37,7 @@ const CapabilityBoard = ({
   onFocus?: () => void;
   onTakeControl?: () => void;
   onCollect?: () => void;
+  onDraw?: () => void;
   onMoveMode?: () => void;
 }) => (
   <article
@@ -103,10 +105,114 @@ const CapabilityBoard = ({
         >
           Move
         </button>
+        <button
+          className="rounded border border-slate-600 px-3 py-2 text-xs text-slate-100 hover:bg-slate-800 disabled:opacity-50"
+          disabled={pending || !active || capability.pa < 1 || Number(capability.hand?.length || 0) >= Number(capability.current_max_cards_in_hand || 3)}
+          onClick={onDraw}
+          type="button"
+        >
+          Draw
+        </button>
       </div>
     ) : null}
   </article>
 );
+
+const CardButton = ({
+  card,
+  projection,
+  disabled,
+  onClick,
+}: {
+  card: CardProjection;
+  projection: GameProjection;
+  disabled?: boolean;
+  onClick?: () => void;
+}) => {
+  const interaction = projection.tile_catalog?.interactions?.[card.interaction_id];
+  const imageUrl = interaction?.image_url ? buildApiUrl(interaction.image_url) : "";
+  return (
+    <button className="flex h-24 w-20 flex-col items-center justify-between rounded-md border border-cyan-700 bg-slate-800 p-2 text-xs text-white disabled:opacity-50" disabled={disabled} onClick={onClick} type="button">
+      {imageUrl ? <img alt="" className="h-10 w-10 rounded object-cover" src={imageUrl} /> : <span className="flex h-10 w-10 items-center justify-center rounded bg-slate-700">{interaction?.name?.slice(0, 2) || "?"}</span>}
+      <span className="line-clamp-2 text-center">{interaction?.name || card.interaction_id}</span>
+    </button>
+  );
+};
+
+const InteractionPanel = ({
+  projection,
+  selectedCapability,
+  pending,
+  onPlayCard,
+  onWithdrawCard,
+  onResolve,
+  onFail,
+}: {
+  projection: GameProjection;
+  selectedCapability: CapabilityProjection | null;
+  pending: boolean;
+  onPlayCard: (cardId: string) => void;
+  onWithdrawCard: (cardId: string) => void;
+  onResolve: () => void;
+  onFail: () => void;
+}) => {
+  const interaction = projection.interaction;
+  if (!interaction) return null;
+  const tile = projection.tile_catalog?.tiles?.[interaction.tile_id] || {};
+  const playedInteractions = (interaction.played_cards || []).map((card: CardProjection) => card.interaction_id);
+  const missingSuccess = [...(tile.interaction_ids || [])];
+  playedInteractions.forEach((interactionId: string) => {
+    const index = missingSuccess.indexOf(interactionId);
+    if (index >= 0) missingSuccess.splice(index, 1);
+  });
+  const canResolve = missingSuccess.length === 0;
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/70 p-4">
+      <section className="grid max-h-[86vh] w-[min(62rem,calc(100vw-2rem))] gap-4 overflow-auto rounded-lg border border-cyan-700 bg-slate-900 p-4 shadow-2xl md:grid-cols-[18rem_1fr]">
+        <div>
+          <h2 className="text-lg font-semibold text-white">Interaction</h2>
+          <div className="mt-3 rounded-md border border-slate-700 bg-slate-950 p-3">
+            {tile.image_url ? <img alt="" className="mx-auto h-32 w-32 rounded object-cover" src={buildApiUrl(tile.image_url)} /> : null}
+            <p className="mt-2 text-center font-semibold text-white">{tile.name || interaction.tile_id}</p>
+            <p className="mt-1 text-center text-xs text-slate-400">Node {interaction.node_id}</p>
+          </div>
+          <div className="mt-3 text-xs text-slate-300">
+            <p>Normal: {(tile.interaction_ids || []).join(", ") || "-"}</p>
+            <p>Counter: {(tile.counter_attack_interaction_ids || []).join(", ") || "-"}</p>
+            {missingSuccess.length ? <p className="mt-2 text-amber-200">Missing: {missingSuccess.join(", ")}</p> : <p className="mt-2 text-teal-200">Normal success ready.</p>}
+          </div>
+        </div>
+        <div className="space-y-4">
+          <div>
+            <h3 className="text-sm font-semibold text-white">Played cards</h3>
+            <div className="mt-2 flex min-h-28 flex-wrap gap-2 rounded-md border border-dashed border-slate-700 bg-slate-950 p-2">
+              {(interaction.played_cards || []).map((card: CardProjection) => (
+                <CardButton
+                  card={card}
+                  disabled={pending || card.capability_id !== selectedCapability?.id}
+                  key={card.card_id}
+                  onClick={() => onWithdrawCard(card.card_id)}
+                  projection={projection}
+                />
+              ))}
+              {(interaction.played_cards || []).length === 0 ? <p className="m-auto text-sm text-slate-500">Play cards here.</p> : null}
+            </div>
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold text-white">Focused hand</h3>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {(selectedCapability?.hand || []).map((card) => <CardButton card={card} disabled={pending || projection.active_capability_id !== selectedCapability?.id} key={card.card_id} onClick={() => onPlayCard(card.card_id)} projection={projection} />)}
+            </div>
+          </div>
+          <div className="flex justify-end gap-2">
+            <button className="rounded border border-rose-500 px-3 py-2 text-sm text-rose-100 hover:bg-rose-950 disabled:opacity-50" disabled={pending} onClick={onFail} type="button">Fail</button>
+            <button className="rounded bg-teal-400 px-3 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-300 disabled:opacity-50" disabled={pending || !canResolve} onClick={onResolve} type="button">Resolve</button>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+};
 
 const GameRoomPage = () => {
   const { roomId } = useParams();
@@ -114,7 +220,7 @@ const GameRoomPage = () => {
   const navigate = useNavigate();
   const socketRef = useRef<WebSocket | null>(null);
   const [projection, setProjection] = useState<GameProjection | null>(null);
-  const [maps, setMaps] = useState<Array<{ id: string; name: string }>>([]);
+  const [levels, setLevels] = useState<Array<any>>([]);
   const [focusedCapabilityId, setFocusedCapabilityId] = useState<string | null>(null);
   const [moveMode, setMoveMode] = useState(false);
   const [feedback, setFeedback] = useState("");
@@ -164,20 +270,20 @@ const GameRoomPage = () => {
   }, [roomId, token]);
 
   useEffect(() => {
-    const loadMaps = async () => {
+    const loadLevels = async () => {
       if (!token) return;
       try {
-        const response = await fetch(buildApiUrl("/api/game/maps"), {
+        const response = await fetch(buildApiUrl("/api/game/levels"), {
           headers: { Authorization: `Bearer ${token}` },
         });
         const payload = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(payload.detail || "Failed to load maps.");
-        setMaps(payload.maps || []);
+        if (!response.ok) throw new Error(payload.detail || "Failed to load levels.");
+        setLevels(payload.levels || []);
       } catch (loadError: any) {
-        setError(loadError.message || "Failed to load maps.");
+        setError(loadError.message || "Failed to load levels.");
       }
     };
-    void loadMaps();
+    void loadLevels();
   }, [token]);
 
   useEffect(() => {
@@ -249,9 +355,9 @@ const GameRoomPage = () => {
     void submitCommand("start_goldfish_game");
   };
 
-  const selectMap = (mapId: string) => {
+  const selectLevel = (levelId: string) => {
     setMoveMode(false);
-    void submitCommand("select_map", { map_id: mapId });
+    void submitCommand("select_level", { level_id: levelId });
   };
 
   const takeControl = () => {
@@ -266,6 +372,12 @@ const GameRoomPage = () => {
     void submitCommand("collect_action_points", { capability_id: selectedCapabilityId });
   };
 
+  const drawActionCard = () => {
+    if (!selectedCapabilityId) return;
+    setMoveMode(false);
+    void submitCommand("draw_action_card", { capability_id: selectedCapabilityId });
+  };
+
   const movePoulpita = (targetNodeId: NodeId) => {
     if (!selectedCapabilityId) return;
     setMoveMode(false);
@@ -273,6 +385,30 @@ const GameRoomPage = () => {
       capability_id: selectedCapabilityId,
       target_node_id: targetNodeId,
     });
+  };
+
+  const startInteraction = (tileInstanceId: string) => {
+    if (!selectedCapabilityId) return;
+    setMoveMode(false);
+    void submitCommand("start_interaction", { capability_id: selectedCapabilityId, tile_instance_id: tileInstanceId });
+  };
+
+  const playInteractionCard = (cardId: string) => {
+    if (!selectedCapabilityId) return;
+    void submitCommand("play_interaction_card", { capability_id: selectedCapabilityId, card_id: cardId });
+  };
+
+  const withdrawInteractionCard = (cardId: string) => {
+    if (!selectedCapabilityId) return;
+    void submitCommand("withdraw_interaction_card", { capability_id: selectedCapabilityId, card_id: cardId });
+  };
+
+  const resolveInteraction = () => {
+    void submitCommand("resolve_interaction");
+  };
+
+  const failInteraction = () => {
+    void submitCommand("fail_interaction");
   };
 
   const endGame = async () => {
@@ -305,13 +441,13 @@ const GameRoomPage = () => {
             <>
               <select
                 className="h-8 rounded border border-slate-700 bg-slate-950 px-2 text-xs text-white"
-                disabled={pending || !maps.length}
-                onChange={(event) => selectMap(event.target.value)}
-                value={projection.selected_map_id || projection.map.id || ""}
+                disabled={pending || !levels.length}
+                onChange={(event) => selectLevel(event.target.value)}
+                value={projection.selected_level_id || projection.level_id || ""}
               >
-                {maps.map((map) => (
-                  <option key={map.id} value={map.id}>
-                    {map.name}
+                {levels.map((level) => (
+                  <option key={level.id} value={level.id}>
+                    {level.name}
                   </option>
                 ))}
               </select>
@@ -351,10 +487,22 @@ const GameRoomPage = () => {
         </div>
       ) : null}
 
+      {projection ? (
+        <InteractionPanel
+          onFail={failInteraction}
+          onPlayCard={playInteractionCard}
+          onResolve={resolveInteraction}
+          onWithdrawCard={withdrawInteractionCard}
+          pending={pending}
+          projection={projection}
+          selectedCapability={selectedCapability}
+        />
+      ) : null}
+
       <section className="grid h-[50vh] grid-cols-[minmax(0,75%)_minmax(14rem,25%)] overflow-hidden">
         <div className="min-w-0 overflow-hidden border-r border-slate-800">
           {projection ? (
-            <BoardView moveMode={moveMode} onMove={movePoulpita} pending={pending} projection={projection} />
+            <BoardView moveMode={moveMode} onMove={movePoulpita} onStartInteraction={startInteraction} pending={pending} projection={projection} />
           ) : (
             <div className="flex h-full items-center justify-center text-sm text-slate-400">Loading room state.</div>
           )}
@@ -374,6 +522,20 @@ const GameRoomPage = () => {
               <strong>{projection?.night_time_spent ?? 0}/24</strong>
             </div>
           </div>
+          <div className="grid grid-cols-3 gap-2 text-xs">
+            <div className="rounded bg-slate-800 p-3">
+              <span className="block text-slate-400">Energy</span>
+              <strong>{projection?.poulpita.energy ?? 0}</strong>
+            </div>
+            <div className="rounded bg-slate-800 p-3">
+              <span className="block text-slate-400">Neurons</span>
+              <strong>{projection?.poulpita.neurons ?? 0}</strong>
+            </div>
+            <div className="rounded bg-slate-800 p-3">
+              <span className="block text-slate-400">Shells</span>
+              <strong>{projection?.poulpita.seashells ?? 0}</strong>
+            </div>
+          </div>
           <div className="rounded bg-slate-800 p-3 text-xs text-slate-300">
             <span className="block text-slate-400">Initiative</span>
             <p className="mt-1">{projection?.active_capability_id ? capabilityMap[projection.active_capability_id]?.name : "No capability controls Poulpita."}</p>
@@ -390,6 +552,7 @@ const GameRoomPage = () => {
             focused
             moveMode={moveMode}
             onCollect={collectActionPoints}
+            onDraw={drawActionCard}
             onMoveMode={() => setMoveMode((value) => !value)}
             onTakeControl={takeControl}
             pending={pending}
@@ -400,8 +563,17 @@ const GameRoomPage = () => {
         <div className="grid h-full grid-cols-[1fr_12rem] gap-3 overflow-hidden">
           <div className="rounded-md border border-slate-800 bg-slate-900 p-3">
             <h3 className="text-sm font-semibold text-white">Player hand</h3>
-            <div className="mt-3 flex h-[calc(100%-2rem)] items-center justify-center rounded border border-dashed border-slate-700 text-sm text-slate-500">
-              Cards are not implemented in Goldfish mode.
+            <div className="mt-3 flex h-[calc(100%-2rem)] flex-wrap content-start gap-2 overflow-auto rounded border border-dashed border-slate-700 p-2">
+              {(selectedCapability?.hand || []).map((card) => (
+                <CardButton
+                  card={card}
+                  disabled={pending || !projection?.interaction || projection?.active_capability_id !== selectedCapability?.id}
+                  key={card.card_id}
+                  onClick={() => projection?.interaction ? playInteractionCard(card.card_id) : undefined}
+                  projection={projection as GameProjection}
+                />
+              ))}
+              {(selectedCapability?.hand || []).length === 0 ? <p className="m-auto text-sm text-slate-500">No cards in hand.</p> : null}
             </div>
           </div>
           <div className="rounded-md border border-slate-800 bg-slate-900 p-3 text-xs text-slate-400">

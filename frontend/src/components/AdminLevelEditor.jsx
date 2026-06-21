@@ -16,6 +16,7 @@ const groupColors = ["#0d9488", "#2563eb", "#c026d3", "#ea580c", "#16a34a", "#be
 const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload }) => {
   const [maps, setMaps] = useState([]);
   const [draft, setDraft] = useState(emptyLevelDraft());
+  const [selectedNodeId, setSelectedNodeId] = useState("");
 
   const tilesById = useMemo(() => Object.fromEntries((content.tiles || []).map((tile) => [tile.id, tile])), [content.tiles]);
   const eventsById = useMemo(() => Object.fromEntries((content.events || []).map((event) => [event.id, event])), [content.events]);
@@ -63,16 +64,19 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
 
   const startNewLevel = () => {
     const firstMap = maps[0] || null;
+    setSelectedNodeId("");
     setDraft(levelFromMap(firstMap, emptyLevelDraft()));
   };
 
   const editLevel = (level) => {
     const map = maps.find((entry) => entry.id === level.map_id) || null;
+    setSelectedNodeId("");
     setDraft(levelFromMap(map, { ...emptyLevelDraft(), ...level, groups: level.groups || [] }));
   };
 
   const changeMap = (mapId) => {
     const map = maps.find((entry) => entry.id === mapId) || null;
+    setSelectedNodeId("");
     setDraft(levelFromMap(map, { ...draft, id: "", map_id: mapId }));
   };
 
@@ -113,6 +117,7 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
         node_group_ids: Object.fromEntries(Object.entries(current.node_group_ids || {}).map(([nodeId, assignedGroupId]) => [nodeId, assignedGroupId === groupId ? fallback : assignedGroupId])),
       };
     });
+    setSelectedNodeId("");
   };
 
   const setGroupTileCount = (groupId, tileId, count) => {
@@ -202,9 +207,18 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
             </label>
           </div>
 
-          <div className="grid gap-4 xl:grid-cols-[minmax(24rem,1fr)_22rem]">
-            <LevelMap map={selectedMap} groupsById={groupsById} nodeGroupIds={draft.node_group_ids} />
-            <NodeAssignment nodes={nodes} draft={draft} groups={draft.groups || []} onUpdateNode={updateNode} />
+          <div>
+            <LevelMap
+              groups={draft.groups || []}
+              groupsById={groupsById}
+              map={selectedMap}
+              nodeGroupIds={draft.node_group_ids}
+              nodeTileCounts={draft.node_tile_counts}
+              onSelectGroup={(nodeId, groupId) => updateNode(nodeId, { group_id: groupId })}
+              onSetNodeTileCount={(nodeId, tileCount) => updateNode(nodeId, { tile_count: tileCount })}
+              selectedNodeId={selectedNodeId}
+              setSelectedNodeId={setSelectedNodeId}
+            />
           </div>
 
           <div className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3">
@@ -243,45 +257,66 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
   );
 };
 
-const LevelMap = ({ map, groupsById, nodeGroupIds }) => {
+const LevelMap = ({ map, groups, groupsById, nodeGroupIds, nodeTileCounts, selectedNodeId, setSelectedNodeId, onSelectGroup, onSetNodeTileCount }) => {
   const boardImageUrl = map?.image_url ? buildApiUrl(map.image_url) : "";
+  const selectedNode = selectedNodeId ? map?.nodes?.[selectedNodeId] : null;
+  const opensUp = Number(selectedNode?.y || 0) > 0.62;
   return (
-    <div className="relative mx-auto overflow-hidden rounded-lg border border-cyan-200 bg-cyan-50" style={{ aspectRatio: map?.image_width && map?.image_height ? `${map.image_width} / ${map.image_height}` : "16 / 9", maxWidth: map?.image_width || undefined }}>
-      {boardImageUrl ? <img alt="Level map" className="absolute inset-0 h-full w-full object-contain" src={boardImageUrl} /> : <div className="flex h-full min-h-[20rem] items-center justify-center text-sm text-slate-500">{map ? "Map has no image." : "Select a map."}</div>}
-      {Object.values(map?.nodes || {}).map((node) => {
-        const group = groupsById[nodeGroupIds[node.id]];
-        return (
-          <span
-            className="absolute flex h-9 w-9 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 border-white text-xs font-semibold text-white shadow"
-            key={node.id}
-            style={{ left: `${node.x * 100}%`, top: `${node.y * 100}%`, backgroundColor: group?.color || "#94a3b8" }}
-            title={group?.name || "No group"}
-          >
-            {node.id}
-          </span>
-        );
-      })}
+    <div className="relative mx-auto overflow-visible" style={{ aspectRatio: map?.image_width && map?.image_height ? `${map.image_width} / ${map.image_height}` : "16 / 9", maxWidth: map?.image_width || undefined }}>
+      <div className="absolute inset-0 overflow-hidden rounded-lg border border-cyan-200 bg-cyan-50">
+        {boardImageUrl ? <img alt="Level map" className="absolute inset-0 h-full w-full object-contain" src={boardImageUrl} /> : <div className="flex h-full min-h-[20rem] items-center justify-center text-sm text-slate-500">{map ? "Map has no image." : "Select a map."}</div>}
+        {Object.values(map?.nodes || {}).map((node) => {
+          const group = groupsById[nodeGroupIds[node.id]];
+          return (
+            <button
+              className={`absolute flex min-h-11 min-w-11 -translate-x-1/2 -translate-y-1/2 flex-col items-center justify-center rounded-full border-2 px-2 text-center text-[0.62rem] font-semibold leading-tight text-white shadow ${selectedNodeId === node.id ? "border-teal-950 ring-2 ring-white" : "border-white"}`}
+              key={node.id}
+              onClick={() => setSelectedNodeId(selectedNodeId === node.id ? "" : node.id)}
+              style={{ left: `${node.x * 100}%`, top: `${node.y * 100}%`, backgroundColor: group?.color || "#94a3b8" }}
+              title={group?.name || "No group"}
+              type="button"
+            >
+              <span>{node.id}</span>
+              <span className="max-w-[4.5rem] truncate">{group?.name || "No group"}</span>
+            </button>
+          );
+        })}
+      </div>
+      {selectedNode ? (
+        <div
+          className="absolute z-20 w-52 -translate-x-1/2 rounded-md border border-cyan-200 bg-white p-2 text-sm shadow-lg"
+          style={{ left: `${selectedNode.x * 100}%`, top: opensUp ? `calc(${selectedNode.y * 100}% - 0.9rem)` : `calc(${selectedNode.y * 100}% + 1.9rem)`, transform: opensUp ? "translate(-50%, -100%)" : "translateX(-50%)" }}
+        >
+          <p className="mb-2 text-xs font-semibold text-teal-950">Node {selectedNode.id}</p>
+          <label className="mb-2 block text-xs text-slate-600">
+            Tile spaces
+            <input className="mt-1 w-full rounded border border-cyan-200 bg-white px-2 py-1 text-sm text-slate-800" min="0" type="number" value={nodeTileCounts[selectedNode.id] ?? 3} onChange={(event) => onSetNodeTileCount(selectedNode.id, Number(event.target.value))} />
+          </label>
+          <div className="space-y-1">
+            {groups.map((group) => {
+              const decoratedGroup = groupsById[group.id];
+              return (
+                <button
+                  className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left text-xs ${nodeGroupIds[selectedNode.id] === group.id ? "bg-cyan-100 text-teal-950" : "text-slate-700 hover:bg-cyan-50"}`}
+                  key={group.id}
+                  onClick={() => {
+                    onSelectGroup(selectedNode.id, group.id);
+                    setSelectedNodeId("");
+                  }}
+                  type="button"
+                >
+                  <span className="h-3 w-3 rounded-full" style={{ backgroundColor: decoratedGroup?.color || "#94a3b8" }} />
+                  <span className="min-w-0 flex-1 truncate">{group.name}</span>
+                </button>
+              );
+            })}
+            {groups.length === 0 ? <p className="text-xs text-slate-500">Create a group first.</p> : null}
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 };
-
-const NodeAssignment = ({ nodes, draft, groups, onUpdateNode }) => (
-  <div className="rounded-md border border-cyan-100 bg-white p-3">
-    <h3 className="text-sm font-semibold text-teal-950">Node spaces</h3>
-    <div className="mt-2 max-h-[28rem] space-y-2 overflow-auto pr-1">
-      {nodes.map((node) => (
-        <div className="grid grid-cols-[3.5rem_4rem_1fr] items-center gap-2 rounded-md bg-cyan-50 p-2 text-sm" key={node.id}>
-          <span className="font-semibold text-teal-950">{node.id}</span>
-          <input className="rounded border border-cyan-200 bg-white px-2 py-1 text-sm" min="0" type="number" value={draft.node_tile_counts[node.id] ?? 3} onChange={(event) => onUpdateNode(node.id, { tile_count: Number(event.target.value) })} />
-          <select className="min-w-0 rounded border border-cyan-200 bg-white px-2 py-1 text-sm" value={draft.node_group_ids[node.id] || ""} onChange={(event) => onUpdateNode(node.id, { group_id: event.target.value })}>
-            <option value="">No group</option>
-            {groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}
-          </select>
-        </div>
-      ))}
-    </div>
-  </div>
-);
 
 const GroupEditor = ({ group, stats, tiles, eventById, interactionsById, onUpdateGroup, onRemove, onSetTileCount }) => (
   <article className={`rounded-md border bg-white p-3 ${stats.valid ? "border-cyan-200" : "border-rose-200"}`}>
