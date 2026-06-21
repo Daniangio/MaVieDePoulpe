@@ -19,9 +19,12 @@ ALLOWED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 DEFAULT_CATEGORIES = [
     {"id": "prey", "name": "Prey"},
     {"id": "threat", "name": "Threat"},
-    {"id": "counter-attack", "name": "Counter-attack"},
     {"id": "exploration", "name": "Exploration"},
 ]
+COUNTER_ATTACK_CATEGORY_ID = "__counter_attack__"
+COUNTER_ATTACK_CATEGORY = {"id": COUNTER_ATTACK_CATEGORY_ID, "name": "Counter-attack", "special": True}
+SUCCESS_EFFECT_TYPES = {"gain_energy", "gain_neurons", "gain_seashells"}
+FAILURE_EFFECT_TYPES = {"lose_energy", "lose_neurons", "lose_seashells", "lose_ap", "half_ap", "all_ap"}
 
 
 def _slug(value: str) -> str:
@@ -60,6 +63,12 @@ def _read_content() -> dict[str, Any]:
     content.setdefault("interactions", [])
     content.setdefault("events", [])
     content.setdefault("tiles", [])
+    for tile in content["tiles"]:
+        tile.setdefault("interaction_ids", [])
+        tile.setdefault("counter_attack_interaction_ids", [])
+        tile.setdefault("success_effects", [])
+        tile.setdefault("counter_attack_effects", [])
+        tile.setdefault("failure_effects", [])
     return content
 
 
@@ -118,24 +127,36 @@ def _generated_cards(content: dict[str, Any]) -> list[dict[str, Any]]:
     cards = []
     for interaction in content.get("interactions", []):
         resolved_by_category = {category_id: [] for category_id in categories}
+        resolved_by_category[COUNTER_ATTACK_CATEGORY_ID] = []
         for tile in content.get("tiles", []):
             required_ids = [str(item) for item in tile.get("interaction_ids") or []]
-            if interaction["id"] not in required_ids:
-                continue
             event = events.get(tile.get("event_id"))
             if event is None:
                 continue
-            category_id = event.get("category_id")
-            if category_id not in resolved_by_category:
-                resolved_by_category[category_id] = []
-            resolved_by_category[category_id].append(
-                {
-                    "tile_id": tile["id"],
-                    "event_id": event["id"],
-                    "event_name": event["name"],
-                    "event_image_url": _public_image_url(event.get("image_filename")),
-                }
-            )
+            if interaction["id"] in required_ids:
+                category_id = event.get("category_id")
+                if category_id not in resolved_by_category:
+                    resolved_by_category[category_id] = []
+                resolved_by_category[category_id].append(
+                    {
+                        "tile_id": tile["id"],
+                        "event_id": event["id"],
+                        "event_name": event["name"],
+                        "event_image_url": _public_image_url(event.get("image_filename")),
+                        "requirement_type": "success",
+                    }
+                )
+            counter_ids = [str(item) for item in tile.get("counter_attack_interaction_ids") or []]
+            if interaction["id"] in counter_ids:
+                resolved_by_category[COUNTER_ATTACK_CATEGORY_ID].append(
+                    {
+                        "tile_id": tile["id"],
+                        "event_id": event["id"],
+                        "event_name": event["name"],
+                        "event_image_url": _public_image_url(event.get("image_filename")),
+                        "requirement_type": "counter_attack",
+                    }
+                )
         cards.append(
             {
                 "id": interaction["id"],
@@ -151,6 +172,7 @@ def get_content_state() -> dict[str, Any]:
     content = _read_content()
     return {
         "categories": [dict(category) for category in content.get("categories", [])],
+        "card_categories": [dict(category) for category in content.get("categories", [])] + [dict(COUNTER_ATTACK_CATEGORY)],
         "interactions": [_with_urls(interaction) for interaction in content.get("interactions", [])],
         "events": [_with_urls(event) for event in content.get("events", [])],
         "tiles": [dict(tile) for tile in content.get("tiles", [])],
@@ -214,7 +236,11 @@ async def update_interaction(*, interaction_id: str, name: str, image: UploadFil
 
 def delete_interaction(interaction_id: str) -> None:
     content = _read_content()
-    if any(interaction_id in (tile.get("interaction_ids") or []) for tile in content["tiles"]):
+    if any(
+        interaction_id in (tile.get("interaction_ids") or [])
+        or interaction_id in (tile.get("counter_attack_interaction_ids") or [])
+        for tile in content["tiles"]
+    ):
         raise ValueError("Interaction is used by one or more tiles.")
     index = _find_index(content["interactions"], interaction_id)
     _delete_image(content["interactions"][index].get("image_filename"))
@@ -263,17 +289,47 @@ def delete_event(event_id: str) -> None:
     _write_content(content)
 
 
-def save_tile(*, name: str, event_id: str, interaction_ids: list[str], tile_id: str | None = None) -> dict[str, Any]:
+def _normalize_interaction_ids(interaction_ids: list[str], interaction_set: set[str]) -> list[str]:
+    normalized = []
+    for interaction_id in interaction_ids:
+        if interaction_id not in interaction_set:
+            raise ValueError("Tile references an unknown interaction.")
+        if interaction_id not in normalized:
+            normalized.append(interaction_id)
+    return normalized
+
+
+def _normalize_effects(effects: list[dict[str, Any]], allowed_types: set[str], label: str) -> list[dict[str, Any]]:
+    normalized = []
+    for effect in effects or []:
+        if not isinstance(effect, dict):
+            raise ValueError(f"{label} effects must be objects.")
+        effect_type = str(effect.get("type") or "")
+        if effect_type not in allowed_types:
+            raise ValueError(f"Unsupported {label} effect: {effect_type or '<missing>'}.")
+        amount = int(effect.get("amount") or 0)
+        if effect_type not in {"half_ap", "all_ap"} and amount < 1:
+            raise ValueError(f"{label} effect amount must be at least 1.")
+        normalized.append({"type": effect_type, "amount": None if effect_type in {"half_ap", "all_ap"} else amount})
+    return normalized
+
+
+def save_tile(
+    *,
+    name: str,
+    event_id: str,
+    interaction_ids: list[str],
+    counter_attack_interaction_ids: list[str] | None = None,
+    success_effects: list[dict[str, Any]] | None = None,
+    counter_attack_effects: list[dict[str, Any]] | None = None,
+    failure_effects: list[dict[str, Any]] | None = None,
+    tile_id: str | None = None,
+) -> dict[str, Any]:
     content = _read_content()
     if not any(event.get("id") == event_id for event in content["events"]):
         raise ValueError("Tile event does not exist.")
     interaction_set = {interaction.get("id") for interaction in content["interactions"]}
-    normalized_interactions = []
-    for interaction_id in interaction_ids:
-        if interaction_id not in interaction_set:
-            raise ValueError("Tile references an unknown interaction.")
-        if interaction_id not in normalized_interactions:
-            normalized_interactions.append(interaction_id)
+    normalized_interactions = _normalize_interaction_ids(interaction_ids, interaction_set)
     if not normalized_interactions:
         raise ValueError("A tile needs at least one required interaction.")
     tile = {
@@ -281,6 +337,10 @@ def save_tile(*, name: str, event_id: str, interaction_ids: list[str], tile_id: 
         "name": _normalize_name(name),
         "event_id": event_id,
         "interaction_ids": normalized_interactions,
+        "counter_attack_interaction_ids": _normalize_interaction_ids(counter_attack_interaction_ids or [], interaction_set),
+        "success_effects": _normalize_effects(success_effects or [], SUCCESS_EFFECT_TYPES, "success"),
+        "counter_attack_effects": _normalize_effects(counter_attack_effects or [], SUCCESS_EFFECT_TYPES, "counter-attack"),
+        "failure_effects": _normalize_effects(failure_effects or [], FAILURE_EFFECT_TYPES, "failure"),
     }
     if tile_id:
         content["tiles"][_find_index(content["tiles"], tile_id)] = tile

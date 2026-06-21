@@ -21,7 +21,16 @@ def test_generated_cards_group_tile_events_by_category(tmp_path, monkeypatch):
                 {"id": "shark", "name": "Shark", "category_id": "threat", "image_filename": "shark.png"},
             ],
             "tiles": [
-                {"id": "crab-tile", "name": "Crab", "event_id": "crab", "interaction_ids": ["charge", "tighten"]},
+                {
+                    "id": "crab-tile",
+                    "name": "Crab",
+                    "event_id": "crab",
+                    "interaction_ids": ["charge", "tighten"],
+                    "counter_attack_interaction_ids": ["charge"],
+                    "success_effects": [{"type": "gain_energy", "amount": 2}],
+                    "counter_attack_effects": [{"type": "gain_seashells", "amount": 1}],
+                    "failure_effects": [{"type": "half_ap", "amount": None}],
+                },
                 {"id": "shark-tile", "name": "Shark", "event_id": "shark", "interaction_ids": ["tighten"]},
             ],
         }
@@ -31,5 +40,8 @@ def test_generated_cards_group_tile_events_by_category(tmp_path, monkeypatch):
 
     assert [entry["event_name"] for entry in cards["charge"]["resolves"]["prey"]] == ["Crab"]
     assert cards["charge"]["resolves"]["threat"] == []
+    assert [entry["event_name"] for entry in cards["charge"]["resolves"][service.COUNTER_ATTACK_CATEGORY_ID]] == ["Crab"]
     assert [entry["event_name"] for entry in cards["tighten"]["resolves"]["prey"]] == ["Crab"]
     assert [entry["event_name"] for entry in cards["tighten"]["resolves"]["threat"]] == ["Shark"]
+    assert cards["tighten"]["resolves"][service.COUNTER_ATTACK_CATEGORY_ID] == []
+    assert service.get_content_state()["tiles"][0]["failure_effects"] == [{"type": "half_ap", "amount": None}]

@@ -142,7 +142,7 @@ def _setup_state(room_id: str, *, map_id: str | None = None) -> dict[str, Any]:
         "last_active_capability_id": None,
         "focused_capability_id": DEFAULT_FOCUSED_CAPABILITY_ID,
         "map": _map_projection(map_config),
-        "poulpita": {"node_id": None, "previous_node_id": None},
+        "poulpita": {"node_id": None, "previous_node_id": None, "energy": 0, "neurons": 0, "seashells": 0},
         "capabilities": _initial_capabilities(),
         "event_log": [],
     }
@@ -182,6 +182,9 @@ def _goldfish_state(room_id: str, *, map_id: str | None = None) -> dict[str, Any
         "poulpita": {
             "node_id": str(map_config["starting_node_id"]),
             "previous_node_id": None,
+            "energy": 0,
+            "neurons": 0,
+            "seashells": 0,
         },
         "capabilities": _initial_capabilities(),
         "event_log": [

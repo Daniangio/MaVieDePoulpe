@@ -447,6 +447,10 @@ async def admin_create_tile(
     name: str = Form(...),
     event_id: str = Form(...),
     interaction_ids_json: str = Form(...),
+    counter_attack_interaction_ids_json: str = Form(default="[]"),
+    success_effects_json: str = Form(default="[]"),
+    counter_attack_effects_json: str = Form(default="[]"),
+    failure_effects_json: str = Form(default="[]"),
     _admin: User = Depends(require_admin),
 ):
     try:
@@ -454,6 +458,13 @@ async def admin_create_tile(
             name=name,
             event_id=event_id,
             interaction_ids=[str(item) for item in _json_form_list(interaction_ids_json, "interaction_ids_json")],
+            counter_attack_interaction_ids=[
+                str(item)
+                for item in _json_form_list(counter_attack_interaction_ids_json, "counter_attack_interaction_ids_json")
+            ],
+            success_effects=_json_form_list(success_effects_json, "success_effects_json"),
+            counter_attack_effects=_json_form_list(counter_attack_effects_json, "counter_attack_effects_json"),
+            failure_effects=_json_form_list(failure_effects_json, "failure_effects_json"),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -465,6 +476,10 @@ async def admin_update_tile(
     name: str = Form(...),
     event_id: str = Form(...),
     interaction_ids_json: str = Form(...),
+    counter_attack_interaction_ids_json: str = Form(default="[]"),
+    success_effects_json: str = Form(default="[]"),
+    counter_attack_effects_json: str = Form(default="[]"),
+    failure_effects_json: str = Form(default="[]"),
     _admin: User = Depends(require_admin),
 ):
     try:
@@ -473,6 +488,13 @@ async def admin_update_tile(
             name=name,
             event_id=event_id,
             interaction_ids=[str(item) for item in _json_form_list(interaction_ids_json, "interaction_ids_json")],
+            counter_attack_interaction_ids=[
+                str(item)
+                for item in _json_form_list(counter_attack_interaction_ids_json, "counter_attack_interaction_ids_json")
+            ],
+            success_effects=_json_form_list(success_effects_json, "success_effects_json"),
+            counter_attack_effects=_json_form_list(counter_attack_effects_json, "counter_attack_effects_json"),
+            failure_effects=_json_form_list(failure_effects_json, "failure_effects_json"),
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
