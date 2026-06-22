@@ -146,17 +146,27 @@ const CardButton = ({
   card,
   projection,
   disabled,
+  selected,
   onClick,
 }: {
   card: CardProjection;
   projection: GameProjection;
   disabled?: boolean;
+  selected?: boolean;
   onClick?: () => void;
 }) => {
   const interaction = projection.tile_catalog?.interactions?.[card.interaction_id];
   const imageUrl = interaction?.image_url ? buildApiUrl(interaction.image_url) : "";
   return (
-    <button className="flex h-24 w-20 flex-col items-center justify-between rounded-md border border-cyan-700 bg-slate-800 p-2 text-xs text-white disabled:opacity-50" disabled={disabled} onClick={onClick} type="button">
+    <button
+      className={[
+        "flex h-24 w-20 flex-col items-center justify-between rounded-md border bg-slate-800 p-2 text-xs text-white transition disabled:opacity-50",
+        selected ? "border-amber-300 ring-2 ring-amber-200" : "border-cyan-700 hover:border-cyan-300",
+      ].join(" ")}
+      disabled={disabled}
+      onClick={onClick}
+      type="button"
+    >
       {imageUrl ? <img alt="" className="h-10 w-10 rounded object-cover" src={imageUrl} /> : <span className="flex h-10 w-10 items-center justify-center rounded bg-slate-700">{interaction?.name?.slice(0, 2) || "?"}</span>}
       <span className="line-clamp-2 text-center">{interaction?.name || card.interaction_id}</span>
     </button>
@@ -167,72 +177,143 @@ const InteractionPanel = ({
   projection,
   selectedCapability,
   pending,
-  onPlayCard,
-  onWithdrawCard,
+  selectedTileInstanceId,
+  selectedCardIds,
+  visualState,
+  onToggleCard,
+  onInitiate,
   onResolve,
   onFail,
+  onClose,
 }: {
   projection: GameProjection;
   selectedCapability: CapabilityProjection | null;
   pending: boolean;
-  onPlayCard: (cardId: string) => void;
-  onWithdrawCard: (cardId: string) => void;
+  selectedTileInstanceId: string | null;
+  selectedCardIds: string[];
+  visualState: "open" | "success" | "failure" | "closing";
+  onToggleCard: (cardId: string) => void;
+  onInitiate: () => void;
   onResolve: () => void;
   onFail: () => void;
+  onClose: () => void;
 }) => {
-  const interaction = projection.interaction;
-  if (!interaction) return null;
-  const tile = projection.tile_catalog?.tiles?.[interaction.tile_id] || {};
+  const activeInteraction = projection.interaction;
+  const inspectedTileInstance = selectedTileInstanceId
+    ? Object.values(projection.tiles || {}).flat().find((tileInstance: any) => tileInstance.instance_id === selectedTileInstanceId)
+    : null;
+  const tileInstance = activeInteraction || inspectedTileInstance;
+  if (!tileInstance) return null;
+  const tile = projection.tile_catalog?.tiles?.[tileInstance.tile_id] || {};
   const event = tile.event || projection.tile_catalog?.events?.[tile.event_id];
   const interactionsById = projection.tile_catalog?.interactions || {};
-  const playedInteractions = (interaction.played_cards || []).map((card: CardProjection) => card.interaction_id);
+  const activePlayedCards = activeInteraction?.played_cards || [];
+  const selectedCapabilityId = selectedCapability?.id;
+  const activeOwnedPlayedCards = activePlayedCards.filter((card: CardProjection) => card.capability_id === selectedCapabilityId);
+  const lockedPlayedCards = activePlayedCards.filter((card: CardProjection) => card.capability_id !== selectedCapabilityId);
+  const selectableCards = [...activeOwnedPlayedCards, ...(selectedCapability?.hand || [])];
+  const selectableCardMap = new Map(selectableCards.map((card: CardProjection) => [card.card_id, card]));
+  const selectedCards = selectedCardIds
+    .map((cardId) => selectableCardMap.get(cardId))
+    .filter(Boolean) as CardProjection[];
+  const playedInteractions = [...lockedPlayedCards, ...selectedCards].map((card: CardProjection) => card.interaction_id);
   const missingSuccess = [...(tile.interaction_ids || [])];
   playedInteractions.forEach((interactionId: string) => {
     const index = missingSuccess.indexOf(interactionId);
     if (index >= 0) missingSuccess.splice(index, 1);
   });
+  const missingCounter = [...(tile.counter_attack_interaction_ids || [])];
+  playedInteractions.forEach((interactionId: string) => {
+    const index = missingCounter.indexOf(interactionId);
+    if (index >= 0) missingCounter.splice(index, 1);
+  });
   const canResolve = missingSuccess.length === 0;
+  const canInitiate = !activeInteraction && projection.active_capability_id === selectedCapability?.id;
+  const panelTone = visualState === "success"
+    ? "border-emerald-400 shadow-emerald-500/40 scale-95 opacity-80"
+    : visualState === "failure"
+      ? "border-rose-400 shadow-rose-500/40 scale-95 opacity-80"
+      : visualState === "closing"
+        ? "border-cyan-700 scale-90 opacity-0"
+        : "border-cyan-700 scale-100 opacity-100";
+  const MissingIcons = ({ ids }: { ids: string[] }) => (
+    <div className="mt-2 flex flex-wrap gap-1">
+      {ids.map((interactionId, index) => {
+        const interaction = interactionsById[interactionId];
+        const imageUrl = interaction?.image_url ? buildApiUrl(interaction.image_url) : "";
+        return (
+          <span className="flex h-7 w-7 items-center justify-center overflow-hidden rounded-full border border-amber-300 bg-slate-950 text-[0.55rem] text-white" key={`${interactionId}:${index}`} title={interaction?.name || interactionId}>
+            {imageUrl ? <img alt="" className="h-full w-full object-cover" src={imageUrl} /> : interaction?.name?.slice(0, 2) || "?"}
+          </span>
+        );
+      })}
+      {ids.length === 0 ? <span className="text-xs text-teal-200">Ready</span> : null}
+    </div>
+  );
   return (
     <div className="absolute inset-0 z-40 flex items-center justify-center bg-slate-950/45 p-3">
-      <section className="grid max-h-full w-[min(54rem,calc(100%-1rem))] gap-3 overflow-auto rounded-lg border border-cyan-700 bg-slate-900 p-3 shadow-2xl md:grid-cols-[16rem_1fr]">
+      <section className={`grid max-h-full w-[min(54rem,calc(100%-1rem))] gap-3 overflow-auto rounded-lg border bg-slate-900 p-3 shadow-2xl transition-all duration-300 md:grid-cols-[16rem_1fr] ${panelTone}`}>
         <div>
-          <h2 className="text-lg font-semibold text-white">Interaction</h2>
-          <div className="mt-3 rounded-md border border-slate-700 bg-slate-950 p-3">
-            <HexTilePreview className="max-w-[15rem]" event={event} interactionsById={interactionsById} tile={tile} />
-            <p className="mt-2 text-center font-semibold text-white">{tile.name || interaction.tile_id}</p>
-            <p className="mt-1 text-center text-xs text-slate-400">Node {interaction.node_id}</p>
+          <div className="flex items-center justify-between gap-2">
+            <h2 className="text-lg font-semibold text-white">{activeInteraction ? "Interaction" : "Tile detail"}</h2>
+            {!activeInteraction ? <button className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-200 hover:bg-slate-800" onClick={onClose} type="button">Close</button> : null}
+          </div>
+            <div className="mt-3 rounded-md border border-slate-700 bg-slate-950 p-3">
+              <HexTilePreview className="max-w-[15rem]" event={event} interactionsById={interactionsById} tile={tile} />
+            <p className="mt-2 text-center font-semibold text-white">{tile.name || tileInstance.tile_id}</p>
+            <p className="mt-1 text-center text-xs text-slate-400">Node {activeInteraction?.node_id || projection.poulpita.node_id || "-"}</p>
           </div>
           <div className="mt-3 text-xs text-slate-300">
-            <p>Normal: {(tile.interaction_ids || []).join(", ") || "-"}</p>
-            <p>Counter: {(tile.counter_attack_interaction_ids || []).join(", ") || "-"}</p>
-            {missingSuccess.length ? <p className="mt-2 text-amber-200">Missing: {missingSuccess.join(", ")}</p> : <p className="mt-2 text-teal-200">Normal success ready.</p>}
+            <p className="font-semibold text-slate-200">Missing for success</p>
+            <MissingIcons ids={missingSuccess} />
+            {(tile.counter_attack_interaction_ids || []).length ? (
+              <>
+                <p className="mt-3 font-semibold text-slate-200">Missing for counter-attack</p>
+                <MissingIcons ids={missingCounter} />
+              </>
+            ) : null}
           </div>
         </div>
         <div className="space-y-4">
           <div>
-            <h3 className="text-sm font-semibold text-white">Played cards</h3>
+            <h3 className="text-sm font-semibold text-white">Selected cards</h3>
             <div className="mt-2 flex min-h-28 flex-wrap gap-2 rounded-md border border-dashed border-slate-700 bg-slate-950 p-2">
-              {(interaction.played_cards || []).map((card: CardProjection) => (
+              {lockedPlayedCards.map((card: CardProjection) => (
                 <CardButton
                   card={card}
-                  disabled={pending || card.capability_id !== selectedCapability?.id}
+                  disabled
                   key={card.card_id}
-                  onClick={() => onWithdrawCard(card.card_id)}
                   projection={projection}
                 />
               ))}
-              {(interaction.played_cards || []).length === 0 ? <p className="m-auto text-sm text-slate-500">Play cards here.</p> : null}
+              {selectedCards.map((card) => <CardButton card={card} key={card.card_id} onClick={() => onToggleCard(card.card_id)} projection={projection} selected />)}
+              {lockedPlayedCards.length + selectedCards.length === 0 ? <p className="m-auto text-sm text-slate-500">Select cards from the focused hand.</p> : null}
             </div>
           </div>
           <div>
             <h3 className="text-sm font-semibold text-white">Focused hand</h3>
             <div className="mt-2 flex flex-wrap gap-2">
-              {(selectedCapability?.hand || []).map((card) => <CardButton card={card} disabled={pending || projection.active_capability_id !== selectedCapability?.id} key={card.card_id} onClick={() => onPlayCard(card.card_id)} projection={projection} />)}
+              {selectableCards.map((card: CardProjection) => (
+                <CardButton
+                  card={card}
+                  disabled={pending || projection.active_capability_id !== selectedCapability?.id}
+                  key={card.card_id}
+                  onClick={() => onToggleCard(card.card_id)}
+                  projection={projection}
+                  selected={selectedCardIds.includes(card.card_id)}
+                />
+              ))}
             </div>
           </div>
           <div className="flex justify-end gap-2">
-            <button className="rounded border border-rose-500 px-3 py-2 text-sm text-rose-100 hover:bg-rose-950 disabled:opacity-50" disabled={pending} onClick={onFail} type="button">Fail</button>
-            <button className="rounded bg-teal-400 px-3 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-300 disabled:opacity-50" disabled={pending || !canResolve} onClick={onResolve} type="button">Resolve</button>
+            {activeInteraction ? (
+              <>
+                <button className="rounded border border-rose-500 px-3 py-2 text-sm text-rose-100 hover:bg-rose-950 disabled:opacity-50" disabled={pending} onClick={onFail} type="button">Fail</button>
+                <button className="rounded bg-teal-400 px-3 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-300 disabled:opacity-50" disabled={pending} onClick={onResolve} type="button">{canResolve ? "Confirm interaction" : "Confirm cards"}</button>
+              </>
+            ) : (
+              <button className="rounded bg-teal-400 px-3 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-300 disabled:opacity-50" disabled={pending || !canInitiate} onClick={onInitiate} type="button">Initiate interaction</button>
+            )}
           </div>
         </div>
       </section>
@@ -252,6 +333,9 @@ const GameRoomPage = () => {
   const [feedback, setFeedback] = useState("");
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
+  const [selectedTileInstanceId, setSelectedTileInstanceId] = useState<string | null>(null);
+  const [selectedCardIds, setSelectedCardIds] = useState<string[]>([]);
+  const [interactionPanelState, setInteractionPanelState] = useState<"open" | "success" | "failure" | "closing">("open");
 
   const capabilityMap = projection?.capabilities || {};
   const capabilities = useMemo(() => {
@@ -270,6 +354,17 @@ const GameRoomPage = () => {
       setFocusedCapabilityId(projection.focused_capability_id || projection.capability_order?.[0] || null);
     }
   }, [focusedCapabilityId, projection]);
+
+  useEffect(() => {
+    if (!projection?.interaction) return;
+    setSelectedTileInstanceId(projection.interaction.tile_instance_id || null);
+    setInteractionPanelState("open");
+    const activeCapabilityId = projection.active_capability_id;
+    const activePlayedCardIds = (projection.interaction.played_cards || [])
+      .filter((card: CardProjection) => card.capability_id === activeCapabilityId)
+      .map((card: CardProjection) => card.card_id);
+    setSelectedCardIds(activePlayedCardIds);
+  }, [projection?.active_capability_id, projection?.interaction?.tile_instance_id, projection?.version]);
 
   const latestEvent = useMemo(() => {
     const events = projection?.events || [];
@@ -413,28 +508,64 @@ const GameRoomPage = () => {
     });
   };
 
-  const startInteraction = (tileInstanceId: string) => {
-    if (!selectedCapabilityId) return;
+  const inspectTile = (tileInstanceId: string) => {
     setMoveMode(false);
-    void submitCommand("start_interaction", { capability_id: selectedCapabilityId, tile_instance_id: tileInstanceId });
+    setSelectedTileInstanceId(tileInstanceId);
+    setSelectedCardIds([]);
+    setInteractionPanelState("open");
   };
 
-  const playInteractionCard = (cardId: string) => {
+  const toggleDraftCard = (cardId: string) => {
+    setSelectedCardIds((cardIds) => cardIds.includes(cardId) ? cardIds.filter((id) => id !== cardId) : [...cardIds, cardId]);
+  };
+
+  const closeInteractionPanel = () => {
+    setInteractionPanelState("closing");
+    window.setTimeout(() => {
+      setSelectedTileInstanceId(null);
+      setSelectedCardIds([]);
+      setInteractionPanelState("open");
+    }, 260);
+  };
+
+  const initiateInteraction = async () => {
+    if (!selectedCapabilityId || !selectedTileInstanceId) return;
+    setMoveMode(false);
+    const result = await submitCommand("start_interaction", {
+      capability_id: selectedCapabilityId,
+      tile_instance_id: selectedTileInstanceId,
+      card_ids: selectedCardIds,
+    });
+    if (result?.ok !== false) setInteractionPanelState("open");
+  };
+
+  const confirmInteraction = async () => {
     if (!selectedCapabilityId) return;
-    void submitCommand("play_interaction_card", { capability_id: selectedCapabilityId, card_id: cardId });
+    const result = await submitCommand("resolve_interaction", {
+      capability_id: selectedCapabilityId,
+      card_ids: selectedCardIds,
+    });
+    const eventType = result?.events?.[0]?.type;
+    if (eventType === "interaction_resolved") {
+      setInteractionPanelState("success");
+      window.setTimeout(() => {
+        setSelectedTileInstanceId(null);
+        setSelectedCardIds([]);
+        setInteractionPanelState("open");
+      }, 420);
+    }
   };
 
-  const withdrawInteractionCard = (cardId: string) => {
-    if (!selectedCapabilityId) return;
-    void submitCommand("withdraw_interaction_card", { capability_id: selectedCapabilityId, card_id: cardId });
-  };
-
-  const resolveInteraction = () => {
-    void submitCommand("resolve_interaction");
-  };
-
-  const failInteraction = () => {
-    void submitCommand("fail_interaction");
+  const failInteraction = async () => {
+    const result = await submitCommand("fail_interaction");
+    if (result?.ok !== false) {
+      setInteractionPanelState("failure");
+      window.setTimeout(() => {
+        setSelectedTileInstanceId(null);
+        setSelectedCardIds([]);
+        setInteractionPanelState("open");
+      }, 420);
+    }
   };
 
   const endGame = async () => {
@@ -518,15 +649,19 @@ const GameRoomPage = () => {
         <div className="relative min-w-0 overflow-hidden border-r border-slate-800">
           {projection ? (
             <>
-              <BoardView moveMode={moveMode} onMove={movePoulpita} onStartInteraction={startInteraction} pending={pending} projection={projection} />
+              <BoardView moveMode={moveMode} onInspectTile={inspectTile} onMove={movePoulpita} pending={pending} projection={projection} />
               <InteractionPanel
                 onFail={failInteraction}
-                onPlayCard={playInteractionCard}
-                onResolve={resolveInteraction}
-                onWithdrawCard={withdrawInteractionCard}
+                onClose={closeInteractionPanel}
+                onInitiate={initiateInteraction}
+                onResolve={confirmInteraction}
+                onToggleCard={toggleDraftCard}
                 pending={pending}
                 projection={projection}
+                selectedCardIds={selectedCardIds}
                 selectedCapability={selectedCapability}
+                selectedTileInstanceId={selectedTileInstanceId}
+                visualState={interactionPanelState}
               />
             </>
           ) : (
@@ -594,10 +729,11 @@ const GameRoomPage = () => {
               {(selectedCapability?.hand || []).map((card) => (
                 <CardButton
                   card={card}
-                  disabled={pending || !projection?.interaction || projection?.active_capability_id !== selectedCapability?.id}
+                  disabled={pending || !(projection?.interaction || selectedTileInstanceId) || projection?.active_capability_id !== selectedCapability?.id}
                   key={card.card_id}
-                  onClick={() => projection?.interaction ? playInteractionCard(card.card_id) : undefined}
+                  onClick={() => (projection?.interaction || selectedTileInstanceId) ? toggleDraftCard(card.card_id) : undefined}
                   projection={projection as GameProjection}
+                  selected={selectedCardIds.includes(card.card_id)}
                 />
               ))}
               {(selectedCapability?.hand || []).length === 0 ? <p className="m-auto text-sm text-slate-500">No cards in hand.</p> : null}

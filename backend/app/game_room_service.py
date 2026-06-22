@@ -346,6 +346,34 @@ def _played_interactions(state: dict[str, Any]) -> list[str]:
     return interactions
 
 
+def _sync_interaction_cards(next_state: dict[str, Any], capability_id: str, selected_card_ids: list[str]) -> None:
+    interaction = next_state.get("interaction") or {}
+    capability = next_state.get("capabilities", {}).get(capability_id)
+    if capability is None:
+        raise ValueError("Unknown capability.")
+    selected = {str(card_id) for card_id in selected_card_ids}
+    kept_played = []
+    for card in interaction.get("played_cards") or []:
+        if card.get("capability_id") == capability_id:
+            capability.setdefault("hand", []).append(
+                {"card_id": card["card_id"], "interaction_id": card["interaction_id"], "owner_capability_id": capability_id}
+            )
+        else:
+            kept_played.append(card)
+    next_played = kept_played
+    hand = []
+    for card in capability.get("hand") or []:
+        if str(card.get("card_id")) in selected:
+            next_played.append({**card, "capability_id": capability_id})
+        else:
+            hand.append(card)
+    missing = selected - {str(card.get("card_id")) for card in next_played if card.get("capability_id") == capability_id}
+    if missing:
+        raise ValueError("Selected cards must be in this ability hand or already played by it.")
+    capability["hand"] = hand
+    interaction["played_cards"] = next_played
+
+
 def _criteria_met(required: list[str], played: list[str]) -> bool:
     remaining = list(required or [])
     for interaction_id in played:
@@ -694,6 +722,7 @@ class GameRoomService:
                 self._reject(state, command_id, "invalid_payload", "Command payload must be an object.")
             capability_id = str(payload.get("capability_id") or "")
             tile_instance_id = str(payload.get("tile_instance_id") or "")
+            selected_card_ids = [str(card_id) for card_id in (payload.get("card_ids") or [])]
             _require_active_action(self, state, command_id, capability_id)
             if state.get("interaction"):
                 self._reject(state, command_id, "interaction_already_active", "Resolve or fail the current interaction first.")
@@ -716,6 +745,11 @@ class GameRoomService:
                 "initiator_capability_id": capability_id,
                 "played_cards": [],
             }
+            try:
+                _sync_interaction_cards(next_state, capability_id, selected_card_ids)
+            except ValueError as exc:
+                self._reject(state, command_id, "invalid_selected_cards", str(exc))
+            _spend_action(next_state, capability_id)
             next_state["version"] = int(state["version"]) + 1
             event = {
                 "event_id": f"evt_{uuid.uuid4().hex}",
@@ -780,12 +814,36 @@ class GameRoomService:
             success = False
             counter_success = False
             if command_type == "resolve_interaction":
-                played = _played_interactions(state)
+                payload = command.get("payload") or {}
+                if payload and not isinstance(payload, dict):
+                    self._reject(state, command_id, "invalid_payload", "Command payload must be an object.")
+                capability_id = str((payload or {}).get("capability_id") or "")
+                selected_card_ids = [str(card_id) for card_id in ((payload or {}).get("card_ids") or [])]
+                if capability_id:
+                    if capability_id != state.get("active_capability_id"):
+                        self._reject(state, command_id, "not_active_capability", "Only the active capability can confirm cards.")
+                    try:
+                        _sync_interaction_cards(next_state, capability_id, selected_card_ids)
+                    except ValueError as exc:
+                        self._reject(state, command_id, "invalid_selected_cards", str(exc))
+                played = _played_interactions(next_state)
                 success = _criteria_met(tile.get("interaction_ids") or [], played)
                 counter_required = tile.get("counter_attack_interaction_ids") or []
                 counter_success = success and bool(counter_required) and _criteria_met(counter_required, played)
                 if not success:
-                    self._reject(state, command_id, "interaction_incomplete", "Required cards for normal success are missing.")
+                    next_state["version"] = int(state["version"]) + 1
+                    event = {
+                        "event_id": f"evt_{uuid.uuid4().hex}",
+                        "type": "interaction_cards_confirmed",
+                        "command_id": command_id,
+                        "tile_instance_id": interaction.get("tile_instance_id"),
+                        "success": False,
+                        "counter_success": False,
+                        "version": int(next_state["version"]),
+                        "created_at": _now_iso(),
+                    }
+                    next_state.setdefault("event_log", []).append(event)
+                    return next_state, [event]
                 _apply_effects(next_state, tile.get("success_effects") or [])
                 if counter_success:
                     _apply_effects(next_state, tile.get("counter_attack_effects") or [])
