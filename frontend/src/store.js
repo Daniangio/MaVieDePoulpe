@@ -141,7 +141,7 @@ export const useStore = create((set, get) => ({
         }
       );
       if (response.status === 401) {
-        get().clearAuth();
+        set({ sessionState: null, connectionIssue: "Session unavailable. Retrying..." });
         return null;
       }
       if (!response.ok) throw new Error(`Failed to fetch session state (${response.status})`);

@@ -60,7 +60,7 @@ def initialize_firebase_admin() -> None:
 def verify_firebase_token(id_token: str) -> VerifiedFirebaseIdentity:
     try:
         initialize_firebase_admin()
-        claims = firebase_admin_auth.verify_id_token(id_token, app=_firebase_app)
+        claims = firebase_admin_auth.verify_id_token(id_token, app=_firebase_app, clock_skew_seconds=60)
     except Exception as exc:  # noqa: BLE001
         raise FirebaseAuthError("Could not validate Firebase credentials") from exc
     uid = str(claims.get("uid") or "").strip()
