@@ -79,6 +79,8 @@ export type GameProjection = {
     tiles?: Record<string, any>;
     events?: Record<string, any>;
     interactions?: Record<string, any>;
+    cards?: Record<string, any>;
+    card_categories?: Array<Record<string, any>>;
   };
   interaction?: any;
   events: Array<Record<string, unknown>>;

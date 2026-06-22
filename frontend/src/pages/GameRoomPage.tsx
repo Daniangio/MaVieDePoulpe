@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import BoardView from "../components/BoardView";
+import BoardView from "../components/BoardView.js";
+import CardPreview from "../components/CardPreview.jsx";
 import HexTilePreview from "../components/HexTilePreview.jsx";
 import { useStore } from "../store.js";
 import type { CapabilityProjection, CardProjection, CommandRejection, GameProjection, NodeId } from "../types/game";
@@ -14,6 +15,42 @@ const phaseLabel = (projection: GameProjection | null) => {
   if (projection.phase === "setup") return "Setup";
   if (projection.phase === "game_over") return "Game over";
   return `Night ${projection.day_index || 1}`;
+};
+
+const DotTrack = ({
+  current,
+  total,
+  label,
+  mode = "used",
+}: {
+  current: number;
+  total: number;
+  label: string;
+  mode?: "available" | "used";
+}) => {
+  const safeTotal = Math.max(0, Number(total) || 0);
+  const safeCurrent = Math.max(0, Number(current) || 0);
+  return (
+    <div>
+      <span className="block text-[0.62rem] uppercase text-slate-400">{label}</span>
+      <div className="mt-1 flex flex-wrap gap-1">
+        {Array.from({ length: safeTotal }).map((_, index) => {
+          const filled = mode === "available" ? index < safeCurrent : index < safeCurrent;
+          return (
+            <span
+              aria-hidden="true"
+              className={[
+                "h-2.5 w-2.5 rounded-full border",
+                filled ? "border-teal-300 bg-teal-300" : "border-slate-500 bg-transparent",
+              ].join(" ")}
+              key={index}
+            />
+          );
+        })}
+        {safeTotal === 0 ? <span className="text-xs text-slate-500">-</span> : null}
+      </div>
+    </div>
+  );
 };
 
 const CapabilityBoard = ({
@@ -46,50 +83,66 @@ const CapabilityBoard = ({
   const initiableEvents = (capability.initiates_event_ids || [])
     .map((eventId) => projection?.tile_catalog?.events?.[eventId])
     .filter(Boolean);
+  const availableControls = Math.max(0, Number(capability.max_control_takes_per_night || 0) - Number(capability.control_takes_this_night || 0));
+  const availableActions = active
+    ? Math.max(0, Number(capability.max_actions_per_control || 0) - Number(capability.actions_taken_this_control || 0))
+    : Number(capability.max_actions_per_control || 0);
+  const handCount = Number(capability.hand?.length || 0);
+  const handLimit = Number(capability.current_max_cards_in_hand || 3);
+  const canSeeHand = focused || capability.id === "intelligence";
+  const cardCategories = projection?.tile_catalog?.card_categories || [];
+  const cardsByInteraction = projection?.tile_catalog?.cards || {};
+  const actionPoints = Math.max(0, Number(capability.pa || 0));
   return (
   <article
     className={[
-      "group relative min-w-0 rounded-md border bg-slate-900 text-slate-100 shadow-xl transition",
+      "relative min-w-0 rounded-md border bg-slate-900 text-slate-100 shadow-xl transition",
       active ? "border-teal-300" : focused ? "border-amber-300" : "border-slate-700",
-      compact ? "h-full p-2 hover:z-40 hover:h-52 hover:bg-slate-900" : "h-full p-3",
+      compact ? "h-full p-2" : "h-full p-3",
     ].join(" ")}
     onDoubleClick={onFocus}
   >
-    <div className="flex items-start justify-between gap-2">
+    <div className="flex items-start justify-between gap-1">
       <div className="min-w-0">
         <h3 className="truncate text-sm font-semibold text-white">{capability.name}</h3>
         <p className="text-xs text-slate-400">{active ? "Controls Poulpita" : focused ? "In focus" : "Waiting"}</p>
       </div>
-      <div className="rounded bg-slate-800 px-2 py-1 text-xs font-semibold text-black-100">{capability.pa} AP</div>
-    </div>
-    <div className={compact ? "mt-2 grid grid-cols-[1fr_auto] gap-2" : "mt-3 grid grid-cols-[1fr_7rem] gap-3"}>
-      <div className={compact ? "grid grid-cols-2 gap-2 text-xs" : "grid grid-cols-3 gap-2 text-xs"}>
-        <div className="rounded bg-slate-800 p-2">
-          <span className="block text-slate-400">Control</span>
-          <strong>
-            {capability.control_takes_this_night}/{capability.max_control_takes_per_night}
-          </strong>
-        </div>
-        <div className="rounded bg-slate-800 p-2">
-          <span className="block text-slate-400">Actions</span>
-          <strong>
-            {capability.actions_taken_this_control}/{capability.max_actions_per_control}
-          </strong>
-        </div>
-        {!compact ? (
-        <div className="rounded bg-slate-800 p-2">
-          <span className="block text-slate-400">Focus</span>
-          <strong>{focused ? "Yes" : "No"}</strong>
-        </div>
-        ) : null}
+      <div className="rounded bg-slate-800 px-2 py-1 text-xs font-semibold text-slate-100">
+        <DotTrack current={actionPoints} label="AP" mode="available" total={actionPoints} />
       </div>
-      <div className={`rounded bg-slate-800 p-2 ${compact ? "hidden w-16 group-hover:block" : ""}`}>
+    </div>
+    <div className={compact ? "mt-2 grid grid-cols-[minmax(0,1fr)_4.5rem] gap-2" : "mt-3 grid grid-cols-[1fr_8rem] gap-3"}>
+      <div className={compact ? "grid grid-cols-3 gap-1 text-xs" : "grid grid-cols-3 gap-1 text-xs"}>
+        <div className={compact ? "rounded bg-slate-800 p-1.5" : "rounded bg-slate-800 p-1"}>
+          <DotTrack current={availableControls} label="Controls" mode="available" total={capability.max_control_takes_per_night} />
+        </div>
+        <div className={compact ? "rounded bg-slate-800 p-1.5" : "rounded bg-slate-800 p-1"}>
+          <DotTrack current={availableActions} label="Actions" mode="available" total={capability.max_actions_per_control} />
+        </div>
+        <div className={compact ? "rounded bg-slate-800 p-1.5" : "rounded bg-slate-800 p-1"}>
+          <DotTrack current={Math.min(handCount, handLimit)} label={`Cards`} mode="available" total={handLimit} />
+          {compact ? (
+            <div className="mt-1 flex flex-wrap gap-1">
+              {(capability.hand || []).slice(0, 6).map((card) => {
+                const generatedCard = cardsByInteraction[card.interaction_id];
+                const imageUrl = generatedCard?.image_url ? buildApiUrl(generatedCard.image_url) : "";
+                return (
+                  <span className={`${canSeeHand ? "border-cyan-300 bg-cyan-50" : "border-slate-500 bg-[linear-gradient(135deg,#0f766e_0_45%,#164e63_45%_55%,#0f766e_55%)]"} flex h-5 w-3.5 items-center justify-center overflow-hidden rounded-sm border text-[0.45rem] text-teal-900`} key={card.card_id} title={canSeeHand ? generatedCard?.name || card.interaction_id : "Hidden card"}>
+                    {canSeeHand && imageUrl ? <img alt="" className="h-full w-full object-cover" src={imageUrl} /> : canSeeHand ? generatedCard?.name?.slice(0, 1) || "?" : null}
+                  </span>
+                );
+              })}
+            </div>
+          ) : null}
+        </div>
+      </div>
+      <div className={compact ? "rounded bg-slate-800 p-1.5" : "rounded bg-slate-800 p-2"}>
         <span className="block text-xs text-slate-400">Can initiate</span>
-        <div className="mt-2 flex flex-wrap gap-1">
+        <div className={compact ? "mt-1 flex flex-wrap gap-1" : "mt-2 flex flex-wrap gap-1"}>
           {initiableEvents.map((event: any) => {
             const imageUrl = event.image_url ? buildApiUrl(event.image_url) : "";
             return (
-              <span className="flex h-7 w-7 items-center justify-center overflow-hidden rounded border border-slate-700 bg-slate-900 text-[0.55rem]" key={event.id} title={event.name}>
+              <span className={`${compact ? "h-5 w-5" : "h-7 w-7"} flex items-center justify-center overflow-hidden rounded border border-slate-700 bg-slate-900 text-[0.55rem]`} key={event.id} title={event.name}>
                 {imageUrl ? <img alt="" className="h-full w-full object-cover" src={imageUrl} /> : event.name?.slice(0, 2)}
               </span>
             );
@@ -98,7 +151,6 @@ const CapabilityBoard = ({
         </div>
       </div>
     </div>
-    {compact ? <p className="mt-2 hidden text-xs text-slate-400 group-hover:block">Double-click to focus this board.</p> : null}
     {!compact ? (
       <div className="mt-3 flex flex-wrap gap-2">
         <button
@@ -156,20 +208,29 @@ const CardButton = ({
   onClick?: () => void;
 }) => {
   const interaction = projection.tile_catalog?.interactions?.[card.interaction_id];
+  const generatedCard = projection.tile_catalog?.cards?.[card.interaction_id];
+  const cardCategories = projection.tile_catalog?.card_categories || [];
   const imageUrl = interaction?.image_url ? buildApiUrl(interaction.image_url) : "";
   return (
-    <button
-      className={[
-        "flex h-24 w-20 flex-col items-center justify-between rounded-md border bg-slate-800 p-2 text-xs text-white transition disabled:opacity-50",
-        selected ? "border-amber-300 ring-2 ring-amber-200" : "border-cyan-700 hover:border-cyan-300",
-      ].join(" ")}
-      disabled={disabled}
-      onClick={onClick}
-      type="button"
-    >
-      {imageUrl ? <img alt="" className="h-10 w-10 rounded object-cover" src={imageUrl} /> : <span className="flex h-10 w-10 items-center justify-center rounded bg-slate-700">{interaction?.name?.slice(0, 2) || "?"}</span>}
-      <span className="line-clamp-2 text-center">{interaction?.name || card.interaction_id}</span>
-    </button>
+    <span className="group/card relative inline-block">
+      <button
+        className={[
+          "flex h-24 w-20 flex-col items-center justify-between rounded-md border bg-slate-800 p-2 text-xs text-white transition disabled:opacity-50",
+          selected ? "border-amber-300 ring-2 ring-amber-200" : "border-cyan-700 hover:border-cyan-300",
+        ].join(" ")}
+        disabled={disabled}
+        onClick={onClick}
+        type="button"
+      >
+        {imageUrl ? <img alt="" className="h-10 w-10 rounded object-cover" src={imageUrl} /> : <span className="flex h-10 w-10 items-center justify-center rounded bg-slate-700">{interaction?.name?.slice(0, 2) || "?"}</span>}
+        <span className="line-clamp-2 text-center">{interaction?.name || card.interaction_id}</span>
+      </button>
+      {generatedCard ? (
+        <span className="pointer-events-none absolute bottom-full left-1/2 z-[90] hidden w-80 -translate-x-1/2 pb-2 group-hover/card:block">
+          <CardPreview card={generatedCard} categories={cardCategories} />
+        </span>
+      ) : null}
+    </span>
   );
 };
 
@@ -649,7 +710,7 @@ const GameRoomPage = () => {
         <div className="relative min-w-0 overflow-hidden border-r border-slate-800">
           {projection ? (
             <>
-              <BoardView moveMode={moveMode} onInspectTile={inspectTile} onMove={movePoulpita} pending={pending} projection={projection} />
+              <BoardView focusedCapabilityId={selectedCapabilityId} moveMode={moveMode} onInspectTile={inspectTile} onMove={movePoulpita} pending={pending} projection={projection} />
               <InteractionPanel
                 onFail={failInteraction}
                 onClose={closeInteractionPanel}

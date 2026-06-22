@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import AdminLevelEditor from "../components/AdminLevelEditor.jsx";
 import AdminMapEditor from "../components/AdminMapEditor.jsx";
 import HexTilePreview from "../components/HexTilePreview.jsx";
+import CardPreview from "../components/CardPreview.jsx";
 import PlayerBoardPreview from "../components/PlayerBoardPreview.jsx";
 import { PageSubnavigation } from "../components/AuthenticatedLayout.jsx";
 import { useStore } from "../store.js";
@@ -522,32 +523,7 @@ const CardsView = ({ cardCategories, content }) => (
     <h2 className="font-semibold text-teal-950">Generated Cards</h2>
     <div className="mt-4 grid gap-3 md:grid-cols-2">
       {content.cards.map((card) => (
-        <article className="rounded-md border border-cyan-200 bg-white p-3 shadow-sm" key={card.id}>
-          <div className="flex items-center gap-3">
-            {card.image_url ? <img alt="" className="h-12 w-12 rounded object-cover" src={buildApiUrl(card.image_url)} /> : null}
-            <h3 className="font-semibold text-teal-950">{card.name}</h3>
-          </div>
-          <div className="mt-3 grid gap-2 sm:grid-cols-2">
-            {cardCategories.map((category) => {
-              const resolved = card.resolves?.[category.id] || [];
-              return (
-                <div className={`rounded border p-2 ${category.special ? "border-fuchsia-200 bg-fuchsia-50" : "border-cyan-100 bg-cyan-50"}`} key={category.id}>
-                  <p className="text-xs font-semibold text-teal-900">{category.name}</p>
-                  {resolved.length ? (
-                    <div className="mt-2 flex flex-wrap gap-2">
-                      {resolved.map((entry) => (
-                        <span className="inline-flex items-center gap-1 rounded bg-white px-2 py-1 text-xs text-slate-700 shadow-sm" key={`${entry.tile_id}:${entry.event_id}:${entry.requirement_type}`}>
-                          {entry.event_image_url ? <img alt="" className="h-5 w-5 rounded object-cover" src={buildApiUrl(entry.event_image_url)} /> : null}
-                          {entry.event_name}
-                        </span>
-                      ))}
-                    </div>
-                  ) : <p className="mt-2 text-xs text-slate-400">None</p>}
-                </div>
-              );
-            })}
-          </div>
-        </article>
+        <CardPreview card={card} categories={cardCategories} key={card.id} />
       ))}
       {content.cards.length === 0 ? <p className="text-sm text-slate-500">Create interaction types to generate cards.</p> : null}
     </div>

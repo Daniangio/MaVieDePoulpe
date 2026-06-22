@@ -286,6 +286,8 @@ def get_game_content_catalog() -> dict[str, dict[str, Any]]:
         "tiles": {tile["id"]: dict(tile) for tile in content.get("tiles", [])},
         "events": {event["id"]: _with_urls(event) for event in content.get("events", [])},
         "interactions": {interaction["id"]: _with_urls(interaction) for interaction in content.get("interactions", [])},
+        "cards": {card["id"]: card for card in _generated_cards(content)},
+        "card_categories": [dict(category) for category in content.get("categories", [])] + [dict(COUNTER_ATTACK_CATEGORY)],
     }
 
 

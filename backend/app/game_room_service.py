@@ -208,7 +208,16 @@ def _build_tile_catalog() -> dict[str, Any]:
     public_tiles = {}
     for tile_id, tile in catalog["tiles"].items():
         public_tiles[tile_id] = _tile_public(tile, catalog)
-    return {"tiles": public_tiles, "events": catalog["events"], "interactions": catalog["interactions"]}
+    cards = catalog.get("cards") or {}
+    if isinstance(cards, list):
+        cards = {card["id"]: card for card in cards if card.get("id")}
+    return {
+        "tiles": public_tiles,
+        "events": catalog["events"],
+        "interactions": catalog["interactions"],
+        "cards": cards,
+        "card_categories": catalog.get("card_categories") or [],
+    }
 
 
 def _level_tiles(level_config: dict[str, Any], catalog: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
@@ -219,7 +228,7 @@ def _level_tiles(level_config: dict[str, Any], catalog: dict[str, Any]) -> dict[
             for _index in range(max(0, int(count or 0))):
                 tile = catalog["tiles"].get(tile_id)
                 if tile:
-                    expanded.append({"instance_id": f"tile_{uuid.uuid4().hex}", "tile_id": tile_id, "face_up": True})
+                    expanded.append({"instance_id": f"tile_{uuid.uuid4().hex}", "tile_id": tile_id, "face_up": False})
         random.shuffle(expanded)
         group_node_ids = [node_id for node_id, group_id in (level_config.get("node_group_ids") or {}).items() if group_id == group["id"]]
         for node_id in group_node_ids:
@@ -229,12 +238,31 @@ def _level_tiles(level_config: dict[str, Any], catalog: dict[str, Any]) -> dict[
     return node_tiles
 
 
+def _apply_tile_visibility(state: dict[str, Any]) -> None:
+    current_node_id = state.get("poulpita", {}).get("node_id")
+    if not current_node_id:
+        return
+    adjacency = (state.get("map") or {}).get("adjacency") or {}
+    reveal_limits = {str(current_node_id): 2}
+    for adjacent_node_id in adjacency.get(current_node_id, []) or []:
+        reveal_limits[str(adjacent_node_id)] = max(1, reveal_limits.get(str(adjacent_node_id), 0))
+    for node_id, reveal_limit in reveal_limits.items():
+        revealed = 0
+        for tile_instance in (state.get("tiles") or {}).get(node_id, []) or []:
+            if tile_instance.get("face_up"):
+                revealed += 1
+                continue
+            if revealed < reveal_limit:
+                tile_instance["face_up"] = True
+                revealed += 1
+
+
 def _goldfish_state(room_id: str, *, level_id: str | None = None) -> dict[str, Any]:
     level_config = get_level_config(level_id)
     map_config = get_map(level_config["map_id"])
     _validate_map_config(map_config)
     tile_catalog = _build_tile_catalog()
-    return {
+    state = {
         "room_id": room_id,
         "mode": "goldfish",
         "version": 1,
@@ -268,12 +296,22 @@ def _goldfish_state(room_id: str, *, level_id: str | None = None) -> dict[str, A
             }
         ],
     }
+    _apply_tile_visibility(state)
+    return state
 
 
 def _project_state(state: dict[str, Any]) -> dict[str, Any]:
     capabilities = deepcopy(state.get("capabilities") or {})
     capability_order = list(CAPABILITY_ORDER)
     player_boards = [capabilities[capability_id] for capability_id in capability_order if capability_id in capabilities]
+    projected_tiles = {}
+    for node_id, node_tiles in (state.get("tiles") or {}).items():
+        projected_tiles[node_id] = [
+            deepcopy(tile_instance)
+            if tile_instance.get("face_up")
+            else {"instance_id": tile_instance.get("instance_id"), "face_up": False}
+            for tile_instance in node_tiles or []
+        ]
     return {
         "room_id": state["room_id"],
         "projection_mode": "goldfish",
@@ -303,7 +341,7 @@ def _project_state(state: dict[str, Any]) -> dict[str, Any]:
         "player_boards": player_boards,
         "map": deepcopy(state["map"]),
         "poulpita": deepcopy(state["poulpita"]),
-        "tiles": deepcopy(state.get("tiles") or {}),
+        "tiles": projected_tiles,
         "tile_catalog": deepcopy(state.get("tile_catalog") or {}),
         "interaction": deepcopy(state.get("interaction")),
         "events": list(state.get("event_log") or [])[-20:],
@@ -614,6 +652,7 @@ class GameRoomService:
             next_state["poulpita"]["node_id"] = target_node_id
             _spend_action(next_state, capability_id, ap_cost=1)
             next_state["night_time_spent"] = int(next_state.get("night_time_spent") or 0) + 1
+            _apply_tile_visibility(next_state)
             event = {
                 "event_id": f"evt_{uuid.uuid4().hex}",
                 "type": "poulpita_moved",
@@ -731,6 +770,8 @@ class GameRoomService:
                 self._reject(state, command_id, "unknown_tile", "Tile not found.")
             if node_id != state.get("poulpita", {}).get("node_id"):
                 self._reject(state, command_id, "tile_not_on_poulpita_node", "Poulpita must be on the tile node.")
+            if not tile_instance.get("face_up"):
+                self._reject(state, command_id, "tile_face_down", "This tile is not revealed yet.")
             tile = (state.get("tile_catalog") or {}).get("tiles", {}).get(tile_instance.get("tile_id"))
             if not tile:
                 self._reject(state, command_id, "unknown_tile", "Tile definition not found.")
@@ -849,9 +890,11 @@ class GameRoomService:
                     _apply_effects(next_state, tile.get("counter_attack_effects") or [])
                 node_tiles = next_state.get("tiles", {}).get(interaction.get("node_id")) or []
                 next_state["tiles"][interaction.get("node_id")] = [entry for entry in node_tiles if entry.get("instance_id") != interaction.get("tile_instance_id")]
+                _apply_tile_visibility(next_state)
                 event_type = "interaction_resolved"
             else:
                 _apply_failure_effects(next_state, tile.get("failure_effects") or [], interaction)
+                _apply_tile_visibility(next_state)
                 event_type = "interaction_failed"
             for card in interaction.get("played_cards") or []:
                 capability = next_state["capabilities"].get(card.get("capability_id"))
