@@ -166,6 +166,16 @@ def _expand_deck(deck_config: list[dict[str, Any]], capability_id: str) -> list[
     return cards
 
 
+def _refill_draw_pile_from_discard(capability: dict[str, Any]) -> bool:
+    discard = capability.get("discard") or []
+    if capability.get("draw_pile") or not discard:
+        return False
+    capability["draw_pile"] = deepcopy(discard)
+    capability["discard"] = []
+    random.shuffle(capability["draw_pile"])
+    return True
+
+
 def _initial_capabilities(*, deal_hands: bool = False) -> dict[str, dict[str, Any]]:
     board_configs = {board["id"]: board for board in get_player_board_configs()}
     capabilities = {}
@@ -432,7 +442,44 @@ def _apply_effects(next_state: dict[str, Any], effects: list[dict[str, Any]]) ->
             next_state["poulpita"]["seashells"] = int(next_state["poulpita"].get("seashells") or 0) + amount
 
 
-def _apply_failure_effects(next_state: dict[str, Any], effects: list[dict[str, Any]], interaction: dict[str, Any]) -> None:
+def _move_poulpita_without_ap(next_state: dict[str, Any], target_node_id: str) -> None:
+    current_node_id = str(next_state.get("poulpita", {}).get("node_id") or "")
+    next_state["poulpita"]["previous_node_id"] = current_node_id or None
+    next_state["poulpita"]["node_id"] = target_node_id
+
+
+def _move_interaction_tile(next_state: dict[str, Any], interaction: dict[str, Any], target_node_id: str) -> None:
+    source_node_id = interaction.get("node_id")
+    tile_instance_id = interaction.get("tile_instance_id")
+    source_tiles = next_state.get("tiles", {}).get(source_node_id) or []
+    tile_instance = next((entry for entry in source_tiles if entry.get("instance_id") == tile_instance_id), None)
+    if tile_instance is None:
+        return
+    next_state["tiles"][source_node_id] = [entry for entry in source_tiles if entry.get("instance_id") != tile_instance_id]
+    next_state.setdefault("tiles", {}).setdefault(target_node_id, []).append(tile_instance)
+    interaction["node_id"] = target_node_id
+
+
+def _remove_tiles_by_category(next_state: dict[str, Any], node_id: str, category_id: str) -> None:
+    catalog_tiles = (next_state.get("tile_catalog") or {}).get("tiles") or {}
+    catalog_events = (next_state.get("tile_catalog") or {}).get("events") or {}
+    kept_tiles = []
+    for tile_instance in (next_state.get("tiles", {}).get(node_id) or []):
+        tile = catalog_tiles.get(tile_instance.get("tile_id")) or {}
+        event = tile.get("event") or catalog_events.get(tile.get("event_id")) or {}
+        if event.get("category_id") != category_id:
+            kept_tiles.append(tile_instance)
+    next_state["tiles"][node_id] = kept_tiles
+
+
+def _apply_failure_effects(
+    next_state: dict[str, Any],
+    effects: list[dict[str, Any]],
+    interaction: dict[str, Any],
+    *,
+    free_move_target_node_id: str | None = None,
+) -> None:
+    original_previous_node_id = next_state.get("poulpita", {}).get("previous_node_id")
     for effect in effects or []:
         effect_type = str(effect.get("type") or "")
         amount = int(effect.get("amount") or 0)
@@ -445,16 +492,29 @@ def _apply_failure_effects(next_state: dict[str, Any], effects: list[dict[str, A
         elif effect_type == "lose_ap":
             for capability in (next_state.get("capabilities") or {}).values():
                 capability["pa"] = max(0, int(capability.get("pa") or 0) - amount)
-        elif effect_type == "half_ap":
+        elif effect_type == "lose_half_ap":
             for capability in (next_state.get("capabilities") or {}).values():
                 capability["pa"] = max(0, int(capability.get("pa") or 0) // 2)
-        elif effect_type == "all_ap":
+        elif effect_type == "lose_all_ap":
             for capability in (next_state.get("capabilities") or {}).values():
                 capability["pa"] = 0
+        elif effect_type == "pulpita_move_previous":
+            if original_previous_node_id:
+                _move_poulpita_without_ap(next_state, str(original_previous_node_id))
+        elif effect_type == "pulpita_move_free":
+            if free_move_target_node_id:
+                _move_poulpita_without_ap(next_state, free_move_target_node_id)
         elif effect_type == "remove_tile":
             node_id = interaction.get("node_id")
             node_tiles = next_state.get("tiles", {}).get(node_id) or []
             next_state["tiles"][node_id] = [entry for entry in node_tiles if entry.get("instance_id") != interaction.get("tile_instance_id")]
+        elif effect_type == "move_tile_previous":
+            if original_previous_node_id:
+                _move_interaction_tile(next_state, interaction, str(original_previous_node_id))
+        elif effect_type == "remove_preys":
+            category_id = str(effect.get("category_id") or "")
+            if category_id:
+                _remove_tiles_by_category(next_state, str(interaction.get("node_id") or ""), category_id)
 
 
 class GameRoomService:
@@ -733,14 +793,34 @@ class GameRoomService:
                 self._reject(state, command_id, "invalid_payload", "Command payload must be an object.")
             capability_id = str(payload.get("capability_id") or "")
             capability = _require_active_action(self, state, command_id, capability_id, ap_cost=1)
-            if len(capability.get("hand") or []) >= int(capability.get("current_max_cards_in_hand") or 3):
-                self._reject(state, command_id, "hand_limit_reached", "Drawing would exceed this ability hand limit.")
-            if not (capability.get("draw_pile") or []):
+            discard_card_id = str(payload.get("discard_card_id") or "").strip()
+            hand = capability.get("hand") or []
+            hand_limit = int(capability.get("current_max_cards_in_hand") or 3)
+            if len(hand) >= hand_limit and not discard_card_id:
+                self._reject(state, command_id, "discard_required", "Choose a card to discard before drawing.")
+            if discard_card_id and not any(card.get("card_id") == discard_card_id for card in hand):
+                self._reject(state, command_id, "unknown_discard_card", "Discarded card must be in this ability hand.")
+            if not (capability.get("draw_pile") or capability.get("discard") or discard_card_id):
                 self._reject(state, command_id, "empty_deck", "This ability has no cards left to draw.")
             next_state = deepcopy(state)
             next_capability = next_state["capabilities"][capability_id]
+            discarded_card = None
+            if discard_card_id:
+                next_hand = []
+                for hand_card in next_capability.get("hand") or []:
+                    if hand_card.get("card_id") == discard_card_id:
+                        discarded_card = hand_card
+                    else:
+                        next_hand.append(hand_card)
+                next_capability["hand"] = next_hand
+                if discarded_card:
+                    next_capability.setdefault("discard", []).append(discarded_card)
+            _refill_draw_pile_from_discard(next_capability)
+            if not (next_capability.get("draw_pile") or []):
+                self._reject(state, command_id, "empty_deck", "This ability has no cards left to draw.")
             card = next_capability["draw_pile"].pop(0)
             next_capability.setdefault("hand", []).append(card)
+            _refill_draw_pile_from_discard(next_capability)
             _spend_action(next_state, capability_id, ap_cost=1)
             next_state["version"] = int(state["version"]) + 1
             event = {
@@ -749,6 +829,7 @@ class GameRoomService:
                 "command_id": command_id,
                 "capability_id": capability_id,
                 "interaction_id": card.get("interaction_id"),
+                "discarded_card_id": discard_card_id or None,
                 "version": int(next_state["version"]),
                 "created_at": _now_iso(),
             }
@@ -893,7 +974,26 @@ class GameRoomService:
                 _apply_tile_visibility(next_state)
                 event_type = "interaction_resolved"
             else:
-                _apply_failure_effects(next_state, tile.get("failure_effects") or [], interaction)
+                payload = command.get("payload") or {}
+                if payload and not isinstance(payload, dict):
+                    self._reject(state, command_id, "invalid_payload", "Command payload must be an object.")
+                failure_effects = tile.get("failure_effects") or []
+                free_move_target_node_id = str((payload or {}).get("target_node_id") or "")
+                if any(effect.get("type") == "pulpita_move_free" for effect in failure_effects):
+                    current_node_id = str(state.get("poulpita", {}).get("node_id") or "")
+                    adjacency = (state.get("map") or {}).get("adjacency") or {}
+                    if not free_move_target_node_id:
+                        self._reject(state, command_id, "free_move_target_required", "Choose where Poulpita moves after this failed interaction.")
+                    if free_move_target_node_id not in (state.get("map", {}).get("nodes") or {}):
+                        self._reject(state, command_id, "unknown_target_node", "Target node does not exist.")
+                    if free_move_target_node_id not in adjacency.get(current_node_id, []):
+                        self._reject(state, command_id, "non_adjacent_node", "Poulpita can move only to an adjacent node.")
+                _apply_failure_effects(
+                    next_state,
+                    failure_effects,
+                    interaction,
+                    free_move_target_node_id=free_move_target_node_id or None,
+                )
                 _apply_tile_visibility(next_state)
                 event_type = "interaction_failed"
             for card in interaction.get("played_cards") or []:

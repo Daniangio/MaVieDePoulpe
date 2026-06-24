@@ -31,12 +31,14 @@ FAILURE_EFFECT_TYPES = {
     "lose_neurons",
     "lose_seashells",
     "lose_ap",
-    "half_ap",
-    "all_ap",
-    "stay_node",
-    "move_node_free",
+    "lose_half_ap",
+    "lose_all_ap",
+    "pulpita_move_previous",
+    "pulpita_move_free",
     "keep_tile",
     "remove_tile",
+    "move_tile_previous",
+    "remove_preys",
 }
 PLAYER_BOARD_ORDER = ["agility", "camouflage", "force", "propulsion", "intelligence"]
 PLAYER_BOARD_DEFAULT_NAMES = {
@@ -47,11 +49,6 @@ PLAYER_BOARD_DEFAULT_NAMES = {
     "intelligence": "Intelligence",
 }
 UPGRADE_COST_RESOURCES = {"energy", "neurons"}
-LEGACY_FAILURE_EFFECT_TYPES = {
-    "move_pulpita_previous": "stay_node",
-    "move_pulpita_free": "move_node_free",
-    "move_tile_previous": "keep_tile",
-}
 
 
 def _slug(value: str) -> str:
@@ -100,7 +97,6 @@ def _read_content() -> dict[str, Any]:
         tile.setdefault("success_effects", [])
         tile.setdefault("counter_attack_effects", [])
         tile.setdefault("failure_effects", [])
-        tile["failure_effects"] = _migrate_failure_effects(tile["failure_effects"])
     return content
 
 
@@ -313,6 +309,12 @@ def delete_category(category_id: str) -> None:
     content = _read_content()
     if any(event.get("category_id") == category_id for event in content["events"]):
         raise ValueError("Category is used by one or more events.")
+    if any(
+        effect.get("type") == "remove_preys" and effect.get("category_id") == category_id
+        for tile in content["tiles"]
+        for effect in (tile.get("failure_effects") or [])
+    ):
+        raise ValueError("Category is used by one or more tile effects.")
     index = _find_index(content["categories"], category_id)
     del content["categories"][index]
     _write_content(content)
@@ -426,7 +428,13 @@ def _normalize_event_ids(event_ids: list[str], event_set: set[str]) -> list[str]
     return normalized
 
 
-def _normalize_effects(effects: list[dict[str, Any]], allowed_types: set[str], label: str) -> list[dict[str, Any]]:
+def _normalize_effects(
+    effects: list[dict[str, Any]],
+    allowed_types: set[str],
+    label: str,
+    *,
+    category_ids: set[str] | None = None,
+) -> list[dict[str, Any]]:
     normalized = []
     for effect in effects or []:
         if not isinstance(effect, dict):
@@ -434,22 +442,26 @@ def _normalize_effects(effects: list[dict[str, Any]], allowed_types: set[str], l
         effect_type = str(effect.get("type") or "")
         if effect_type not in allowed_types:
             raise ValueError(f"Unsupported {label} effect: {effect_type or '<missing>'}.")
+        if effect_type == "remove_preys":
+            category_id = str(effect.get("category_id") or "")
+            if not category_id or category_id not in (category_ids or set()):
+                raise ValueError("remove_preys requires an existing category.")
+            normalized.append({"type": effect_type, "amount": None, "category_id": category_id})
+            continue
         amount = int(effect.get("amount") or 0)
-        no_amount_types = {"half_ap", "all_ap", "stay_node", "move_node_free", "keep_tile", "remove_tile"}
+        no_amount_types = {
+            "lose_half_ap",
+            "lose_all_ap",
+            "pulpita_move_previous",
+            "pulpita_move_free",
+            "keep_tile",
+            "remove_tile",
+            "move_tile_previous",
+        }
         if effect_type not in no_amount_types and amount < 1:
             raise ValueError(f"{label} effect amount must be at least 1.")
         normalized.append({"type": effect_type, "amount": None if effect_type in no_amount_types else amount})
     return normalized
-
-
-def _migrate_failure_effects(effects: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    migrated = []
-    for effect in effects or []:
-        if not isinstance(effect, dict):
-            continue
-        effect_type = str(effect.get("type") or "")
-        migrated.append({**effect, "type": LEGACY_FAILURE_EFFECT_TYPES.get(effect_type, effect_type)})
-    return migrated
 
 
 def save_tile(
@@ -467,6 +479,7 @@ def save_tile(
     if not any(event.get("id") == event_id for event in content["events"]):
         raise ValueError("Tile event does not exist.")
     interaction_set = {interaction.get("id") for interaction in content["interactions"]}
+    category_ids = {category.get("id") for category in content["categories"]}
     normalized_interactions = _normalize_interaction_ids(interaction_ids, interaction_set)
     if not normalized_interactions:
         raise ValueError("A tile needs at least one required interaction.")
@@ -478,7 +491,7 @@ def save_tile(
         "counter_attack_interaction_ids": _normalize_interaction_ids(counter_attack_interaction_ids or [], interaction_set),
         "success_effects": _normalize_effects(success_effects or [], SUCCESS_EFFECT_TYPES, "success"),
         "counter_attack_effects": _normalize_effects(counter_attack_effects or [], SUCCESS_EFFECT_TYPES, "counter-attack"),
-        "failure_effects": _normalize_effects(failure_effects or [], FAILURE_EFFECT_TYPES, "failure"),
+        "failure_effects": _normalize_effects(failure_effects or [], FAILURE_EFFECT_TYPES, "failure", category_ids=category_ids),
     }
     if tile_id:
         content["tiles"][_find_index(content["tiles"], tile_id)] = tile

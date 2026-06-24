@@ -48,14 +48,16 @@ const failureEffectOptions = [
   ["lose_neurons", "Lose neurons"],
   ["lose_seashells", "Lose seashells"],
   ["lose_ap", "Lose AP"],
-  ["half_ap", "Lose half AP"],
-  ["all_ap", "Lose all AP"],
-  ["stay_node", "Poulpita remains on same node"],
-  ["move_node_free", "Poulpita must move for free"],
+  ["lose_half_ap", "Lose half AP"],
+  ["lose_all_ap", "Lose all AP"],
+  ["pulpita_move_previous", "Poulpita moves to previous node"],
+  ["pulpita_move_free", "Poulpita must move for free"],
   ["keep_tile", "Keep tile"],
   ["remove_tile", "Remove tile"],
+  ["move_tile_previous", "Move tile to previous node"],
+  ["remove_preys", "Remove tiles by category"],
 ];
-const noAmountEffectTypes = new Set(["half_ap", "all_ap", "stay_node", "move_node_free", "keep_tile", "remove_tile"]);
+const noAmountEffectTypes = new Set(["lose_half_ap", "lose_all_ap", "pulpita_move_previous", "pulpita_move_free", "keep_tile", "remove_tile", "move_tile_previous", "remove_preys"]);
 
 const contentTabs = [
   ["map", "Map"],
@@ -269,7 +271,17 @@ const AdminContentPage = () => {
   };
 
   const addEffect = (field, type) => {
-    setTileDraft((current) => ({ ...current, [field]: [...(current[field] || []), { type, amount: noAmountEffectTypes.has(type) ? null : 1 }] }));
+    setTileDraft((current) => ({
+      ...current,
+      [field]: [
+        ...(current[field] || []),
+        {
+          type,
+          amount: noAmountEffectTypes.has(type) ? null : 1,
+          ...(type === "remove_preys" ? { category_id: content.categories?.[0]?.id || "" } : {}),
+        },
+      ],
+    }));
   };
 
   const updateEffect = (field, index, patch) => {
@@ -506,7 +518,7 @@ const TileEditor = ({ addEffect, busy, categoriesById, content, deleteItem, even
         <InteractionChecklist title="Optional counter-attack" field="counter_attack_interaction_ids" interactions={content.interactions} selected={tileDraft.counter_attack_interaction_ids} onToggle={toggleTileInteraction} />
         <EffectEditor title="Success effects" field="success_effects" effects={tileDraft.success_effects} options={successEffectOptions} onAdd={addEffect} onUpdate={updateEffect} onRemove={removeEffect} />
         <EffectEditor title="Counter-attack effects" field="counter_attack_effects" effects={tileDraft.counter_attack_effects} options={successEffectOptions} onAdd={addEffect} onUpdate={updateEffect} onRemove={removeEffect} />
-        <EffectEditor title="Failure effects" field="failure_effects" effects={tileDraft.failure_effects} options={failureEffectOptions} onAdd={addEffect} onUpdate={updateEffect} onRemove={removeEffect} />
+        <EffectEditor categories={content.categories} title="Failure effects" field="failure_effects" effects={tileDraft.failure_effects} options={failureEffectOptions} onAdd={addEffect} onUpdate={updateEffect} onRemove={removeEffect} />
         <button className="w-full rounded-md bg-teal-500 px-3 py-2 text-sm font-semibold text-white hover:bg-teal-600 disabled:opacity-60" disabled={busy} onClick={saveTile} type="button">{tileDraft.id ? "Update tile" : "Create tile"}</button>
       </div>
       <div className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3">
@@ -652,7 +664,7 @@ const InteractionChecklist = ({ title, field, interactions, selected = [], onTog
   </div>
 );
 
-const EffectEditor = ({ title, field, effects = [], options, onAdd, onUpdate, onRemove }) => (
+const EffectEditor = ({ title, field, effects = [], options, categories = [], onAdd, onUpdate, onRemove }) => (
   <div className="rounded-md border border-cyan-100 bg-white p-3">
     <div className="flex items-center justify-between gap-2">
       <p className="text-sm font-medium text-teal-950">{title}</p>
@@ -664,12 +676,30 @@ const EffectEditor = ({ title, field, effects = [], options, onAdd, onUpdate, on
     <div className="mt-2 space-y-2">
       {effects.map((effect, index) => {
         const needsAmount = !noAmountEffectTypes.has(effect.type);
+        const needsCategory = effect.type === "remove_preys";
         return (
           <div className="flex items-center gap-2 rounded bg-cyan-50 p-2" key={`${effect.type}:${index}`}>
-            <select className="min-w-0 flex-1 rounded border border-cyan-200 bg-white px-2 py-1 text-xs" value={effect.type} onChange={(event) => onUpdate(field, index, { type: event.target.value, amount: noAmountEffectTypes.has(event.target.value) ? null : effect.amount || 1 })}>
+            <select
+              className="min-w-0 flex-1 rounded border border-cyan-200 bg-white px-2 py-1 text-xs"
+              value={effect.type}
+              onChange={(event) => {
+                const nextType = event.target.value;
+                onUpdate(field, index, {
+                  type: nextType,
+                  amount: noAmountEffectTypes.has(nextType) ? null : effect.amount || 1,
+                  category_id: nextType === "remove_preys" ? effect.category_id || categories[0]?.id || "" : undefined,
+                });
+              }}
+            >
               {options.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
             </select>
             {needsAmount ? <input className="w-16 rounded border border-cyan-200 bg-white px-2 py-1 text-xs" min="1" type="number" value={effect.amount || 1} onChange={(event) => onUpdate(field, index, { amount: Number(event.target.value) })} /> : null}
+            {needsCategory ? (
+              <select className="w-32 rounded border border-cyan-200 bg-white px-2 py-1 text-xs" value={effect.category_id || ""} onChange={(event) => onUpdate(field, index, { category_id: event.target.value })}>
+                <option value="">Category</option>
+                {categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
+              </select>
+            ) : null}
             <button className="rounded border border-rose-200 bg-white px-2 py-1 text-xs text-rose-700" onClick={() => onRemove(field, index)} type="button">Remove</button>
           </div>
         );

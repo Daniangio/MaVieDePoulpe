@@ -182,7 +182,7 @@ const CapabilityBoard = ({
         </button>
         <button
           className="rounded border border-slate-600 px-3 py-2 text-xs text-slate-100 hover:bg-slate-800 disabled:opacity-50"
-          disabled={pending || !active || capability.pa < 1 || Number(capability.hand?.length || 0) >= Number(capability.current_max_cards_in_hand || 3)}
+          disabled={pending || !active || capability.pa < 1}
           onClick={onDraw}
           type="button"
         >
@@ -241,7 +241,9 @@ const InteractionPanel = ({
   selectedTileInstanceId,
   selectedCardIds,
   visualState,
+  failMoveTargetNodeId,
   onToggleCard,
+  onFailMoveTargetChange,
   onInitiate,
   onResolve,
   onFail,
@@ -256,6 +258,8 @@ const InteractionPanel = ({
   onToggleCard: (cardId: string) => void;
   onInitiate: () => void;
   onResolve: () => void;
+  failMoveTargetNodeId: string;
+  onFailMoveTargetChange: (nodeId: string) => void;
   onFail: () => void;
   onClose: () => void;
 }) => {
@@ -290,6 +294,9 @@ const InteractionPanel = ({
   });
   const canResolve = missingSuccess.length === 0;
   const canInitiate = !activeInteraction && projection.active_capability_id === selectedCapability?.id;
+  const requiresFreeFailureMove = Boolean(activeInteraction && (tile.failure_effects || []).some((effect: any) => effect.type === "pulpita_move_free"));
+  const currentNodeId = projection.poulpita?.node_id || "";
+  const adjacentNodeIds = currentNodeId ? projection.map?.adjacency?.[currentNodeId] || [] : [];
   const panelTone = visualState === "success"
     ? "border-emerald-400 shadow-emerald-500/40 scale-95 opacity-80"
     : visualState === "failure"
@@ -369,7 +376,13 @@ const InteractionPanel = ({
           <div className="flex justify-end gap-2">
             {activeInteraction ? (
               <>
-                <button className="rounded border border-rose-500 px-3 py-2 text-sm text-rose-100 hover:bg-rose-950 disabled:opacity-50" disabled={pending} onClick={onFail} type="button">Fail</button>
+                {requiresFreeFailureMove ? (
+                  <select className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100" value={failMoveTargetNodeId} onChange={(event) => onFailMoveTargetChange(event.target.value)}>
+                    <option value="">Move Poulpita to...</option>
+                    {adjacentNodeIds.map((nodeId: string) => <option key={nodeId} value={nodeId}>{nodeId}</option>)}
+                  </select>
+                ) : null}
+                <button className="rounded border border-rose-500 px-3 py-2 text-sm text-rose-100 hover:bg-rose-950 disabled:opacity-50" disabled={pending || (requiresFreeFailureMove && !failMoveTargetNodeId)} onClick={onFail} type="button">Fail</button>
                 <button className="rounded bg-teal-400 px-3 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-300 disabled:opacity-50" disabled={pending} onClick={onResolve} type="button">{canResolve ? "Confirm interaction" : "Confirm cards"}</button>
               </>
             ) : (
@@ -396,6 +409,8 @@ const GameRoomPage = () => {
   const [pending, setPending] = useState(false);
   const [selectedTileInstanceId, setSelectedTileInstanceId] = useState<string | null>(null);
   const [selectedCardIds, setSelectedCardIds] = useState<string[]>([]);
+  const [discardBeforeDraw, setDiscardBeforeDraw] = useState(false);
+  const [failMoveTargetNodeId, setFailMoveTargetNodeId] = useState("");
   const [interactionPanelState, setInteractionPanelState] = useState<"open" | "success" | "failure" | "closing">("open");
 
   const capabilityMap = projection?.capabilities || {};
@@ -417,6 +432,18 @@ const GameRoomPage = () => {
   }, [focusedCapabilityId, projection]);
 
   useEffect(() => {
+    if (!selectedCapability) {
+      setDiscardBeforeDraw(false);
+      return;
+    }
+    const handCount = Number(selectedCapability.hand?.length || 0);
+    const handLimit = Number(selectedCapability.current_max_cards_in_hand || 3);
+    if (handCount < handLimit) {
+      setDiscardBeforeDraw(false);
+    }
+  }, [selectedCapability?.id, selectedCapability?.hand?.length, selectedCapability?.current_max_cards_in_hand]);
+
+  useEffect(() => {
     if (!projection?.interaction) return;
     setSelectedTileInstanceId(projection.interaction.tile_instance_id || null);
     setInteractionPanelState("open");
@@ -425,6 +452,7 @@ const GameRoomPage = () => {
       .filter((card: CardProjection) => card.capability_id === activeCapabilityId)
       .map((card: CardProjection) => card.card_id);
     setSelectedCardIds(activePlayedCardIds);
+    setFailMoveTargetNodeId("");
   }, [projection?.active_capability_id, projection?.interaction?.tile_instance_id, projection?.version]);
 
   const latestEvent = useMemo(() => {
@@ -555,9 +583,24 @@ const GameRoomPage = () => {
   };
 
   const drawActionCard = () => {
+    if (!selectedCapabilityId || !selectedCapability) return;
+    setMoveMode(false);
+    const handCount = Number(selectedCapability.hand?.length || 0);
+    const handLimit = Number(selectedCapability.current_max_cards_in_hand || 3);
+    if (handCount >= handLimit) {
+      setDiscardBeforeDraw(true);
+      setFeedback("Choose a card to discard before drawing.");
+      return;
+    }
+    setDiscardBeforeDraw(false);
+    void submitCommand("draw_action_card", { capability_id: selectedCapabilityId });
+  };
+
+  const drawActionCardAfterDiscard = (discardCardId: string) => {
     if (!selectedCapabilityId) return;
     setMoveMode(false);
-    void submitCommand("draw_action_card", { capability_id: selectedCapabilityId });
+    setDiscardBeforeDraw(false);
+    void submitCommand("draw_action_card", { capability_id: selectedCapabilityId, discard_card_id: discardCardId });
   };
 
   const movePoulpita = (targetNodeId: NodeId) => {
@@ -573,6 +616,7 @@ const GameRoomPage = () => {
     setMoveMode(false);
     setSelectedTileInstanceId(tileInstanceId);
     setSelectedCardIds([]);
+    setFailMoveTargetNodeId("");
     setInteractionPanelState("open");
   };
 
@@ -585,6 +629,7 @@ const GameRoomPage = () => {
     window.setTimeout(() => {
       setSelectedTileInstanceId(null);
       setSelectedCardIds([]);
+      setFailMoveTargetNodeId("");
       setInteractionPanelState("open");
     }, 260);
   };
@@ -612,18 +657,21 @@ const GameRoomPage = () => {
       window.setTimeout(() => {
         setSelectedTileInstanceId(null);
         setSelectedCardIds([]);
+        setFailMoveTargetNodeId("");
         setInteractionPanelState("open");
       }, 420);
     }
   };
 
   const failInteraction = async () => {
-    const result = await submitCommand("fail_interaction");
+    const result = await submitCommand("fail_interaction", failMoveTargetNodeId ? { target_node_id: failMoveTargetNodeId } : {});
     if (result?.ok !== false) {
+      setFailMoveTargetNodeId("");
       setInteractionPanelState("failure");
       window.setTimeout(() => {
         setSelectedTileInstanceId(null);
         setSelectedCardIds([]);
+        setFailMoveTargetNodeId("");
         setInteractionPanelState("open");
       }, 420);
     }
@@ -712,7 +760,9 @@ const GameRoomPage = () => {
             <>
               <BoardView focusedCapabilityId={selectedCapabilityId} moveMode={moveMode} onInspectTile={inspectTile} onMove={movePoulpita} pending={pending} projection={projection} />
               <InteractionPanel
+                failMoveTargetNodeId={failMoveTargetNodeId}
                 onFail={failInteraction}
+                onFailMoveTargetChange={setFailMoveTargetNodeId}
                 onClose={closeInteractionPanel}
                 onInitiate={initiateInteraction}
                 onResolve={confirmInteraction}
@@ -785,16 +835,35 @@ const GameRoomPage = () => {
         )}
         <div className="grid h-full grid-cols-[1fr_12rem] gap-3 overflow-hidden">
           <div className="rounded-md border border-slate-800 bg-slate-900 p-3">
-            <h3 className="text-sm font-semibold text-white">Player hand</h3>
+            <div className="flex items-center justify-between gap-3">
+              <h3 className="text-sm font-semibold text-white">Player hand</h3>
+              {discardBeforeDraw ? (
+                <button className="text-xs text-slate-400 hover:text-white" onClick={() => setDiscardBeforeDraw(false)} type="button">
+                  Cancel discard
+                </button>
+              ) : null}
+            </div>
+            {discardBeforeDraw ? <p className="mt-2 text-xs text-amber-200">Choose one card to discard, then a new card will be drawn.</p> : null}
             <div className="mt-3 flex h-[calc(100%-2rem)] flex-wrap content-start gap-2 overflow-auto rounded border border-dashed border-slate-700 p-2">
               {(selectedCapability?.hand || []).map((card) => (
                 <CardButton
                   card={card}
-                  disabled={pending || !(projection?.interaction || selectedTileInstanceId) || projection?.active_capability_id !== selectedCapability?.id}
+                  disabled={
+                    pending ||
+                    (!discardBeforeDraw && (!(projection?.interaction || selectedTileInstanceId) || projection?.active_capability_id !== selectedCapability?.id))
+                  }
                   key={card.card_id}
-                  onClick={() => (projection?.interaction || selectedTileInstanceId) ? toggleDraftCard(card.card_id) : undefined}
+                  onClick={() => {
+                    if (discardBeforeDraw) {
+                      drawActionCardAfterDiscard(card.card_id);
+                      return;
+                    }
+                    if (projection?.interaction || selectedTileInstanceId) {
+                      toggleDraftCard(card.card_id);
+                    }
+                  }}
                   projection={projection as GameProjection}
-                  selected={selectedCardIds.includes(card.card_id)}
+                  selected={discardBeforeDraw || selectedCardIds.includes(card.card_id)}
                 />
               ))}
               {(selectedCapability?.hand || []).length === 0 ? <p className="m-auto text-sm text-slate-500">No cards in hand.</p> : null}

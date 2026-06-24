@@ -242,6 +242,86 @@ def test_non_adjacent_movement_is_structured_rejection_without_version_increment
     run(scenario())
 
 
+def test_draw_requires_discard_when_hand_limit_is_reached():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        await prepare_active_capability_with_ap(service, user, room)
+        capability = service._memory_states[room["id"]]["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]
+        capability["current_max_cards_in_hand"] = 2
+        capability["hand"] = [
+            {"card_id": "card_keep", "interaction_id": "charge", "owner_capability_id": DEFAULT_ACTIVE_CAPABILITY_ID},
+            {"card_id": "card_discard", "interaction_id": "tighten", "owner_capability_id": DEFAULT_ACTIVE_CAPABILITY_ID},
+        ]
+        capability["draw_pile"] = [
+            {"card_id": "card_drawn", "interaction_id": "hide", "owner_capability_id": DEFAULT_ACTIVE_CAPABILITY_ID}
+        ]
+        capability["discard"] = []
+
+        rejected = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_draw_without_discard",
+            expected_version=3,
+            command_type="draw_action_card",
+            payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID},
+        )
+        accepted = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_draw_with_discard",
+            expected_version=3,
+            command_type="draw_action_card",
+            payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID, "discard_card_id": "card_discard"},
+        )
+
+        next_capability = accepted["projection"]["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]
+        assert rejected["ok"] is False
+        assert rejected["reason"] == "discard_required"
+        assert accepted["ok"] is True
+        assert accepted["version"] == 4
+        assert [card["card_id"] for card in next_capability["hand"]] == ["card_keep", "card_drawn"]
+        assert next_capability["discard"] == []
+        assert [card["card_id"] for card in next_capability["draw_pile"]] == ["card_discard"]
+
+    run(scenario())
+
+
+def test_draw_refills_empty_deck_from_discard(monkeypatch):
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        await prepare_active_capability_with_ap(service, user, room)
+        capability = service._memory_states[room["id"]]["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]
+        capability["current_max_cards_in_hand"] = 3
+        capability["hand"] = []
+        capability["draw_pile"] = []
+        capability["discard"] = [
+            {"card_id": "card_recycled_1", "interaction_id": "charge", "owner_capability_id": DEFAULT_ACTIVE_CAPABILITY_ID},
+            {"card_id": "card_recycled_2", "interaction_id": "tighten", "owner_capability_id": DEFAULT_ACTIVE_CAPABILITY_ID},
+        ]
+
+        monkeypatch.setattr("backend.app.game_room_service.random.shuffle", lambda cards: None)
+
+        result = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_draw_recycled",
+            expected_version=3,
+            command_type="draw_action_card",
+            payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID},
+        )
+
+        next_capability = result["projection"]["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]
+        assert result["ok"] is True
+        assert [card["card_id"] for card in next_capability["hand"]] == ["card_recycled_1"]
+        assert [card["card_id"] for card in next_capability["draw_pile"]] == ["card_recycled_2"]
+        assert next_capability["discard"] == []
+
+    run(scenario())
+
+
 def test_state_version_conflict_is_structured_rejection():
     async def scenario():
         service, user, room, _start = await create_started_room()
@@ -266,5 +346,151 @@ def test_state_version_conflict_is_structured_rejection():
         assert result["ok"] is False
         assert result["reason"] == "state_version_conflict"
         assert result["current_version"] == 1
+
+    run(scenario())
+
+
+def test_failed_interaction_can_move_poulpita_and_tile_to_previous_node():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["poulpita"]["node_id"] = "1B"
+        state["poulpita"]["previous_node_id"] = "1A"
+        state["tile_catalog"] = {
+            "tiles": {
+                "crab-tile": {
+                    "id": "crab-tile",
+                    "event_id": "crab",
+                    "failure_effects": [
+                        {"type": "pulpita_move_previous", "amount": None},
+                        {"type": "move_tile_previous", "amount": None},
+                    ],
+                }
+            },
+            "events": {"crab": {"id": "crab", "category_id": "prey"}},
+            "interactions": {},
+        }
+        state["tiles"] = {
+            "1A": [],
+            "1B": [{"instance_id": "tile_crab", "tile_id": "crab-tile", "face_up": True}],
+        }
+        state["interaction"] = {
+            "tile_instance_id": "tile_crab",
+            "tile_id": "crab-tile",
+            "node_id": "1B",
+            "played_cards": [],
+        }
+
+        result = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_fail_previous",
+            expected_version=1,
+            command_type="fail_interaction",
+        )
+
+        projection = result["projection"]
+        assert result["ok"] is True
+        assert projection["poulpita"]["node_id"] == "1A"
+        assert projection["poulpita"]["previous_node_id"] == "1B"
+        assert projection["tiles"]["1B"] == []
+        assert projection["tiles"]["1A"][0]["instance_id"] == "tile_crab"
+
+    run(scenario())
+
+
+def test_failed_interaction_free_move_requires_adjacent_target():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["tile_catalog"] = {
+            "tiles": {
+                "crab-tile": {
+                    "id": "crab-tile",
+                    "event_id": "crab",
+                    "failure_effects": [{"type": "pulpita_move_free", "amount": None}],
+                }
+            },
+            "events": {"crab": {"id": "crab", "category_id": "prey"}},
+            "interactions": {},
+        }
+        state["tiles"] = {"1A": [{"instance_id": "tile_crab", "tile_id": "crab-tile", "face_up": True}]}
+        state["interaction"] = {
+            "tile_instance_id": "tile_crab",
+            "tile_id": "crab-tile",
+            "node_id": "1A",
+            "played_cards": [],
+        }
+
+        rejected = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_fail_no_target",
+            expected_version=1,
+            command_type="fail_interaction",
+        )
+        accepted = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_fail_free_move",
+            expected_version=1,
+            command_type="fail_interaction",
+            payload={"target_node_id": "1B"},
+        )
+
+        assert rejected["ok"] is False
+        assert rejected["reason"] == "free_move_target_required"
+        assert accepted["ok"] is True
+        assert accepted["projection"]["poulpita"]["node_id"] == "1B"
+        assert accepted["projection"]["poulpita"]["previous_node_id"] == "1A"
+
+    run(scenario())
+
+
+def test_failed_interaction_removes_tiles_by_selected_category_on_node():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["tile_catalog"] = {
+            "tiles": {
+                "crab-tile": {"id": "crab-tile", "event_id": "crab", "failure_effects": [{"type": "remove_preys", "amount": None, "category_id": "prey"}]},
+                "fish-tile": {"id": "fish-tile", "event_id": "fish", "failure_effects": []},
+                "rock-tile": {"id": "rock-tile", "event_id": "rock", "failure_effects": []},
+            },
+            "events": {
+                "crab": {"id": "crab", "category_id": "prey"},
+                "fish": {"id": "fish", "category_id": "prey"},
+                "rock": {"id": "rock", "category_id": "exploration"},
+            },
+            "interactions": {},
+        }
+        state["tiles"] = {
+            "1A": [
+                {"instance_id": "tile_crab", "tile_id": "crab-tile", "face_up": True},
+                {"instance_id": "tile_fish", "tile_id": "fish-tile", "face_up": True},
+                {"instance_id": "tile_rock", "tile_id": "rock-tile", "face_up": True},
+            ]
+        }
+        state["interaction"] = {
+            "tile_instance_id": "tile_crab",
+            "tile_id": "crab-tile",
+            "node_id": "1A",
+            "played_cards": [],
+        }
+
+        result = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_fail_remove_preys",
+            expected_version=1,
+            command_type="fail_interaction",
+        )
+
+        assert result["ok"] is True
+        assert [tile["instance_id"] for tile in result["projection"]["tiles"]["1A"]] == ["tile_rock"]
 
     run(scenario())

@@ -8,12 +8,14 @@ export const effectIcons = {
   lose_neurons: "N-",
   lose_seashells: "S-",
   lose_ap: "AP-",
-  half_ap: "AP/2",
-  all_ap: "AP0",
-  stay_node: "PIN",
-  move_node_free: "MOVE",
+  lose_half_ap: "AP/2",
+  lose_all_ap: "AP0",
+  pulpita_move_previous: "P<-",
+  pulpita_move_free: "MOVE",
   keep_tile: "KEEP",
   remove_tile: "OUT",
+  move_tile_previous: "T<-",
+  remove_preys: "CAT",
 };
 
 const itemSizeClass = (count) => {
@@ -34,6 +36,7 @@ const InteractionIcon = ({ interaction, counter }) => {
 const EffectIcon = ({ effect, total }) => (
   <span className={`${itemSizeClass(total)} inline-flex items-center justify-center rounded-full border border-cyan-200 bg-white px-1 font-bold text-teal-900 shadow-sm`} title={effect.type}>
     {effectIcons[effect.type] || "?"}
+    {effect.category_id ? <small className="ml-0.5 font-semibold">{String(effect.category_id).slice(0, 2)}</small> : null}
     {effect.amount ? <small className="ml-0.5 font-semibold">{effect.amount}</small> : null}
   </span>
 );

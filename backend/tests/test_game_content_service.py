@@ -30,8 +30,9 @@ def test_generated_cards_group_tile_events_by_category(tmp_path, monkeypatch):
                     "success_effects": [{"type": "gain_energy", "amount": 2}],
                     "counter_attack_effects": [{"type": "gain_seashells", "amount": 1}],
                     "failure_effects": [
-                        {"type": "half_ap", "amount": None},
-                        {"type": "move_node_free", "amount": None},
+                        {"type": "lose_half_ap", "amount": None},
+                        {"type": "pulpita_move_free", "amount": None},
+                        {"type": "remove_preys", "amount": None, "category_id": "prey"},
                         {"type": "remove_tile", "amount": None},
                     ],
                 },
@@ -49,8 +50,9 @@ def test_generated_cards_group_tile_events_by_category(tmp_path, monkeypatch):
     assert [entry["event_name"] for entry in cards["tighten"]["resolves"]["threat"]] == ["Shark"]
     assert cards["tighten"]["resolves"][service.COUNTER_ATTACK_CATEGORY_ID] == []
     assert service.get_content_state()["tiles"][0]["failure_effects"] == [
-        {"type": "half_ap", "amount": None},
-        {"type": "move_node_free", "amount": None},
+        {"type": "lose_half_ap", "amount": None},
+        {"type": "pulpita_move_free", "amount": None},
+        {"type": "remove_preys", "amount": None, "category_id": "prey"},
         {"type": "remove_tile", "amount": None},
     ]
 
