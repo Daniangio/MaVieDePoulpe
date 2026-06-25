@@ -49,6 +49,12 @@ PLAYER_BOARD_DEFAULT_NAMES = {
     "intelligence": "Intelligence",
 }
 UPGRADE_COST_RESOURCES = {"energy", "neurons"}
+TOKEN_TYPES = [
+    {"id": "neuron", "name": "Neuron token"},
+    {"id": "seashell", "name": "Seashell token"},
+    {"id": "shelter", "name": "Shelter token"},
+]
+POULPITA_PANEL_ZONE_IDS = {"neurons", "seashells"}
 
 
 def _slug(value: str) -> str:
@@ -64,6 +70,8 @@ def _empty_content() -> dict[str, Any]:
         "tiles": [],
         "levels": [],
         "player_boards": _default_player_boards(),
+        "tokens": _default_tokens(),
+        "poulpita_panel": _default_poulpita_panel(),
     }
 
 
@@ -91,6 +99,8 @@ def _read_content() -> dict[str, Any]:
     content.setdefault("tiles", [])
     content.setdefault("levels", [])
     content["player_boards"] = _normalize_player_boards(content.get("player_boards") or [])
+    content["tokens"] = _normalize_tokens(content.get("tokens") or [])
+    content["poulpita_panel"] = _normalize_poulpita_panel(content.get("poulpita_panel") or {})
     for tile in content["tiles"]:
         tile.setdefault("interaction_ids", [])
         tile.setdefault("counter_attack_interaction_ids", [])
@@ -98,6 +108,60 @@ def _read_content() -> dict[str, Any]:
         tile.setdefault("counter_attack_effects", [])
         tile.setdefault("failure_effects", [])
     return content
+
+
+def _default_tokens() -> list[dict[str, Any]]:
+    return [{**token, "image_filename": None} for token in TOKEN_TYPES]
+
+
+def _normalize_tokens(raw_tokens: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_id = {str(token.get("id")): dict(token) for token in raw_tokens if isinstance(token, dict)}
+    tokens = []
+    for default in _default_tokens():
+        current = {**default, **by_id.get(default["id"], {})}
+        current["id"] = default["id"]
+        current["name"] = default["name"]
+        current["image_filename"] = current.get("image_filename") or None
+        tokens.append(current)
+    return tokens
+
+
+def _default_poulpita_panel() -> dict[str, Any]:
+    return {
+        "image_filename": None,
+        "image_width": None,
+        "image_height": None,
+        "zones": {
+            "neurons": {"x": 0.08, "y": 0.12, "width": 0.38, "height": 0.76},
+            "seashells": {"x": 0.54, "y": 0.12, "width": 0.38, "height": 0.76},
+        },
+    }
+
+
+def _normalize_zone(zone: dict[str, Any] | None, fallback: dict[str, float]) -> dict[str, float]:
+    normalized = {}
+    for key in ["x", "y", "width", "height"]:
+        value = fallback[key]
+        if isinstance(zone, dict) and zone.get(key) is not None:
+            value = float(zone.get(key) or 0)
+        normalized[key] = min(1.0, max(0.0, value))
+    normalized["width"] = max(0.01, min(normalized["width"], 1.0 - normalized["x"]))
+    normalized["height"] = max(0.01, min(normalized["height"], 1.0 - normalized["y"]))
+    return normalized
+
+
+def _normalize_poulpita_panel(raw_panel: dict[str, Any]) -> dict[str, Any]:
+    default = _default_poulpita_panel()
+    zones = raw_panel.get("zones") if isinstance(raw_panel, dict) else {}
+    return {
+        "image_filename": raw_panel.get("image_filename") if isinstance(raw_panel, dict) else None,
+        "image_width": int(raw_panel.get("image_width")) if isinstance(raw_panel, dict) and raw_panel.get("image_width") else None,
+        "image_height": int(raw_panel.get("image_height")) if isinstance(raw_panel, dict) and raw_panel.get("image_height") else None,
+        "zones": {
+            zone_id: _normalize_zone((zones or {}).get(zone_id), default["zones"][zone_id])
+            for zone_id in POULPITA_PANEL_ZONE_IDS
+        },
+    }
 
 
 def _default_player_boards() -> list[dict[str, Any]]:
@@ -154,6 +218,12 @@ def _public_image_url(filename: str | None) -> str | None:
 
 def _with_urls(entry: dict[str, Any]) -> dict[str, Any]:
     copy = dict(entry)
+    copy["image_url"] = _public_image_url(copy.get("image_filename"))
+    return copy
+
+
+def _poulpita_panel_with_urls(panel: dict[str, Any]) -> dict[str, Any]:
+    copy = deepcopy(panel)
     copy["image_url"] = _public_image_url(copy.get("image_filename"))
     return copy
 
@@ -252,6 +322,8 @@ def get_content_state() -> dict[str, Any]:
         "tiles": [dict(tile) for tile in content.get("tiles", [])],
         "levels": [dict(level) for level in content.get("levels", [])],
         "player_boards": [dict(board) for board in content.get("player_boards", [])],
+        "tokens": [_with_urls(token) for token in content.get("tokens", [])],
+        "poulpita_panel": _poulpita_panel_with_urls(content.get("poulpita_panel") or _default_poulpita_panel()),
         "cards": _generated_cards(content),
     }
 
@@ -276,6 +348,48 @@ def get_level_config(level_id: str | None = None) -> dict[str, Any]:
     raise LookupError("Level not found.")
 
 
+async def update_token(*, token_id: str, image: UploadFile | None) -> dict[str, Any]:
+    content = _read_content()
+    index = _find_index(content["tokens"], token_id)
+    current = content["tokens"][index]
+    image_filename = current.get("image_filename")
+    next_image = await _save_uploaded_image(f"token-{token_id}", image)
+    if next_image:
+        _delete_image(image_filename)
+        image_filename = next_image
+    current["image_filename"] = image_filename
+    content["tokens"][index] = current
+    _write_content(content)
+    return _with_urls(current)
+
+
+async def update_poulpita_panel(
+    *,
+    zones: dict[str, Any],
+    image: UploadFile | None,
+    image_width: int | None = None,
+    image_height: int | None = None,
+) -> dict[str, Any]:
+    content = _read_content()
+    current = content.get("poulpita_panel") or _default_poulpita_panel()
+    image_filename = current.get("image_filename")
+    next_image = await _save_uploaded_image("poulpita-panel", image)
+    if next_image:
+        _delete_image(image_filename)
+        image_filename = next_image
+    next_panel = _normalize_poulpita_panel(
+        {
+            "image_filename": image_filename,
+            "image_width": image_width or current.get("image_width"),
+            "image_height": image_height or current.get("image_height"),
+            "zones": zones,
+        }
+    )
+    content["poulpita_panel"] = next_panel
+    _write_content(content)
+    return _poulpita_panel_with_urls(next_panel)
+
+
 def get_game_content_catalog() -> dict[str, dict[str, Any]]:
     content = _read_content()
     return {
@@ -284,6 +398,8 @@ def get_game_content_catalog() -> dict[str, dict[str, Any]]:
         "interactions": {interaction["id"]: _with_urls(interaction) for interaction in content.get("interactions", [])},
         "cards": {card["id"]: card for card in _generated_cards(content)},
         "card_categories": [dict(category) for category in content.get("categories", [])] + [dict(COUNTER_ATTACK_CATEGORY)],
+        "tokens": {token["id"]: _with_urls(token) for token in content.get("tokens", [])},
+        "poulpita_panel": _poulpita_panel_with_urls(content.get("poulpita_panel") or _default_poulpita_panel()),
     }
 
 

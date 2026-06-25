@@ -1,4 +1,10 @@
+import asyncio
+
 from backend.app import game_content_service as service
+
+
+def run(coro):
+    return asyncio.run(coro)
 
 
 def test_generated_cards_group_tile_events_by_category(tmp_path, monkeypatch):
@@ -147,3 +153,31 @@ def test_level_save_validates_group_capacity_and_node_assignment(tmp_path, monke
         assert "has 1 assigned tiles but needs 2" in str(exc)
     else:
         raise AssertionError("Expected invalid group capacity to be rejected.")
+
+
+def test_tokens_and_poulpita_panel_are_configurable(tmp_path, monkeypatch):
+    monkeypatch.setattr(service, "CONTENT_ROOT", tmp_path)
+    monkeypatch.setattr(service, "CONTENT_IMAGES_ROOT", tmp_path / "images")
+    monkeypatch.setattr(service, "CONTENT_JSON_PATH", tmp_path / "content.json")
+
+    state = service.get_content_state()
+
+    assert [token["id"] for token in state["tokens"]] == ["neuron", "seashell", "shelter"]
+    assert set(state["poulpita_panel"]["zones"]) == {"neurons", "seashells"}
+
+    saved = run(
+        service.update_poulpita_panel(
+            zones={
+                "neurons": {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4},
+                "seashells": {"x": 0.5, "y": 0.2, "width": 0.3, "height": 0.4},
+            },
+            image=None,
+            image_width=800,
+            image_height=600,
+        )
+    )
+
+    assert saved["image_width"] == 800
+    assert saved["image_height"] == 600
+    assert saved["zones"]["neurons"] == {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4}
+    assert service.get_game_content_catalog()["poulpita_panel"]["zones"]["seashells"]["x"] == 0.5

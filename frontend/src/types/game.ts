@@ -81,6 +81,8 @@ export type GameProjection = {
     interactions?: Record<string, any>;
     cards?: Record<string, any>;
     card_categories?: Array<Record<string, any>>;
+    tokens?: Record<string, any>;
+    poulpita_panel?: Record<string, any>;
   };
   interaction?: any;
   events: Array<Record<string, unknown>>;

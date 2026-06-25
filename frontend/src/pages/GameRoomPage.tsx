@@ -234,6 +234,75 @@ const CardButton = ({
   );
 };
 
+const contentImageUrl = (entry: any) => (entry?.image_url ? buildApiUrl(entry.image_url) : "");
+
+const ResourceToken = ({ token, label }: { token?: any; label: string }) => {
+  const url = contentImageUrl(token);
+  return (
+    <span className="inline-flex h-5 w-5 items-center justify-center overflow-hidden rounded-full border border-teal-300 bg-white text-[0.48rem] font-bold text-teal-950 shadow-sm" title={label}>
+      {url ? <img alt="" className="h-full w-full object-cover" src={url} /> : label.slice(0, 2)}
+    </span>
+  );
+};
+
+const PoulpitaResourcePanel = ({ projection }: { projection: GameProjection | null }) => {
+  const panel = projection?.tile_catalog?.poulpita_panel || {};
+  const tokens = projection?.tile_catalog?.tokens || {};
+  const containerUrl = contentImageUrl(panel);
+  const zones = panel.zones || {};
+  const aspectRatio = panel.image_width && panel.image_height ? `${panel.image_width} / ${panel.image_height}` : "4 / 3";
+  const resources = [
+    { zoneId: "neurons", label: "Neurons", count: Number(projection?.poulpita.neurons || 0), token: tokens.neuron },
+    { zoneId: "seashells", label: "Shells", count: Number(projection?.poulpita.seashells || 0), token: tokens.seashell },
+  ];
+
+  if (!containerUrl) {
+    return (
+      <div className="grid grid-cols-3 gap-2 text-xs">
+        <div className="rounded bg-slate-800 p-3">
+          <span className="block text-slate-400">Energy</span>
+          <strong>{projection?.poulpita.energy ?? 0}</strong>
+        </div>
+        {resources.map((resource) => (
+          <div className="rounded bg-slate-800 p-3" key={resource.zoneId}>
+            <span className="block text-slate-400">{resource.label}</span>
+            <div className="mt-1 flex flex-wrap gap-1">
+              {Array.from({ length: resource.count }).map((_, index) => <ResourceToken key={index} label={resource.label} token={resource.token} />)}
+              {resource.count === 0 ? <strong>0</strong> : null}
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded bg-slate-800 p-3 text-xs">
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-slate-400">Poulpita Board</span>
+        <strong className="text-slate-100">Energy {projection?.poulpita.energy ?? 0}</strong>
+      </div>
+      <div className="relative overflow-hidden rounded border border-slate-700 bg-slate-950" style={{ aspectRatio }}>
+        <img alt="Poulpita resource board" className="absolute inset-0 h-full w-full object-contain" src={containerUrl} />
+        {resources.map((resource) => {
+          const zone = zones[resource.zoneId];
+          if (!zone) return null;
+          return (
+            <div
+              className="absolute flex flex-wrap content-start gap-1 overflow-hidden p-1"
+              key={resource.zoneId}
+              style={{ left: `${zone.x * 100}%`, top: `${zone.y * 100}%`, width: `${zone.width * 100}%`, height: `${zone.height * 100}%` }}
+              title={`${resource.label}: ${resource.count}`}
+            >
+              {Array.from({ length: resource.count }).map((_, index) => <ResourceToken key={index} label={resource.label} token={resource.token} />)}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
 const InteractionPanel = ({
   projection,
   selectedCapability,
@@ -794,20 +863,7 @@ const GameRoomPage = () => {
               <strong>{projection?.night_time_spent ?? 0}/24</strong>
             </div>
           </div>
-          <div className="grid grid-cols-3 gap-2 text-xs">
-            <div className="rounded bg-slate-800 p-3">
-              <span className="block text-slate-400">Energy</span>
-              <strong>{projection?.poulpita.energy ?? 0}</strong>
-            </div>
-            <div className="rounded bg-slate-800 p-3">
-              <span className="block text-slate-400">Neurons</span>
-              <strong>{projection?.poulpita.neurons ?? 0}</strong>
-            </div>
-            <div className="rounded bg-slate-800 p-3">
-              <span className="block text-slate-400">Shells</span>
-              <strong>{projection?.poulpita.seashells ?? 0}</strong>
-            </div>
-          </div>
+          <PoulpitaResourcePanel projection={projection} />
           <div className="rounded bg-slate-800 p-3 text-xs text-slate-300">
             <span className="block text-slate-400">Initiative</span>
             <p className="mt-1">{projection?.active_capability_id ? capabilityMap[projection.active_capability_id]?.name : "No capability controls Poulpita."}</p>

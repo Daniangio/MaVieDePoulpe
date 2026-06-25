@@ -68,6 +68,8 @@ const contentTabs = [
   ["tiles", "Tiles"],
   ["cards", "Cards"],
   ["player_boards", "Player Boards"],
+  ["tokens", "Tokens"],
+  ["poulpita_panel", "Poulpita Panel"],
 ];
 
 const imageUrl = (entry) => (entry?.image_url ? buildApiUrl(entry.image_url) : "");
@@ -79,17 +81,21 @@ const dangerButton = "rounded-md border border-rose-300 bg-white px-3 py-2 text-
 
 const AdminContentPage = () => {
   const { token, user } = useStore();
-  const [content, setContent] = useState({ categories: [], card_categories: [], interactions: [], events: [], tiles: [], levels: [], player_boards: [], cards: [] });
+  const [content, setContent] = useState({ categories: [], card_categories: [], interactions: [], events: [], tiles: [], levels: [], player_boards: [], tokens: [], poulpita_panel: null, cards: [] });
   const [categoryName, setCategoryName] = useState("");
   const [interactionDraft, setInteractionDraft] = useState(emptyInteraction);
   const [eventDraft, setEventDraft] = useState(emptyEvent);
   const [tileDraft, setTileDraft] = useState(emptyTile);
   const [playerBoardDraft, setPlayerBoardDraft] = useState(emptyPlayerBoard);
+  const [poulpitaPanelDraft, setPoulpitaPanelDraft] = useState(null);
+  const [poulpitaPanelPreviewUrl, setPoulpitaPanelPreviewUrl] = useState("");
   const [activeTab, setActiveTab] = useState("map");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const interactionImageRef = useRef(null);
   const eventImageRef = useRef(null);
+  const tokenImageRefs = useRef({});
+  const poulpitaPanelImageRef = useRef(null);
 
   const categoriesById = useMemo(() => Object.fromEntries(content.categories.map((category) => [category.id, category])), [content.categories]);
   const eventsById = useMemo(() => Object.fromEntries(content.events.map((event) => [event.id, event])), [content.events]);
@@ -125,6 +131,14 @@ const AdminContentPage = () => {
       setPlayerBoardDraft({ ...emptyPlayerBoard, ...content.player_boards[0] });
     }
   }, [content.player_boards, playerBoardDraft.id]);
+
+  useEffect(() => {
+    setPoulpitaPanelDraft(content.poulpita_panel || null);
+  }, [content.poulpita_panel]);
+
+  useEffect(() => () => {
+    if (poulpitaPanelPreviewUrl) URL.revokeObjectURL(poulpitaPanelPreviewUrl);
+  }, [poulpitaPanelPreviewUrl]);
 
   const resetInteraction = () => {
     setInteractionDraft(emptyInteraction);
@@ -256,6 +270,47 @@ const AdminContentPage = () => {
       await loadContent();
     } catch (saveError) {
       setError(saveError.message || "Failed to save player board.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveToken = async (tokenId) => {
+    setBusy(true);
+    setError("");
+    try {
+      const file = tokenImageRefs.current[tokenId]?.files?.[0] || null;
+      if (!file) throw new Error("Choose a token image to upload.");
+      const form = new FormData();
+      form.set("image", file);
+      await request(`/api/admin/content/tokens/${tokenId}`, { method: "PUT", body: form });
+      if (tokenImageRefs.current[tokenId]) tokenImageRefs.current[tokenId].value = "";
+      await loadContent();
+    } catch (saveError) {
+      setError(saveError.message || "Failed to save token.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const savePoulpitaPanel = async () => {
+    if (!poulpitaPanelDraft) return;
+    setBusy(true);
+    setError("");
+    try {
+      const form = new FormData();
+      form.set("zones_json", JSON.stringify(poulpitaPanelDraft.zones || {}));
+      if (poulpitaPanelDraft.image_width) form.set("image_width", String(poulpitaPanelDraft.image_width));
+      if (poulpitaPanelDraft.image_height) form.set("image_height", String(poulpitaPanelDraft.image_height));
+      const file = poulpitaPanelImageRef.current?.files?.[0] || null;
+      if (file) form.set("image", file);
+      await request("/api/admin/content/poulpita-panel", { method: "PUT", body: form });
+      if (poulpitaPanelImageRef.current) poulpitaPanelImageRef.current.value = "";
+      if (poulpitaPanelPreviewUrl) URL.revokeObjectURL(poulpitaPanelPreviewUrl);
+      setPoulpitaPanelPreviewUrl("");
+      await loadContent();
+    } catch (saveError) {
+      setError(saveError.message || "Failed to save Poulpita panel.");
     } finally {
       setBusy(false);
     }
@@ -427,6 +482,28 @@ const AdminContentPage = () => {
           onAddUpgrade={addUpgrade}
           onUpdateUpgrade={updateUpgrade}
           onRemoveUpgrade={removeUpgrade}
+        />
+      ) : null}
+
+      {activeTab === "tokens" ? (
+        <TokenEditor
+          busy={busy}
+          tokenImageRefs={tokenImageRefs}
+          tokens={content.tokens || []}
+          onSave={saveToken}
+        />
+      ) : null}
+
+      {activeTab === "poulpita_panel" && poulpitaPanelDraft ? (
+        <PoulpitaPanelEditor
+          busy={busy}
+          draft={poulpitaPanelDraft}
+          imageRef={poulpitaPanelImageRef}
+          previewUrl={poulpitaPanelPreviewUrl}
+          save={savePoulpitaPanel}
+          setDraft={setPoulpitaPanelDraft}
+          setPreviewUrl={setPoulpitaPanelPreviewUrl}
+          tokens={content.tokens || []}
         />
       ) : null}
     </div>
@@ -708,6 +785,149 @@ const EffectEditor = ({ title, field, effects = [], options, categories = [], on
     </div>
   </div>
 );
+
+const TokenMark = ({ token, label, className = "" }) => {
+  const url = imageUrl(token);
+  return (
+    <span className={`inline-flex h-7 w-7 items-center justify-center overflow-hidden rounded-full border border-teal-300 bg-white text-[0.55rem] font-bold text-teal-900 shadow-sm ${className}`} title={label || token?.name}>
+      {url ? <img alt="" className="h-full w-full object-cover" src={url} /> : (label || token?.name || "?").slice(0, 2)}
+    </span>
+  );
+};
+
+const TokenEditor = ({ tokens, tokenImageRefs, onSave, busy }) => (
+  <section className="grid gap-4 md:grid-cols-3">
+    {tokens.map((token) => (
+      <article className={panel} key={token.id}>
+        <div className="flex items-center gap-3">
+          <TokenMark token={token} />
+          <div>
+            <h2 className="font-semibold text-teal-950">{token.name}</h2>
+            <p className="text-xs text-slate-500">{token.id}</p>
+          </div>
+        </div>
+        <input ref={(node) => { tokenImageRefs.current[token.id] = node; }} className={`${input} mt-4 text-sm`} type="file" accept="image/png,image/jpeg,image/webp" />
+        <button className={`${primaryButton} mt-3`} disabled={busy} onClick={() => onSave(token.id)} type="button">Save token image</button>
+      </article>
+    ))}
+  </section>
+);
+
+const panelZoneLabels = { neurons: "Neurons", seashells: "Shells" };
+
+const PoulpitaPanelEditor = ({ draft, setDraft, imageRef, previewUrl, setPreviewUrl, tokens, save, busy }) => {
+  const [selectedZoneId, setSelectedZoneId] = useState("neurons");
+  const [dragStart, setDragStart] = useState(null);
+  const tokenById = Object.fromEntries((tokens || []).map((token) => [token.id, token]));
+  const containerUrl = previewUrl || imageUrl(draft);
+  const aspectRatio = draft.image_width && draft.image_height ? `${draft.image_width} / ${draft.image_height}` : "4 / 3";
+
+  const setZone = (zoneId, zone) => {
+    setDraft((current) => ({ ...current, zones: { ...(current.zones || {}), [zoneId]: zone } }));
+  };
+
+  const pointFromEvent = (event) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return {
+      x: Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)),
+      y: Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height)),
+    };
+  };
+
+  const beginDraw = (event) => {
+    if (!containerUrl) return;
+    const point = pointFromEvent(event);
+    setDragStart(point);
+    setZone(selectedZoneId, { x: point.x, y: point.y, width: 0.01, height: 0.01 });
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  };
+
+  const updateDraw = (event) => {
+    if (!dragStart) return;
+    const point = pointFromEvent(event);
+    setZone(selectedZoneId, {
+      x: Math.min(dragStart.x, point.x),
+      y: Math.min(dragStart.y, point.y),
+      width: Math.max(0.01, Math.abs(point.x - dragStart.x)),
+      height: Math.max(0.01, Math.abs(point.y - dragStart.y)),
+    });
+  };
+
+  const endDraw = () => setDragStart(null);
+
+  const onImageChange = (file) => {
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    if (!file) {
+      setPreviewUrl("");
+      return;
+    }
+    const url = URL.createObjectURL(file);
+    setPreviewUrl(url);
+    const image = new Image();
+    image.onload = () => {
+      setDraft((current) => ({ ...current, image_width: image.naturalWidth, image_height: image.naturalHeight }));
+    };
+    image.src = url;
+  };
+
+  const sampleCounts = { neurons: 6, seashells: 4 };
+  return (
+    <section className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
+      <div className={panel}>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="font-semibold text-teal-950">Poulpita Panel Layout</h2>
+            <p className="mt-1 text-xs text-slate-500">Select a zone, then drag over the container image to define where those tokens stack.</p>
+          </div>
+          <div className="flex gap-2">
+            {Object.entries(panelZoneLabels).map(([zoneId, label]) => (
+              <button className={`rounded-md px-3 py-2 text-xs font-semibold ${selectedZoneId === zoneId ? "bg-teal-500 text-white" : "border border-cyan-300 bg-white text-teal-900"}`} key={zoneId} onClick={() => setSelectedZoneId(zoneId)} type="button">
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div
+          className="relative mt-4 mx-auto overflow-hidden rounded-lg border border-cyan-200 bg-cyan-50"
+          onPointerDown={beginDraw}
+          onPointerMove={updateDraw}
+          onPointerUp={endDraw}
+          onPointerCancel={endDraw}
+          style={{ aspectRatio, maxWidth: draft.image_width || 720 }}
+        >
+          {containerUrl ? <img alt="Poulpita panel" className="absolute inset-0 h-full w-full select-none object-contain" draggable={false} src={containerUrl} /> : <div className="flex h-full min-h-[22rem] items-center justify-center text-sm text-slate-500">Upload a container image to define token zones.</div>}
+          {Object.entries(draft.zones || {}).map(([zoneId, zone]) => (
+            <div
+              className={`absolute border-2 ${selectedZoneId === zoneId ? "border-teal-500 bg-teal-300/25" : "border-cyan-500 bg-cyan-200/20"}`}
+              key={zoneId}
+              style={{ left: `${zone.x * 100}%`, top: `${zone.y * 100}%`, width: `${zone.width * 100}%`, height: `${zone.height * 100}%` }}
+            >
+              <span className="absolute left-1 top-1 rounded bg-white/90 px-1.5 py-0.5 text-[0.62rem] font-semibold text-teal-950">{panelZoneLabels[zoneId]}</span>
+              <div className="flex h-full flex-wrap content-start gap-1 p-5">
+                {Array.from({ length: sampleCounts[zoneId] || 0 }).map((_, index) => (
+                  <TokenMark className="h-5 w-5" key={index} label={panelZoneLabels[zoneId]} token={tokenById[zoneId === "neurons" ? "neuron" : "seashell"]} />
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+      <aside className={panel}>
+        <h2 className="font-semibold text-teal-950">Container Image</h2>
+        <input ref={imageRef} className={`${input} mt-3 text-sm`} type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => onImageChange(event.target.files?.[0] || null)} />
+        <div className="mt-4 space-y-3 text-xs text-slate-600">
+          {Object.entries(draft.zones || {}).map(([zoneId, zone]) => (
+            <div className="rounded border border-cyan-100 bg-cyan-50 p-2" key={zoneId}>
+              <strong className="text-teal-950">{panelZoneLabels[zoneId]}</strong>
+              <p>x {Math.round(zone.x * 100)}%, y {Math.round(zone.y * 100)}%, w {Math.round(zone.width * 100)}%, h {Math.round(zone.height * 100)}%</p>
+            </div>
+          ))}
+        </div>
+        <button className={`${primaryButton} mt-4 w-full`} disabled={busy} onClick={save} type="button">Save panel layout</button>
+      </aside>
+    </section>
+  );
+};
 
 const TileList = ({ content, eventsById, categoriesById, interactionsById, setTileDraft, deleteItem, busy }) => (
   <div className="grid gap-3 md:grid-cols-2">

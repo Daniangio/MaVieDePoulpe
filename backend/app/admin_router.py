@@ -23,6 +23,8 @@ from .game_content_service import (
     save_level,
     save_tile,
     save_player_board,
+    update_token,
+    update_poulpita_panel,
     update_category,
     update_event,
     update_interaction,
@@ -571,6 +573,39 @@ async def admin_delete_level(level_id: str, _admin: User = Depends(require_admin
         return {"status": "deleted"}
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.put("/admin/content/tokens/{token_id}")
+async def admin_update_token(
+    token_id: str,
+    image: UploadFile | None = File(default=None),
+    _admin: User = Depends(require_admin),
+):
+    try:
+        return await update_token(token_id=token_id, image=image)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/admin/content/poulpita-panel")
+async def admin_update_poulpita_panel(
+    zones_json: str = Form(...),
+    image_width: int | None = Form(default=None),
+    image_height: int | None = Form(default=None),
+    image: UploadFile | None = File(default=None),
+    _admin: User = Depends(require_admin),
+):
+    try:
+        return await update_poulpita_panel(
+            zones=_json_form_object(zones_json, "zones_json"),
+            image=image,
+            image_width=image_width,
+            image_height=image_height,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.put("/admin/content/player-boards/{board_id}")
