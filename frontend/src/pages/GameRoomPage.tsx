@@ -99,6 +99,8 @@ const CapabilityBoard = ({
   onDraw,
   onMoveMode,
   onEndNight,
+  onEndDay,
+  onBuyUpgrade,
 }: {
   capability: CapabilityProjection;
   active: boolean;
@@ -113,6 +115,8 @@ const CapabilityBoard = ({
   onDraw?: () => void;
   onMoveMode?: () => void;
   onEndNight?: () => void;
+  onEndDay?: () => void;
+  onBuyUpgrade?: (upgradeIndex: number) => void;
 }) => {
   const initiableEvents = (capability.initiates_event_ids || [])
     .map((eventId) => projection?.tile_catalog?.events?.[eventId])
@@ -127,6 +131,8 @@ const CapabilityBoard = ({
   const cardCategories = projection?.tile_catalog?.card_categories || [];
   const cardsByInteraction = projection?.tile_catalog?.cards || {};
   const actionPoints = Math.max(0, Number(capability.pa || 0));
+  const isNightAction = projection?.phase === "night_action";
+  const isNight = projection?.phase === "night_idle" || projection?.phase === "night_action";
   const currentNodeId = projection?.poulpita?.node_id || "";
   const canEndNight =
     focused &&
@@ -135,6 +141,8 @@ const CapabilityBoard = ({
     Boolean(currentNodeId) &&
     Number(projection?.shelters?.[currentNodeId] || 0) > 0 &&
     Number(projection?.night_time_spent || 0) >= Number(projection?.night_shelter_available_at || 16);
+  const purchasedUpgrades = new Set((capability.purchased_hand_size_upgrade_indices || []).map((index) => Number(index)));
+  const sharedNeurons = Number(projection?.poulpita?.neurons || 0);
   const ArticleTag = compact ? "button" : "article";
   return (
   <ArticleTag
@@ -189,9 +197,29 @@ const CapabilityBoard = ({
         </div>
       </div>
       <div className={compact ? "rounded bg-slate-800 p-1.5" : "rounded bg-slate-800 p-2"}>
-        <span className="block text-xs text-slate-400">Can initiate</span>
+        <span className="block text-xs text-slate-400">{projection?.phase === "day" && !compact ? "Upgrades" : "Can initiate"}</span>
         <div className={compact ? "mt-1 flex flex-wrap gap-1" : "mt-2 flex flex-wrap gap-1"}>
-          {initiableEvents.map((event: any) => {
+          {projection?.phase === "day" && !compact ? (
+            (capability.hand_size_upgrades || []).map((upgrade, index) => {
+              const bought = purchasedUpgrades.has(index);
+              const cost = Number(upgrade.cost || 0);
+              return (
+                <button
+                  className={[
+                    "rounded border px-2 py-1 text-left text-[0.65rem] leading-tight",
+                    bought ? "border-slate-600 bg-slate-900 text-slate-500" : "border-cyan-300 bg-slate-950 text-cyan-100 hover:bg-cyan-950",
+                  ].join(" ")}
+                  disabled={pending || bought || sharedNeurons < cost}
+                  key={index}
+                  onClick={() => onBuyUpgrade?.(index)}
+                  type="button"
+                >
+                  +1 hand
+                  <span className="block text-[0.58rem] text-slate-400">{bought ? "Bought" : `${cost} neurons`}</span>
+                </button>
+              );
+            })
+          ) : initiableEvents.map((event: any) => {
             const imageUrl = event.image_url ? buildApiUrl(event.image_url) : "";
             return (
               <span className={`${compact ? "h-5 w-5" : "h-7 w-7"} flex items-center justify-center overflow-hidden rounded border border-slate-700 bg-slate-900 text-[0.55rem]`} key={event.id} title={event.name}>
@@ -199,7 +227,8 @@ const CapabilityBoard = ({
               </span>
             );
           })}
-          {initiableEvents.length === 0 ? <span className="text-xs text-slate-500">None</span> : null}
+          {projection?.phase === "day" && !compact && (capability.hand_size_upgrades || []).length === 0 ? <span className="text-xs text-slate-500">No upgrades</span> : null}
+          {!(projection?.phase === "day" && !compact) && initiableEvents.length === 0 ? <span className="text-xs text-slate-500">None</span> : null}
         </div>
       </div>
     </div>
@@ -207,7 +236,7 @@ const CapabilityBoard = ({
       <div className="mt-3 flex flex-wrap gap-2">
         <button
           className="rounded bg-teal-400 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-teal-300 disabled:opacity-50"
-          disabled={pending || active}
+          disabled={pending || active || !isNight}
           onClick={onTakeControl}
           type="button"
         >
@@ -215,7 +244,7 @@ const CapabilityBoard = ({
         </button>
         <button
           className="rounded border border-slate-600 px-3 py-2 text-xs text-slate-100 hover:bg-slate-800 disabled:opacity-50"
-          disabled={pending || !active}
+          disabled={pending || !active || !isNightAction}
           onClick={onCollect}
           type="button"
         >
@@ -226,7 +255,7 @@ const CapabilityBoard = ({
             "rounded border px-3 py-2 text-xs text-slate-100 disabled:opacity-50",
             moveMode ? "border-amber-300 bg-amber-950" : "border-slate-600 hover:bg-slate-800",
           ].join(" ")}
-          disabled={pending || !active || capability.pa < 1}
+          disabled={pending || !active || !isNightAction || capability.pa < 1}
           onClick={onMoveMode}
           type="button"
         >
@@ -234,20 +263,31 @@ const CapabilityBoard = ({
         </button>
         <button
           className="rounded border border-slate-600 px-3 py-2 text-xs text-slate-100 hover:bg-slate-800 disabled:opacity-50"
-          disabled={pending || !active || capability.pa < 1}
+          disabled={pending || !active || !isNightAction || capability.pa < 1}
           onClick={onDraw}
           type="button"
         >
           Draw
         </button>
-        <button
-          className="rounded border border-cyan-300 px-3 py-2 text-xs text-cyan-100 hover:bg-cyan-950 disabled:opacity-50"
-          disabled={pending || !canEndNight}
-          onClick={onEndNight}
-          type="button"
-        >
-          End night
-        </button>
+        {projection?.phase === "day" ? (
+          <button
+            className="rounded border border-cyan-300 px-3 py-2 text-xs text-cyan-100 hover:bg-cyan-950 disabled:opacity-50"
+            disabled={pending}
+            onClick={onEndDay}
+            type="button"
+          >
+            End day
+          </button>
+        ) : (
+          <button
+            className="rounded border border-cyan-300 px-3 py-2 text-xs text-cyan-100 hover:bg-cyan-950 disabled:opacity-50"
+            disabled={pending || !canEndNight}
+            onClick={onEndNight}
+            type="button"
+          >
+            End night
+          </button>
+        )}
       </div>
     ) : null}
   </ArticleTag>
@@ -824,6 +864,17 @@ const GameRoomPage = () => {
     void submitCommand("end_night", { capability_id: selectedCapabilityId });
   };
 
+  const buyHandSizeUpgrade = (upgradeIndex: number) => {
+    if (!selectedCapabilityId) return;
+    setMoveMode(false);
+    void submitCommand("buy_hand_size_upgrade", { capability_id: selectedCapabilityId, upgrade_index: upgradeIndex });
+  };
+
+  const endDay = () => {
+    setMoveMode(false);
+    void submitCommand("end_day");
+  };
+
   const movePoulpita = (targetNodeId: NodeId) => {
     if (!selectedCapabilityId) return;
     setMoveMode(false);
@@ -1028,6 +1079,8 @@ const GameRoomPage = () => {
               moveMode={moveMode}
               onCollect={collectActionPoints}
               onDraw={drawActionCard}
+              onBuyUpgrade={buyHandSizeUpgrade}
+              onEndDay={endDay}
               onEndNight={endNight}
               onMoveMode={() => setMoveMode((value) => !value)}
               onTakeControl={takeControl}

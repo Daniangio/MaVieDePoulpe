@@ -250,6 +250,7 @@ def _initial_capabilities(*, deal_hands: bool = False) -> dict[str, dict[str, An
             "hand": hand,
             "discard": [],
             "hand_size_upgrades": deepcopy(board.get("hand_size_upgrades") or []),
+            "purchased_hand_size_upgrade_indices": [],
         }
     return capabilities
 
@@ -434,6 +435,15 @@ def _project_state(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def _require_active_action(service: "GameRoomService", state: dict[str, Any], command_id: str, capability_id: str, *, ap_cost: int = 0) -> dict[str, Any]:
+    capability = _require_active_control(service, state, command_id, capability_id)
+    if int(capability.get("pa") or 0) < ap_cost:
+        service._reject(state, command_id, "insufficient_pa", f"This action costs {ap_cost} AP.")
+    if int(capability.get("actions_taken_this_control") or 0) >= int(capability.get("max_actions_per_control") or 3):
+        service._reject(state, command_id, "action_limit_reached", "This capability has already taken all actions during this control.")
+    return capability
+
+
+def _require_active_control(service: "GameRoomService", state: dict[str, Any], command_id: str, capability_id: str) -> dict[str, Any]:
     if state["phase"] != PHASE_NIGHT_ACTION:
         service._reject(state, command_id, "phase_not_actionable", "Take control before taking actions.")
     if capability_id != state.get("active_capability_id"):
@@ -441,11 +451,16 @@ def _require_active_action(service: "GameRoomService", state: dict[str, Any], co
     capability = (state.get("capabilities") or {}).get(capability_id)
     if capability is None:
         service._reject(state, command_id, "unknown_capability", "Unknown capability.")
-    if int(capability.get("pa") or 0) < ap_cost:
-        service._reject(state, command_id, "insufficient_pa", f"This action costs {ap_cost} AP.")
-    if int(capability.get("actions_taken_this_control") or 0) >= int(capability.get("max_actions_per_control") or 3):
-        service._reject(state, command_id, "action_limit_reached", "This capability has already taken all actions during this control.")
     return capability
+
+
+def _reset_night_runtime(next_state: dict[str, Any]) -> None:
+    next_state["night_time_spent"] = 0
+    next_state["active_capability_id"] = None
+    for capability in (next_state.get("capabilities") or {}).values():
+        capability["pa"] = 0
+        capability["control_takes_this_night"] = 0
+        capability["actions_taken_this_control"] = 0
 
 
 def _spend_action(next_state: dict[str, Any], capability_id: str, *, ap_cost: int = 0) -> None:
@@ -1122,7 +1137,7 @@ class GameRoomService:
             if not isinstance(payload, dict):
                 self._reject(state, command_id, "invalid_payload", "Command payload must be an object.")
             capability_id = str(payload.get("capability_id") or "")
-            _require_active_action(self, state, command_id, capability_id, ap_cost=0)
+            _require_active_control(self, state, command_id, capability_id)
             current_node_id = str(state.get("poulpita", {}).get("node_id") or "")
             if int((state.get("shelters") or {}).get(current_node_id) or 0) <= 0:
                 self._reject(state, command_id, "no_shelter_here", "Poulpita must be on a shelter token to end the night.")
@@ -1130,14 +1145,84 @@ class GameRoomService:
                 self._reject(state, command_id, "too_early_to_end_night", "At least 4 hours must pass before ending the night.")
             next_state = deepcopy(state)
             next_state["phase"] = PHASE_DAY
-            next_state["active_capability_id"] = None
             next_state["last_active_capability_id"] = capability_id
+            _reset_night_runtime(next_state)
             next_state["version"] = int(state["version"]) + 1
             event = {
                 "event_id": f"evt_{uuid.uuid4().hex}",
                 "type": "day_started",
                 "command_id": command_id,
                 "capability_id": capability_id,
+                "version": int(next_state["version"]),
+                "created_at": _now_iso(),
+            }
+            next_state.setdefault("event_log", []).append(event)
+            return next_state, [event]
+
+        if command_type == "buy_hand_size_upgrade":
+            if state["phase"] != PHASE_DAY:
+                self._reject(state, command_id, "phase_not_day", "Upgrades can be bought only during the day.")
+            payload = command.get("payload") or {}
+            if not isinstance(payload, dict):
+                self._reject(state, command_id, "invalid_payload", "Command payload must be an object.")
+            capability_id = str(payload.get("capability_id") or "")
+            upgrade_index = int(payload.get("upgrade_index") or 0)
+            capability = (state.get("capabilities") or {}).get(capability_id)
+            if capability is None:
+                self._reject(state, command_id, "unknown_capability", "Unknown capability.")
+            upgrades = capability.get("hand_size_upgrades") or []
+            if upgrade_index < 0 or upgrade_index >= len(upgrades):
+                self._reject(state, command_id, "unknown_upgrade", "Unknown hand size upgrade.")
+            purchased = {int(index) for index in (capability.get("purchased_hand_size_upgrade_indices") or [])}
+            if upgrade_index in purchased:
+                self._reject(state, command_id, "upgrade_already_bought", "This upgrade was already bought.")
+            upgrade = upgrades[upgrade_index] or {}
+            if str(upgrade.get("cost_resource") or "neurons") != "neurons":
+                self._reject(state, command_id, "unsupported_upgrade_cost", "Only neuron hand-size upgrades can be bought during the day.")
+            cost = max(0, int(upgrade.get("cost") or 0))
+            if int((state.get("poulpita") or {}).get("neurons") or 0) < cost:
+                self._reject(state, command_id, "insufficient_neurons", "Poulpita does not have enough neurons.")
+            bonus = 1
+            next_state = deepcopy(state)
+            next_capability = next_state["capabilities"][capability_id]
+            next_state["poulpita"]["neurons"] = int(next_state["poulpita"].get("neurons") or 0) - cost
+            next_capability.setdefault("purchased_hand_size_upgrade_indices", []).append(upgrade_index)
+            next_capability["current_max_cards_in_hand"] = int(next_capability.get("current_max_cards_in_hand") or next_capability.get("default_max_cards_in_hand") or 3) + bonus
+            next_state["focused_capability_id"] = capability_id
+            next_state["version"] = int(state["version"]) + 1
+            event = {
+                "event_id": f"evt_{uuid.uuid4().hex}",
+                "type": "hand_size_upgrade_bought",
+                "command_id": command_id,
+                "capability_id": capability_id,
+                "upgrade_index": upgrade_index,
+                "cost": cost,
+                "hand_size_bonus": bonus,
+                "version": int(next_state["version"]),
+                "created_at": _now_iso(),
+            }
+            next_state.setdefault("event_log", []).append(event)
+            return next_state, [event]
+
+        if command_type == "end_day":
+            if state["phase"] != PHASE_DAY:
+                self._reject(state, command_id, "phase_not_day", "Day can be ended only during the day.")
+            next_state = deepcopy(state)
+            next_state["phase"] = PHASE_NIGHT_IDLE
+            next_state["day_index"] = int(state.get("day_index") or 1) + 1
+            next_state["night_time_spent"] = 0
+            next_state["active_capability_id"] = None
+            next_state["last_active_capability_id"] = None
+            for capability in (next_state.get("capabilities") or {}).values():
+                capability["pa"] = 0
+                capability["control_takes_this_night"] = 0
+                capability["actions_taken_this_control"] = 0
+            next_state["version"] = int(state["version"]) + 1
+            event = {
+                "event_id": f"evt_{uuid.uuid4().hex}",
+                "type": "night_started",
+                "command_id": command_id,
+                "day_index": int(next_state["day_index"]),
                 "version": int(next_state["version"]),
                 "created_at": _now_iso(),
             }

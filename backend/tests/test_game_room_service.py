@@ -771,6 +771,86 @@ def test_success_reward_places_shelter_and_enables_end_night_after_four_hours():
     run(scenario())
 
 
+def test_end_night_is_free_and_day_upgrades_stack_before_next_night():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = DEFAULT_ACTIVE_CAPABILITY_ID
+        state["night_time_spent"] = 16
+        state["shelters"] = {"1A": 1}
+        state["poulpita"]["neurons"] = 3
+        capability = state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]
+        capability["pa"] = 0
+        capability["control_takes_this_night"] = 2
+        capability["actions_taken_this_control"] = int(capability["max_actions_per_control"])
+        capability["current_max_cards_in_hand"] = 3
+        capability["hand_size_upgrades"] = [
+            {"cost_resource": "neurons", "cost": 2, "hand_size_bonus": 5},
+            {"cost_resource": "neurons", "cost": 1, "hand_size_bonus": 1},
+        ]
+        capability["purchased_hand_size_upgrade_indices"] = []
+
+        day = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_free_end_night",
+            expected_version=1,
+            command_type="end_night",
+            payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID},
+        )
+        bought = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_buy_upgrade",
+            expected_version=2,
+            command_type="buy_hand_size_upgrade",
+            payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID, "upgrade_index": 0},
+        )
+        duplicate = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_buy_duplicate",
+            expected_version=3,
+            command_type="buy_hand_size_upgrade",
+            payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID, "upgrade_index": 0},
+        )
+        night = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_end_day",
+            expected_version=3,
+            command_type="end_day",
+        )
+
+        day_capability = day["projection"]["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]
+        bought_capability = bought["projection"]["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]
+        night_capability = night["projection"]["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]
+        assert day["ok"] is True
+        assert day["projection"]["phase"] == "day"
+        assert day["projection"]["night_time_spent"] == 0
+        assert day_capability["pa"] == 0
+        assert day_capability["control_takes_this_night"] == 0
+        assert day_capability["actions_taken_this_control"] == 0
+        assert bought["ok"] is True
+        assert bought["projection"]["poulpita"]["neurons"] == 1
+        assert bought_capability["current_max_cards_in_hand"] == 4
+        assert bought_capability["purchased_hand_size_upgrade_indices"] == [0]
+        assert duplicate["ok"] is False
+        assert duplicate["reason"] == "upgrade_already_bought"
+        assert night["ok"] is True
+        assert night["projection"]["phase"] == "night_idle"
+        assert night["projection"]["day_index"] == 2
+        assert night_capability["current_max_cards_in_hand"] == 4
+        assert night_capability["control_takes_this_night"] == 0
+
+    run(scenario())
+
+
 def test_twenty_fifth_ap_spend_can_lose_game_when_energy_reaches_zero():
     async def scenario():
         service, user, room, _start = await create_started_room()

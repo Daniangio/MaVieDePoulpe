@@ -41,6 +41,9 @@ export type CapabilityProjection = {
   max_actions_per_control: number;
   max_control_takes_per_night: number;
   current_max_cards_in_hand?: number;
+  default_max_cards_in_hand?: number;
+  hand_size_upgrades?: Array<{ cost_resource?: string; cost?: number; hand_size_bonus?: number }>;
+  purchased_hand_size_upgrade_indices?: number[];
   initiates_event_ids?: string[];
   draw_pile?: CardProjection[];
   hand?: CardProjection[];
