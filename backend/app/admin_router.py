@@ -341,17 +341,26 @@ async def admin_get_content(_admin: User = Depends(require_admin)):
 
 
 @router.post("/admin/content/categories")
-async def admin_create_category(name: str = Form(...), _admin: User = Depends(require_admin)):
+async def admin_create_category(
+    name: str = Form(...),
+    compulsory_on_same_node: bool = Form(default=False),
+    _admin: User = Depends(require_admin),
+):
     try:
-        return create_category(name=name)
+        return create_category(name=name, compulsory_on_same_node=compulsory_on_same_node)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.put("/admin/content/categories/{category_id}")
-async def admin_update_category(category_id: str, name: str = Form(...), _admin: User = Depends(require_admin)):
+async def admin_update_category(
+    category_id: str,
+    name: str = Form(...),
+    compulsory_on_same_node: bool = Form(default=False),
+    _admin: User = Depends(require_admin),
+):
     try:
-        return update_category(category_id=category_id, name=name)
+        return update_category(category_id=category_id, name=name, compulsory_on_same_node=compulsory_on_same_node)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -451,6 +460,7 @@ async def admin_delete_event(event_id: str, _admin: User = Depends(require_admin
 async def admin_create_tile(
     name: str = Form(...),
     event_id: str = Form(...),
+    priority: int = Form(default=0),
     interaction_ids_json: str = Form(...),
     counter_attack_interaction_ids_json: str = Form(default="[]"),
     success_effects_json: str = Form(default="[]"),
@@ -462,6 +472,7 @@ async def admin_create_tile(
         return save_tile(
             name=name,
             event_id=event_id,
+            priority=priority,
             interaction_ids=[str(item) for item in _json_form_list(interaction_ids_json, "interaction_ids_json")],
             counter_attack_interaction_ids=[
                 str(item)
@@ -480,6 +491,7 @@ async def admin_update_tile(
     tile_id: str,
     name: str = Form(...),
     event_id: str = Form(...),
+    priority: int = Form(default=0),
     interaction_ids_json: str = Form(...),
     counter_attack_interaction_ids_json: str = Form(default="[]"),
     success_effects_json: str = Form(default="[]"),
@@ -492,6 +504,7 @@ async def admin_update_tile(
             tile_id=tile_id,
             name=name,
             event_id=event_id,
+            priority=priority,
             interaction_ids=[str(item) for item in _json_form_list(interaction_ids_json, "interaction_ids_json")],
             counter_attack_interaction_ids=[
                 str(item)

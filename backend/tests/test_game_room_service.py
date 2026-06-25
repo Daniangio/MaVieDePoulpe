@@ -7,6 +7,7 @@ from backend.app.game_room_service import (
     GameRoomService,
     ROOM_STATE_IN_GAME,
     ROOM_STATE_SETUP,
+    _apply_tile_visibility,
 )
 from backend.app.server_models import User
 
@@ -239,6 +240,42 @@ def test_start_goldfish_game_initializes_16_node_board():
         assert len(projection["map"]["nodes"]) == 16
         assert projection["poulpita"]["node_id"] == "1A"
         assert projection["poulpita"]["previous_node_id"] is None
+
+    run(scenario())
+
+
+def test_tile_visibility_reveals_current_neighbors_and_step_two_limits():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["tiles"] = {
+            "1A": [
+                {"instance_id": "current_1", "tile_id": "tile", "face_up": False},
+                {"instance_id": "current_2", "tile_id": "tile", "face_up": False},
+                {"instance_id": "current_3", "tile_id": "tile", "face_up": False},
+            ],
+            "1B": [
+                {"instance_id": "neighbor_1", "tile_id": "tile", "face_up": False},
+                {"instance_id": "neighbor_2", "tile_id": "tile", "face_up": False},
+                {"instance_id": "neighbor_3", "tile_id": "tile", "face_up": False},
+            ],
+            "1C": [
+                {"instance_id": "step2_1", "tile_id": "tile", "face_up": False},
+                {"instance_id": "step2_2", "tile_id": "tile", "face_up": False},
+                {"instance_id": "step2_3", "tile_id": "tile", "face_up": False},
+            ],
+            "1D": [
+                {"instance_id": "step3_1", "tile_id": "tile", "face_up": False},
+            ],
+        }
+        _apply_tile_visibility(state)
+
+        projection = await service.get_projection(room_id=room["id"], user=user)
+
+        assert [tile["face_up"] for tile in projection["tiles"]["1A"]] == [True, True, True]
+        assert [tile.get("face_up") for tile in projection["tiles"]["1B"]] == [True, True, False]
+        assert [tile.get("face_up") for tile in projection["tiles"]["1C"]] == [True, False, False]
+        assert [tile.get("face_up") for tile in projection["tiles"]["1D"]] == [False]
 
     run(scenario())
 
@@ -606,5 +643,161 @@ def test_failed_interaction_removes_tiles_by_selected_category_on_node():
 
         assert result["ok"] is True
         assert [tile["instance_id"] for tile in result["projection"]["tiles"]["1A"]] == ["tile_rock"]
+
+    run(scenario())
+
+
+def test_compulsory_same_node_interactions_follow_highest_priority_first():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = DEFAULT_ACTIVE_CAPABILITY_ID
+        state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["initiates_event_ids"] = ["shark", "crab"]
+        state["tile_catalog"] = {
+            "categories": {
+                "threat": {"id": "threat", "name": "Threat", "compulsory_on_same_node": True},
+                "prey": {"id": "prey", "name": "Prey", "compulsory_on_same_node": False},
+            },
+            "tiles": {
+                "shark-high": {"id": "shark-high", "event_id": "shark", "priority": 9, "interaction_ids": ["hide"]},
+                "shark-low": {"id": "shark-low", "event_id": "shark", "priority": 4, "interaction_ids": ["hide"]},
+                "crab-tile": {"id": "crab-tile", "event_id": "crab", "priority": 99, "interaction_ids": ["hide"]},
+            },
+            "events": {
+                "shark": {"id": "shark", "category_id": "threat"},
+                "crab": {"id": "crab", "category_id": "prey"},
+            },
+            "interactions": {},
+        }
+        state["tiles"] = {
+            "1A": [
+                {"instance_id": "tile_shark_low", "tile_id": "shark-low", "face_up": True},
+                {"instance_id": "tile_shark_high", "tile_id": "shark-high", "face_up": True},
+                {"instance_id": "tile_crab", "tile_id": "crab-tile", "face_up": True},
+            ]
+        }
+
+        rejected_low = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_start_low",
+            expected_version=1,
+            command_type="start_interaction",
+            payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID, "tile_instance_id": "tile_shark_low"},
+        )
+        rejected_optional = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_start_optional",
+            expected_version=1,
+            command_type="start_interaction",
+            payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID, "tile_instance_id": "tile_crab"},
+        )
+        accepted_high = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_start_high",
+            expected_version=1,
+            command_type="start_interaction",
+            payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID, "tile_instance_id": "tile_shark_high"},
+        )
+
+        assert rejected_low["ok"] is False
+        assert rejected_low["reason"] == "compulsory_interaction_first"
+        assert rejected_optional["ok"] is False
+        assert rejected_optional["reason"] == "compulsory_interaction_first"
+        assert accepted_high["ok"] is True
+        assert accepted_high["projection"]["interaction"]["tile_instance_id"] == "tile_shark_high"
+
+    run(scenario())
+
+
+def test_success_reward_places_shelter_and_enables_end_night_after_four_hours():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = DEFAULT_ACTIVE_CAPABILITY_ID
+        state["night_time_spent"] = 16
+        state["tile_catalog"] = {
+            "tiles": {
+                "shelter-tile": {
+                    "id": "shelter-tile",
+                    "event_id": "crab",
+                    "interaction_ids": ["charge"],
+                    "success_effects": [{"type": "place_shelter_token", "amount": None}],
+                    "counter_attack_effects": [],
+                    "failure_effects": [],
+                }
+            },
+            "events": {"crab": {"id": "crab", "category_id": "prey"}},
+            "interactions": {},
+        }
+        state["tiles"] = {"1A": [{"instance_id": "tile_shelter", "tile_id": "shelter-tile", "face_up": True}]}
+        state["interaction"] = {
+            "tile_instance_id": "tile_shelter",
+            "tile_id": "shelter-tile",
+            "node_id": "1A",
+            "played_cards": [{"card_id": "card_charge", "interaction_id": "charge", "capability_id": DEFAULT_ACTIVE_CAPABILITY_ID}],
+        }
+
+        resolved = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_resolve_shelter",
+            expected_version=1,
+            command_type="resolve_interaction",
+        )
+        ended = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_end_night",
+            expected_version=2,
+            command_type="end_night",
+            payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID},
+        )
+
+        assert resolved["ok"] is True
+        assert resolved["projection"]["shelters"]["1A"] == 1
+        assert ended["ok"] is True
+        assert ended["projection"]["phase"] == "day"
+
+    run(scenario())
+
+
+def test_twenty_fifth_ap_spend_can_lose_game_when_energy_reaches_zero():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = DEFAULT_ACTIVE_CAPABILITY_ID
+        state["night_time_spent"] = 24
+        state["poulpita"]["energy"] = 1
+        capability = state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]
+        capability["pa"] = 1
+        capability["actions_taken_this_control"] = 0
+
+        result = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_overtime_move",
+            expected_version=1,
+            command_type="move_poulpita",
+            payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID, "target_node_id": "1B"},
+        )
+        game_result = await service.get_result(room_id=room["id"], user_id=user.id)
+
+        assert result["ok"] is True
+        assert result["projection"]["night_time_spent"] == 25
+        assert result["projection"]["poulpita"]["energy"] == 0
+        assert result["projection"]["phase"] == "game_over"
+        assert game_result["outcome"] == "lost"
 
     run(scenario())

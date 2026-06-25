@@ -15,7 +15,38 @@ const phaseLabel = (projection: GameProjection | null) => {
   if (!projection) return "Loading";
   if (projection.phase === "setup") return "Setup";
   if (projection.phase === "game_over") return "Game over";
+  if (projection.phase === "day") return `Day ${projection.day_index || 1}`;
   return `Night ${projection.day_index || 1}`;
+};
+
+const TimeTracker = ({ projection }: { projection: GameProjection | null }) => {
+  const spent = Math.max(0, Number(projection?.night_time_spent || 0));
+  const total = Math.max(24, Number(projection?.night_time_total || 24));
+  const visibleTotal = Math.max(total, spent);
+  const shelterAt = Math.max(0, Number(projection?.night_shelter_available_at || 16));
+  return (
+    <div className="rounded bg-slate-800 p-3">
+      <div className="flex items-center justify-between text-xs">
+        <span className="text-slate-400">Night clock</span>
+        <strong>{Math.floor(spent / 4)}h {(spent % 4) * 15}m</strong>
+      </div>
+      <div className="mt-2 grid grid-cols-6 gap-1">
+        {Array.from({ length: visibleTotal }).map((_, index) => (
+          <span
+            aria-hidden="true"
+            className={[
+              "h-3 rounded-sm border",
+              index < spent ? (index >= total ? "border-rose-400 bg-rose-400" : "border-cyan-300 bg-cyan-300") : "border-slate-600 bg-slate-900",
+              index + 1 === shelterAt ? "ring-1 ring-amber-300" : "",
+            ].join(" ")}
+            key={index}
+            title={`${Math.floor((index + 1) / 4)}h ${((index + 1) % 4) * 15}m`}
+          />
+        ))}
+      </div>
+      {spent > total ? <p className="mt-2 text-xs text-rose-200">Overtime: {spent - total} extra AP spent.</p> : null}
+    </div>
+  );
 };
 
 const DotTrack = ({
@@ -67,6 +98,7 @@ const CapabilityBoard = ({
   onCollect,
   onDraw,
   onMoveMode,
+  onEndNight,
 }: {
   capability: CapabilityProjection;
   active: boolean;
@@ -80,6 +112,7 @@ const CapabilityBoard = ({
   onCollect?: () => void;
   onDraw?: () => void;
   onMoveMode?: () => void;
+  onEndNight?: () => void;
 }) => {
   const initiableEvents = (capability.initiates_event_ids || [])
     .map((eventId) => projection?.tile_catalog?.events?.[eventId])
@@ -94,6 +127,14 @@ const CapabilityBoard = ({
   const cardCategories = projection?.tile_catalog?.card_categories || [];
   const cardsByInteraction = projection?.tile_catalog?.cards || {};
   const actionPoints = Math.max(0, Number(capability.pa || 0));
+  const currentNodeId = projection?.poulpita?.node_id || "";
+  const canEndNight =
+    focused &&
+    active &&
+    projection?.phase === "night_action" &&
+    Boolean(currentNodeId) &&
+    Number(projection?.shelters?.[currentNodeId] || 0) > 0 &&
+    Number(projection?.night_time_spent || 0) >= Number(projection?.night_shelter_available_at || 16);
   const ArticleTag = compact ? "button" : "article";
   return (
   <ArticleTag
@@ -108,7 +149,14 @@ const CapabilityBoard = ({
   >
     <div className="flex items-start justify-between gap-1">
       <div className="min-w-0">
-        <h3 className="truncate text-sm font-semibold text-white">{capability.name}</h3>
+        <div className="flex min-w-0 items-center gap-2">
+          <h3 className="truncate text-sm font-semibold text-white">{capability.name}</h3>
+          {active ? (
+            <span className="shrink-0 rounded-full border border-teal-200 bg-teal-300 px-2 py-0.5 text-[0.6rem] font-bold uppercase tracking-wide text-teal-950">
+              Initiative
+            </span>
+          ) : null}
+        </div>
         <p className="text-xs text-slate-400">{active ? "Controls Poulpita" : focused ? "In focus" : "Waiting"}</p>
       </div>
       <div className="rounded bg-slate-800 px-2 py-1 text-xs font-semibold text-slate-100">
@@ -191,6 +239,14 @@ const CapabilityBoard = ({
           type="button"
         >
           Draw
+        </button>
+        <button
+          className="rounded border border-cyan-300 px-3 py-2 text-xs text-cyan-100 hover:bg-cyan-950 disabled:opacity-50"
+          disabled={pending || !canEndNight}
+          onClick={onEndNight}
+          type="button"
+        >
+          End night
         </button>
       </div>
     ) : null}
@@ -508,6 +564,7 @@ const GameRoomPage = () => {
   const [discardBeforeDraw, setDiscardBeforeDraw] = useState(false);
   const [failMoveTargetNodeId, setFailMoveTargetNodeId] = useState("");
   const [interactionPanelState, setInteractionPanelState] = useState<"open" | "success" | "failure" | "closing">("open");
+  const [alertsVisible, setAlertsVisible] = useState(false);
 
   const capabilityMap = projection?.capabilities || {};
   const capabilities = useMemo(() => {
@@ -526,6 +583,29 @@ const GameRoomPage = () => {
       setFocusedCapabilityId(projection.focused_capability_id || projection.capability_order?.[0] || null);
     }
   }, [focusedCapabilityId, projection]);
+
+  useEffect(() => {
+    if (!feedback && !error) {
+      setAlertsVisible(false);
+      return undefined;
+    }
+    setAlertsVisible(true);
+    const fadeTimer = window.setTimeout(() => setAlertsVisible(false), 4600);
+    const clearTimer = window.setTimeout(() => {
+      setFeedback("");
+      setError("");
+    }, 5200);
+    return () => {
+      window.clearTimeout(fadeTimer);
+      window.clearTimeout(clearTimer);
+    };
+  }, [feedback, error]);
+
+  useEffect(() => {
+    if (projection?.phase !== "game_over" || !roomId) return undefined;
+    const timer = window.setTimeout(() => navigate(`/games/${roomId}/post-game`), 3500);
+    return () => window.clearTimeout(timer);
+  }, [navigate, projection?.phase, roomId]);
 
   useEffect(() => {
     if (!selectedCapability) {
@@ -738,6 +818,12 @@ const GameRoomPage = () => {
     void submitCommand("draw_action_card", { capability_id: selectedCapabilityId, discard_card_id: discardCardId });
   };
 
+  const endNight = () => {
+    if (!selectedCapabilityId) return;
+    setMoveMode(false);
+    void submitCommand("end_night", { capability_id: selectedCapabilityId });
+  };
+
   const movePoulpita = (targetNodeId: NodeId) => {
     if (!selectedCapabilityId) return;
     setMoveMode(false);
@@ -883,9 +969,20 @@ const GameRoomPage = () => {
       </section>
 
       {feedback || error ? (
-        <div className="pointer-events-none fixed left-1/2 top-[22vh] z-50 w-[min(42rem,calc(100vw-2rem))] -translate-x-1/2">
+        <div className={["pointer-events-none fixed left-1/2 top-[22vh] z-50 w-[min(42rem,calc(100vw-2rem))] -translate-x-1/2 transition-opacity duration-500", alertsVisible ? "opacity-100" : "opacity-0"].join(" ")}>
           {feedback ? <p className="rounded-md border border-amber-500/50 bg-amber-950/95 px-3 py-2 text-sm text-amber-100">{feedback}</p> : null}
           {error ? <p className="mt-2 rounded-md border border-rose-500/50 bg-rose-950/95 px-3 py-2 text-sm text-rose-100">{error}</p> : null}
+        </div>
+      ) : null}
+      {projection?.phase === "game_over" ? (
+        <div className="pointer-events-none fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/45">
+          <div className="animate-[pulse_1.2s_ease-in-out_2] rounded-lg border border-rose-300 bg-rose-950 px-8 py-5 text-center shadow-2xl">
+            <p className="text-sm uppercase tracking-wide text-rose-200">Game lost</p>
+            <h2 className="mt-1 text-2xl font-semibold text-white">
+              {String(latestEvent?.reason || "") === "poulpita_no_energy" ? "Poulpita has no energy left" : "No actions remain"}
+            </h2>
+            <p className="mt-2 text-sm text-rose-100">Post-game opens in a few seconds.</p>
+          </div>
         </div>
       ) : null}
 
@@ -919,21 +1016,7 @@ const GameRoomPage = () => {
             <p className="text-xs uppercase text-slate-500">Poulpita</p>
             <h2 className="mt-1 text-xl font-semibold text-white">{phaseLabel(projection)}</h2>
           </div>
-          <div className="grid grid-cols-2 gap-2 text-xs">
-            <div className="rounded bg-slate-800 p-3">
-              <span className="block text-slate-400">Node</span>
-              <strong>{projection?.poulpita.node_id || "-"}</strong>
-            </div>
-            <div className="rounded bg-slate-800 p-3">
-              <span className="block text-slate-400">Time</span>
-              <strong>{projection?.night_time_spent ?? 0}/24</strong>
-            </div>
-          </div>
-          <div className="rounded bg-slate-800 p-3 text-xs text-slate-300">
-            <span className="block text-slate-400">Initiative</span>
-            <p className="mt-1">{projection?.active_capability_id ? capabilityMap[projection.active_capability_id]?.name : "No capability controls Poulpita."}</p>
-          </div>
-          {latestEvent ? <p className="text-xs text-slate-500">Latest: {String(latestEvent.type || "event")}</p> : null}
+          <TimeTracker projection={projection} />
           <PoulpitaResourcePanel projection={projection} />
         </aside>
         <div className="grid min-h-0 grid-cols-[minmax(18rem,28rem)_1fr] gap-2 overflow-hidden border-t border-r border-slate-800 bg-slate-950 p-1">
@@ -945,6 +1028,7 @@ const GameRoomPage = () => {
               moveMode={moveMode}
               onCollect={collectActionPoints}
               onDraw={drawActionCard}
+              onEndNight={endNight}
               onMoveMode={() => setMoveMode((value) => !value)}
               onTakeControl={takeControl}
               pending={pending}

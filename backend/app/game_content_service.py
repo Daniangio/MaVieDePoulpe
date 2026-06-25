@@ -25,7 +25,7 @@ DEFAULT_CATEGORIES = [
 ]
 COUNTER_ATTACK_CATEGORY_ID = "__counter_attack__"
 COUNTER_ATTACK_CATEGORY = {"id": COUNTER_ATTACK_CATEGORY_ID, "name": "Counter-attack", "special": True}
-SUCCESS_EFFECT_TYPES = {"gain_energy", "gain_neurons", "gain_seashells"}
+SUCCESS_EFFECT_TYPES = {"gain_energy", "gain_neurons", "gain_seashells", "place_shelter_token"}
 FAILURE_EFFECT_TYPES = {
     "lose_energy",
     "lose_neurons",
@@ -98,10 +98,13 @@ def _read_content() -> dict[str, Any]:
     content.setdefault("events", [])
     content.setdefault("tiles", [])
     content.setdefault("levels", [])
+    for category in content["categories"]:
+        category["compulsory_on_same_node"] = bool(category.get("compulsory_on_same_node") or False)
     content["player_boards"] = _normalize_player_boards(content.get("player_boards") or [])
     content["tokens"] = _normalize_tokens(content.get("tokens") or [])
     content["poulpita_panel"] = _normalize_poulpita_panel(content.get("poulpita_panel") or {})
     for tile in content["tiles"]:
+        tile["priority"] = int(tile.get("priority") or 0)
         tile.setdefault("interaction_ids", [])
         tile.setdefault("counter_attack_interaction_ids", [])
         tile.setdefault("success_effects", [])
@@ -394,6 +397,7 @@ def get_game_content_catalog() -> dict[str, dict[str, Any]]:
     content = _read_content()
     return {
         "tiles": {tile["id"]: dict(tile) for tile in content.get("tiles", [])},
+        "categories": {category["id"]: dict(category) for category in content.get("categories", [])},
         "events": {event["id"]: _with_urls(event) for event in content.get("events", [])},
         "interactions": {interaction["id"]: _with_urls(interaction) for interaction in content.get("interactions", [])},
         "cards": {card["id"]: card for card in _generated_cards(content)},
@@ -403,20 +407,21 @@ def get_game_content_catalog() -> dict[str, dict[str, Any]]:
     }
 
 
-def create_category(*, name: str) -> dict[str, Any]:
+def create_category(*, name: str, compulsory_on_same_node: bool = False) -> dict[str, Any]:
     content = _read_content()
     normalized_name = _normalize_name(name)
     category_id = f"{_slug(normalized_name)}-{uuid.uuid4().hex[:8]}"
-    category = {"id": category_id, "name": normalized_name}
+    category = {"id": category_id, "name": normalized_name, "compulsory_on_same_node": bool(compulsory_on_same_node)}
     content["categories"].append(category)
     _write_content(content)
     return category
 
 
-def update_category(*, category_id: str, name: str) -> dict[str, Any]:
+def update_category(*, category_id: str, name: str, compulsory_on_same_node: bool = False) -> dict[str, Any]:
     content = _read_content()
     index = _find_index(content["categories"], category_id)
     content["categories"][index]["name"] = _normalize_name(name)
+    content["categories"][index]["compulsory_on_same_node"] = bool(compulsory_on_same_node)
     _write_content(content)
     return dict(content["categories"][index])
 
@@ -566,6 +571,7 @@ def _normalize_effects(
             continue
         amount = int(effect.get("amount") or 0)
         no_amount_types = {
+            "place_shelter_token",
             "lose_half_ap",
             "lose_all_ap",
             "pulpita_move_previous",
@@ -584,6 +590,7 @@ def save_tile(
     *,
     name: str,
     event_id: str,
+    priority: int = 0,
     interaction_ids: list[str],
     counter_attack_interaction_ids: list[str] | None = None,
     success_effects: list[dict[str, Any]] | None = None,
@@ -603,6 +610,7 @@ def save_tile(
         "id": tile_id or f"{_slug(name)}-{uuid.uuid4().hex[:8]}",
         "name": _normalize_name(name),
         "event_id": event_id,
+        "priority": int(priority or 0),
         "interaction_ids": normalized_interactions,
         "counter_attack_interaction_ids": _normalize_interaction_ids(counter_attack_interaction_ids or [], interaction_set),
         "success_effects": _normalize_effects(success_effects or [], SUCCESS_EFFECT_TYPES, "success"),

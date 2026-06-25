@@ -59,10 +59,12 @@ export type GameProjection = {
   privacy_enforced: false;
   mode: "goldfish";
   version: number;
-  phase: "setup" | "night_idle" | "night_action" | "game_over";
+  phase: "setup" | "night_idle" | "night_action" | "day" | "game_over";
   level_id: string;
   day_index: number;
   night_time_spent: number;
+  night_time_total?: number;
+  night_shelter_available_at?: number;
   selected_level_id?: string;
   selected_map_id?: string;
   active_capability_id: string | null;
@@ -75,6 +77,7 @@ export type GameProjection = {
   map: MapProjection;
   poulpita: PoulpitaProjection;
   tiles?: Record<NodeId, Array<{ instance_id: string; tile_id: string; face_up?: boolean }>>;
+  shelters?: Record<NodeId, number>;
   tile_catalog?: {
     tiles?: Record<string, any>;
     events?: Record<string, any>;

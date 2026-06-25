@@ -122,6 +122,8 @@ class GameStateResponse(BaseModel):
     selected_level_id: Optional[str] = None
     day_index: int = 1
     night_time_spent: int = 0
+    night_time_total: int = 24
+    night_shelter_available_at: int = 16
     selected_map_id: Optional[str] = None
     active_capability_id: Optional[str] = None
     last_active_capability_id: Optional[str] = None
@@ -132,6 +134,10 @@ class GameStateResponse(BaseModel):
     player_boards: List[Dict[str, Any]] = Field(default_factory=list)
     map: Dict[str, Any]
     poulpita: Dict[str, Any]
+    tiles: Dict[str, Any] = Field(default_factory=dict)
+    shelters: Dict[str, int] = Field(default_factory=dict)
+    tile_catalog: Dict[str, Any] = Field(default_factory=dict)
+    interaction: Optional[Dict[str, Any]] = None
     events: List[Dict[str, Any]] = Field(default_factory=list)
 
 

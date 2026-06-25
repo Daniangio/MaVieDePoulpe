@@ -20,6 +20,7 @@ const emptyTile = {
   id: "",
   name: "",
   event_id: "",
+  priority: 0,
   interaction_ids: [],
   counter_attack_interaction_ids: [],
   success_effects: [],
@@ -41,6 +42,7 @@ const successEffectOptions = [
   ["gain_energy", "Gain energy"],
   ["gain_neurons", "Gain neurons"],
   ["gain_seashells", "Gain seashells"],
+  ["place_shelter_token", "Place shelter token"],
 ];
 
 const failureEffectOptions = [
@@ -57,7 +59,7 @@ const failureEffectOptions = [
   ["move_tile_previous", "Move tile to previous node"],
   ["remove_preys", "Remove tiles by category"],
 ];
-const noAmountEffectTypes = new Set(["lose_half_ap", "lose_all_ap", "pulpita_move_previous", "pulpita_move_free", "keep_tile", "remove_tile", "move_tile_previous", "remove_preys"]);
+const noAmountEffectTypes = new Set(["place_shelter_token", "lose_half_ap", "lose_all_ap", "pulpita_move_previous", "pulpita_move_free", "keep_tile", "remove_tile", "move_tile_previous", "remove_preys"]);
 
 const contentTabs = [
   ["map", "Map"],
@@ -83,6 +85,7 @@ const AdminContentPage = () => {
   const { token, user } = useStore();
   const [content, setContent] = useState({ categories: [], card_categories: [], interactions: [], events: [], tiles: [], levels: [], player_boards: [], tokens: [], poulpita_panel: null, cards: [] });
   const [categoryName, setCategoryName] = useState("");
+  const [categoryCompulsory, setCategoryCompulsory] = useState(false);
   const [interactionDraft, setInteractionDraft] = useState(emptyInteraction);
   const [eventDraft, setEventDraft] = useState(emptyEvent);
   const [tileDraft, setTileDraft] = useState(emptyTile);
@@ -156,11 +159,13 @@ const AdminContentPage = () => {
     try {
       const form = new FormData();
       form.set("name", category ? category.name : categoryName);
+      form.set("compulsory_on_same_node", String(category ? Boolean(category.compulsory_on_same_node) : categoryCompulsory));
       await request(category ? `/api/admin/content/categories/${category.id}` : "/api/admin/content/categories", {
         method: category ? "PUT" : "POST",
         body: form,
       });
       setCategoryName("");
+      setCategoryCompulsory(false);
       await loadContent();
     } catch (saveError) {
       setError(saveError.message || "Failed to save category.");
@@ -235,6 +240,7 @@ const AdminContentPage = () => {
       const form = new FormData();
       form.set("name", tileDraft.name);
       form.set("event_id", tileDraft.event_id);
+      form.set("priority", String(Number(tileDraft.priority || 0)));
       form.set("interaction_ids_json", JSON.stringify(tileDraft.interaction_ids || []));
       form.set("counter_attack_interaction_ids_json", JSON.stringify(tileDraft.counter_attack_interaction_ids || []));
       form.set("success_effects_json", JSON.stringify(tileDraft.success_effects || []));
@@ -423,10 +429,12 @@ const AdminContentPage = () => {
       {activeTab === "categories" ? (
         <CategoryEditor
           busy={busy}
+          categoryCompulsory={categoryCompulsory}
           categoryName={categoryName}
           content={content}
           deleteItem={deleteItem}
           saveCategory={saveCategory}
+          setCategoryCompulsory={setCategoryCompulsory}
           setCategoryName={setCategoryName}
           setContent={setContent}
         />
@@ -517,18 +525,26 @@ const EditorPanel = ({ title, children }) => (
   </div>
 );
 
-const CategoryEditor = ({ busy, categoryName, content, deleteItem, saveCategory, setCategoryName, setContent }) => (
+const CategoryEditor = ({ busy, categoryCompulsory, categoryName, content, deleteItem, saveCategory, setCategoryCompulsory, setCategoryName, setContent }) => (
   <section className={panel}>
     <h2 className="font-semibold text-teal-950">Categories</h2>
     <p className="mt-1 text-xs text-slate-500">Counter-attack is special and does not appear here.</p>
-    <div className="mt-3 flex gap-2">
+    <div className="mt-3 flex flex-wrap items-center gap-2">
       <input className={input} value={categoryName} onChange={(event) => setCategoryName(event.target.value)} placeholder="Category name" />
+      <label className="flex items-center gap-2 rounded-md border border-cyan-200 bg-white px-3 py-2 text-sm text-teal-950">
+        <input checked={categoryCompulsory} onChange={(event) => setCategoryCompulsory(event.target.checked)} type="checkbox" />
+        Compulsory on same node
+      </label>
       <button className={primaryButton} disabled={busy} onClick={() => saveCategory()} type="button">Add</button>
     </div>
     <div className="mt-3 space-y-2">
       {content.categories.map((category) => (
         <div className="flex items-center gap-2 rounded-md border border-cyan-100 bg-cyan-50/70 p-2" key={category.id}>
           <input className="min-w-0 flex-1 bg-transparent text-sm text-teal-950 outline-none" value={category.name} onChange={(event) => setContent((current) => ({ ...current, categories: current.categories.map((item) => item.id === category.id ? { ...item, name: event.target.value } : item) }))} />
+          <label className="flex items-center gap-1 text-xs text-teal-900">
+            <input checked={Boolean(category.compulsory_on_same_node)} onChange={(event) => setContent((current) => ({ ...current, categories: current.categories.map((item) => item.id === category.id ? { ...item, compulsory_on_same_node: event.target.checked } : item) }))} type="checkbox" />
+            Compulsory
+          </label>
           <button className={subtleButton} disabled={busy} onClick={() => saveCategory(category)} type="button">Save</button>
           <button className={dangerButton} disabled={busy} onClick={() => deleteItem(`/api/admin/content/categories/${category.id}`, category.name)} type="button">Delete</button>
         </div>
@@ -591,6 +607,17 @@ const TileEditor = ({ addEffect, busy, categoriesById, content, deleteItem, even
           <option value="">Select event</option>
           {content.events.map((event) => <option key={event.id} value={event.id}>{event.name}</option>)}
         </select>
+        <label className="block text-sm">
+          <span className="text-slate-600">Priority</span>
+          <input
+            className={`${input} mt-1`}
+            min="0"
+            step="1"
+            type="number"
+            value={tileDraft.priority ?? 0}
+            onChange={(event) => setTileDraft((current) => ({ ...current, priority: Number(event.target.value || 0) }))}
+          />
+        </label>
         <InteractionChecklist title="Required to succeed" field="interaction_ids" interactions={content.interactions} selected={tileDraft.interaction_ids} onToggle={toggleTileInteraction} />
         <InteractionChecklist title="Optional counter-attack" field="counter_attack_interaction_ids" interactions={content.interactions} selected={tileDraft.counter_attack_interaction_ids} onToggle={toggleTileInteraction} />
         <EffectEditor title="Success effects" field="success_effects" effects={tileDraft.success_effects} options={successEffectOptions} onAdd={addEffect} onUpdate={updateEffect} onRemove={removeEffect} />
@@ -938,6 +965,7 @@ const TileList = ({ content, eventsById, categoriesById, interactionsById, setTi
           <HexTilePreview className="max-w-[13rem]" event={event} interactionsById={interactionsById} tile={tile} />
           <h3 className="mt-3 truncate font-semibold text-teal-950">{tile.name}</h3>
           <p className="text-xs text-slate-500">{event?.name || "Missing event"} - {categoriesById[event?.category_id]?.name || "No category"}</p>
+          <p className="mt-1 text-xs text-slate-600">Priority: {Number(tile.priority || 0)}</p>
           <p className="mt-3 text-xs text-slate-600">Success: {(tile.interaction_ids || []).map((id) => interactionsById[id]?.name || id).join(", ")}</p>
           <p className="mt-1 text-xs text-slate-600">Counter: {(tile.counter_attack_interaction_ids || []).map((id) => interactionsById[id]?.name || id).join(", ") || "None"}</p>
           <div className="mt-3 flex gap-2">

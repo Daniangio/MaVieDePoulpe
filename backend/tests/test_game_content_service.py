@@ -181,3 +181,31 @@ def test_tokens_and_poulpita_panel_are_configurable(tmp_path, monkeypatch):
     assert saved["image_height"] == 600
     assert saved["zones"]["neurons"] == {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4}
     assert service.get_game_content_catalog()["poulpita_panel"]["zones"]["seashells"]["x"] == 0.5
+
+
+def test_categories_can_be_compulsory_and_tiles_have_priority(tmp_path, monkeypatch):
+    monkeypatch.setattr(service, "CONTENT_ROOT", tmp_path)
+    monkeypatch.setattr(service, "CONTENT_IMAGES_ROOT", tmp_path / "images")
+    monkeypatch.setattr(service, "CONTENT_JSON_PATH", tmp_path / "content.json")
+
+    category = service.create_category(name="Threat", compulsory_on_same_node=True)
+    service._write_content(
+        {
+            "categories": [category],
+            "interactions": [{"id": "hide", "name": "Hide", "image_filename": "hide.png"}],
+            "events": [{"id": "shark", "name": "Shark", "category_id": category["id"], "image_filename": "shark.png"}],
+            "tiles": [],
+        }
+    )
+
+    tile = service.save_tile(
+        name="Shark",
+        event_id="shark",
+        priority=7,
+        interaction_ids=["hide"],
+    )
+    catalog = service.get_game_content_catalog()
+
+    assert catalog["categories"][category["id"]]["compulsory_on_same_node"] is True
+    assert tile["priority"] == 7
+    assert catalog["tiles"][tile["id"]]["priority"] == 7

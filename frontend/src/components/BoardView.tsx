@@ -123,6 +123,7 @@ const BoardView = ({ projection, focusedCapabilityId, moveMode, pending, onMove,
             const isAdjacent = adjacentNodeIds.includes(node.id);
             const canMove = moveMode && projection.phase === "night_action" && isAdjacent && !pending;
             const nodeTiles = projection.tiles?.[node.id] || [];
+            const shelterCount = Number(projection.shelters?.[node.id] || 0);
             return (
               <div className="absolute -translate-x-1/2 -translate-y-1/2" key={node.id} style={{ left: `${node.x * 100}%`, top: `${node.y * 100}%` }}>
                 <button
@@ -147,6 +148,11 @@ const BoardView = ({ projection, focusedCapabilityId, moveMode, pending, onMove,
                 >
                   <span>{isCurrent ? "P" : node.id}</span>
                   {isPrevious && !isCurrent ? <span className="absolute right-0 top-0 h-2 w-2 rounded-full bg-slate-400" /> : null}
+                  {shelterCount > 0 ? (
+                    <span className="absolute -left-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full border border-cyan-100 bg-cyan-200 px-1 text-[0.55rem] font-bold text-teal-950" title={`${shelterCount} shelter token${shelterCount === 1 ? "" : "s"}`}>
+                      {shelterCount > 1 ? shelterCount : "S"}
+                    </span>
+                  ) : null}
                 </button>
                 {nodeTiles.length ? (
                   <div className="absolute left-1/2 top-11 flex -translate-x-1/2 gap-1">

@@ -4,6 +4,7 @@ export const effectIcons = {
   gain_energy: "E+",
   gain_neurons: "N+",
   gain_seashells: "S+",
+  place_shelter_token: "SH",
   lose_energy: "E-",
   lose_neurons: "N-",
   lose_seashells: "S-",
