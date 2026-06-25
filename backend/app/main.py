@@ -54,7 +54,10 @@ chat_service = ChatService(
     history_limit=settings.CHAT_HISTORY_LIMIT,
 )
 game_room_service = GameRoomService()
-game_worker = GameWorker(game_room_service)
+game_worker = GameWorker(
+    game_room_service,
+    enabled=settings.USE_DISTRIBUTED_GAME_RUNTIME and settings.DISTRIBUTED_GAME_GATEWAY_RUN_WORKER,
+)
 websocket_session_router = WebSocketSessionRouter(
     connection_manager=connection_manager,
     presence_service=presence_service,
@@ -100,6 +103,7 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     await game_worker.stop()
+    await game_room_service.close()
     await close_redis()
 
 

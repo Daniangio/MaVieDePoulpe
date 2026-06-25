@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useNavigate, useParams } from "react-router-dom";
 import BoardView from "../components/BoardView.js";
 import CardPreview from "../components/CardPreview.jsx";
@@ -93,14 +94,17 @@ const CapabilityBoard = ({
   const cardCategories = projection?.tile_catalog?.card_categories || [];
   const cardsByInteraction = projection?.tile_catalog?.cards || {};
   const actionPoints = Math.max(0, Number(capability.pa || 0));
+  const ArticleTag = compact ? "button" : "article";
   return (
-  <article
+  <ArticleTag
     className={[
-      "relative min-w-0 rounded-md border bg-slate-900 text-slate-100 shadow-xl transition",
+      "group/board relative min-w-0 rounded-md border bg-slate-900 text-left text-slate-100 shadow-xl transition",
+      compact ? "cursor-pointer hover:z-50 hover:border-cyan-300 hover:bg-slate-800 hover:shadow-cyan-500/20 focus:outline-none focus:ring-2 focus:ring-cyan-300" : "",
       active ? "border-teal-300" : focused ? "border-amber-300" : "border-slate-700",
       compact ? "h-full p-2" : "h-full p-3",
     ].join(" ")}
-    onDoubleClick={onFocus}
+    onClick={compact ? onFocus : undefined}
+    type={compact ? "button" : undefined}
   >
     <div className="flex items-start justify-between gap-1">
       <div className="min-w-0">
@@ -190,7 +194,7 @@ const CapabilityBoard = ({
         </button>
       </div>
     ) : null}
-  </article>
+  </ArticleTag>
   );
 };
 
@@ -199,20 +203,38 @@ const CardButton = ({
   projection,
   disabled,
   selected,
+  showPreview = false,
   onClick,
 }: {
   card: CardProjection;
   projection: GameProjection;
   disabled?: boolean;
   selected?: boolean;
+  showPreview?: boolean;
   onClick?: () => void;
 }) => {
   const interaction = projection.tile_catalog?.interactions?.[card.interaction_id];
   const generatedCard = projection.tile_catalog?.cards?.[card.interaction_id];
   const cardCategories = projection.tile_catalog?.card_categories || [];
   const imageUrl = interaction?.image_url ? buildApiUrl(interaction.image_url) : "";
+  const [previewPosition, setPreviewPosition] = useState<{ left: number; top: number } | null>(null);
+  const openPreview = (element: HTMLElement) => {
+    if (!showPreview || !generatedCard) return;
+    const rect = element.getBoundingClientRect();
+    const width = 320;
+    const margin = 12;
+    const left = Math.min(window.innerWidth - width - margin, Math.max(margin, rect.left + rect.width / 2 - width / 2));
+    const top = rect.top > 360 ? rect.top - margin : rect.bottom + margin;
+    setPreviewPosition({ left, top });
+  };
   return (
-    <span className="group/card relative inline-block">
+    <span
+      className="relative inline-block"
+      onMouseEnter={(event) => openPreview(event.currentTarget)}
+      onMouseLeave={() => setPreviewPosition(null)}
+      onFocus={(event) => openPreview(event.currentTarget)}
+      onBlur={() => setPreviewPosition(null)}
+    >
       <button
         className={[
           "flex h-24 w-20 flex-col items-center justify-between rounded-md border bg-slate-800 p-2 text-xs text-white transition disabled:opacity-50",
@@ -225,11 +247,17 @@ const CardButton = ({
         {imageUrl ? <img alt="" className="h-10 w-10 rounded object-cover" src={imageUrl} /> : <span className="flex h-10 w-10 items-center justify-center rounded bg-slate-700">{interaction?.name?.slice(0, 2) || "?"}</span>}
         <span className="line-clamp-2 text-center">{interaction?.name || card.interaction_id}</span>
       </button>
-      {generatedCard ? (
-        <span className="pointer-events-none absolute bottom-full left-1/2 z-[90] hidden w-80 -translate-x-1/2 pb-2 group-hover/card:block">
-          <CardPreview card={generatedCard} categories={cardCategories} />
-        </span>
-      ) : null}
+      {showPreview && generatedCard && previewPosition
+        ? createPortal(
+            <div
+              className="pointer-events-none fixed z-[9999] w-80"
+              style={{ left: previewPosition.left, top: previewPosition.top, transform: previewPosition.top > window.innerHeight / 2 ? "translateY(-100%)" : undefined }}
+            >
+              <CardPreview card={generatedCard} categories={cardCategories} />
+            </div>,
+            document.body,
+          )
+        : null}
     </span>
   );
 };
@@ -258,7 +286,7 @@ const PoulpitaResourcePanel = ({ projection }: { projection: GameProjection | nu
 
   if (!containerUrl) {
     return (
-      <div className="grid grid-cols-3 gap-2 text-xs">
+      <div className="mt-auto grid grid-cols-3 gap-2 text-xs">
         <div className="rounded bg-slate-800 p-3">
           <span className="block text-slate-400">Energy</span>
           <strong>{projection?.poulpita.energy ?? 0}</strong>
@@ -268,7 +296,6 @@ const PoulpitaResourcePanel = ({ projection }: { projection: GameProjection | nu
             <span className="block text-slate-400">{resource.label}</span>
             <div className="mt-1 flex flex-wrap gap-1">
               {Array.from({ length: resource.count }).map((_, index) => <ResourceToken key={index} label={resource.label} token={resource.token} />)}
-              {resource.count === 0 ? <strong>0</strong> : null}
             </div>
           </div>
         ))}
@@ -277,12 +304,12 @@ const PoulpitaResourcePanel = ({ projection }: { projection: GameProjection | nu
   }
 
   return (
-    <div className="rounded bg-slate-800 p-3 text-xs">
+    <div className="mt-auto rounded bg-slate-800 p-3 text-xs">
       <div className="mb-2 flex items-center justify-between">
         <span className="text-slate-400">Poulpita Board</span>
         <strong className="text-slate-100">Energy {projection?.poulpita.energy ?? 0}</strong>
       </div>
-      <div className="relative overflow-hidden rounded border border-slate-700 bg-slate-950" style={{ aspectRatio }}>
+      <div className="relative max-h-[42vh] overflow-hidden rounded border border-slate-700 bg-slate-950" style={{ aspectRatio }}>
         <img alt="Poulpita resource board" className="absolute inset-0 h-full w-full object-contain" src={containerUrl} />
         {resources.map((resource) => {
           const zone = zones[resource.zoneId];
@@ -529,10 +556,11 @@ const GameRoomPage = () => {
     return events.length ? events[events.length - 1] : null;
   }, [projection?.events]);
 
-  const loadProjection = async () => {
+  const loadProjection = useCallback(async () => {
     if (!token || !roomId) return;
     try {
-      const response = await fetch(buildApiUrl(`/api/game/rooms/${roomId}/state`), {
+      const response = await fetch(buildApiUrl(`/api/game/rooms/${roomId}/state?t=${Date.now()}`), {
+        cache: "no-store",
         headers: { Authorization: `Bearer ${token}` },
       });
       const payload = await response.json().catch(() => ({}));
@@ -542,11 +570,11 @@ const GameRoomPage = () => {
     } catch (loadError: any) {
       setError(loadError.message || "Failed to load game state.");
     }
-  };
+  }, [roomId, token]);
 
   useEffect(() => {
     void loadProjection();
-  }, [roomId, token]);
+  }, [loadProjection]);
 
   useEffect(() => {
     const loadLevels = async () => {
@@ -568,8 +596,18 @@ const GameRoomPage = () => {
   useEffect(() => {
     if (!token || !roomId) return undefined;
     const socket = new WebSocket(buildWsUrl(`/api/game/rooms/${roomId}/ws`, { token }));
+    let disposed = false;
     socketRef.current = socket;
+    socket.onopen = () => {
+      if (disposed) {
+        socket.close(1000, "stale room socket");
+        return;
+      }
+      void loadProjection();
+      socket.send(JSON.stringify({ type: "request_projection" }));
+    };
     socket.onmessage = (event) => {
+      if (disposed) return;
       try {
         const message = JSON.parse(event.data);
         if (message?.type === "state_projection") {
@@ -580,15 +618,43 @@ const GameRoomPage = () => {
         setError("Received an invalid room update.");
       }
     };
-    socket.onerror = () => setError("Room websocket is unavailable; HTTP commands will still work.");
+    socket.onerror = () => {
+      if (!disposed) setError("Room websocket is unavailable; HTTP commands will still work.");
+    };
     socket.onclose = () => {
       if (socketRef.current === socket) socketRef.current = null;
     };
     return () => {
-      socketRef.current = null;
-      socket.close(1000, "leaving room");
+      disposed = true;
+      if (socketRef.current === socket) socketRef.current = null;
+      socket.onmessage = null;
+      socket.onerror = null;
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.close(1000, "leaving room");
+      }
     };
-  }, [roomId, token]);
+  }, [loadProjection, roomId, token]);
+
+  useEffect(() => {
+    if (!token || !roomId) return undefined;
+    const refreshProjection = () => {
+      if (document.visibilityState === "hidden") return;
+      void loadProjection();
+      if (socketRef.current?.readyState === WebSocket.OPEN) {
+        socketRef.current.send(JSON.stringify({ type: "request_projection" }));
+      }
+    };
+    window.addEventListener("focus", refreshProjection);
+    window.addEventListener("pageshow", refreshProjection);
+    window.addEventListener("online", refreshProjection);
+    document.addEventListener("visibilitychange", refreshProjection);
+    return () => {
+      window.removeEventListener("focus", refreshProjection);
+      window.removeEventListener("pageshow", refreshProjection);
+      window.removeEventListener("online", refreshProjection);
+      document.removeEventListener("visibilitychange", refreshProjection);
+    };
+  }, [loadProjection, roomId, token]);
 
   const submitCommand = async (type: string, payload: Record<string, unknown> = {}) => {
     if (!token || !roomId || pending) return null;
@@ -823,7 +889,7 @@ const GameRoomPage = () => {
         </div>
       ) : null}
 
-      <section className="grid h-[50vh] grid-cols-[minmax(0,75%)_minmax(14rem,25%)] overflow-hidden">
+      <section className="grid h-[80vh] grid-cols-[minmax(0,75%)_minmax(14rem,25%)] grid-rows-[minmax(0,50vh)_minmax(0,30vh)] overflow-hidden">
         <div className="relative min-w-0 overflow-hidden border-r border-slate-800">
           {projection ? (
             <>
@@ -848,7 +914,7 @@ const GameRoomPage = () => {
             <div className="flex h-full items-center justify-center text-sm text-slate-400">Loading room state.</div>
           )}
         </div>
-        <aside className="flex h-full flex-col gap-3 overflow-hidden bg-slate-900 p-4">
+        <aside className="row-span-2 flex h-full flex-col gap-3 overflow-hidden bg-slate-900 p-4">
           <div>
             <p className="text-xs uppercase text-slate-500">Poulpita</p>
             <h2 className="mt-1 text-xl font-semibold text-white">{phaseLabel(projection)}</h2>
@@ -863,33 +929,30 @@ const GameRoomPage = () => {
               <strong>{projection?.night_time_spent ?? 0}/24</strong>
             </div>
           </div>
-          <PoulpitaResourcePanel projection={projection} />
           <div className="rounded bg-slate-800 p-3 text-xs text-slate-300">
             <span className="block text-slate-400">Initiative</span>
             <p className="mt-1">{projection?.active_capability_id ? capabilityMap[projection.active_capability_id]?.name : "No capability controls Poulpita."}</p>
           </div>
-          {latestEvent ? <p className="mt-auto text-xs text-slate-500">Latest: {String(latestEvent.type || "event")}</p> : null}
+          {latestEvent ? <p className="text-xs text-slate-500">Latest: {String(latestEvent.type || "event")}</p> : null}
+          <PoulpitaResourcePanel projection={projection} />
         </aside>
-      </section>
-
-      <section className="grid h-[30vh] grid-cols-[minmax(18rem,28rem)_1fr] gap-2 overflow-hidden border-t border-slate-800 bg-slate-950 p-1">
-        {selectedCapability ? (
-          <CapabilityBoard
-            active={projection?.active_capability_id === selectedCapability.id}
-            capability={selectedCapability}
-            focused
-            moveMode={moveMode}
-            onCollect={collectActionPoints}
-            onDraw={drawActionCard}
-            onMoveMode={() => setMoveMode((value) => !value)}
-            onTakeControl={takeControl}
-            pending={pending}
-            projection={projection}
-          />
-        ) : (
-          <div className="rounded-md border border-slate-800 bg-slate-900 p-3 text-sm text-slate-400">No focused player board.</div>
-        )}
-        <div className="grid h-full grid-cols-[1fr_12rem] gap-3 overflow-hidden">
+        <div className="grid min-h-0 grid-cols-[minmax(18rem,28rem)_1fr] gap-2 overflow-hidden border-t border-r border-slate-800 bg-slate-950 p-1">
+          {selectedCapability ? (
+            <CapabilityBoard
+              active={projection?.active_capability_id === selectedCapability.id}
+              capability={selectedCapability}
+              focused
+              moveMode={moveMode}
+              onCollect={collectActionPoints}
+              onDraw={drawActionCard}
+              onMoveMode={() => setMoveMode((value) => !value)}
+              onTakeControl={takeControl}
+              pending={pending}
+              projection={projection}
+            />
+          ) : (
+            <div className="rounded-md border border-slate-800 bg-slate-900 p-3 text-sm text-slate-400">No focused player board.</div>
+          )}
           <div className="rounded-md border border-slate-800 bg-slate-900 p-3">
             <div className="flex items-center justify-between gap-3">
               <h3 className="text-sm font-semibold text-white">Player hand</h3>
@@ -920,15 +983,11 @@ const GameRoomPage = () => {
                   }}
                   projection={projection as GameProjection}
                   selected={discardBeforeDraw || selectedCardIds.includes(card.card_id)}
+                  showPreview
                 />
               ))}
               {(selectedCapability?.hand || []).length === 0 ? <p className="m-auto text-sm text-slate-500">No cards in hand.</p> : null}
             </div>
-          </div>
-          <div className="rounded-md border border-slate-800 bg-slate-900 p-3 text-xs text-slate-400">
-            <h3 className="text-sm font-semibold text-white">Action track</h3>
-            <p className="mt-2">{selectedCapability?.actions_taken_this_control ?? 0} actions this control.</p>
-            {moveMode ? <p className="mt-2 text-amber-200">Click an adjacent map node.</p> : null}
           </div>
         </div>
       </section>

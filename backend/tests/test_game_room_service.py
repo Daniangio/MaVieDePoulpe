@@ -3,6 +3,7 @@ import pytest
 
 from backend.app.game_room_service import (
     DEFAULT_ACTIVE_CAPABILITY_ID,
+    GameWorker,
     GameRoomService,
     ROOM_STATE_IN_GAME,
     ROOM_STATE_SETUP,
@@ -55,6 +56,61 @@ TEST_LEVEL = {
     "node_group_ids": {node_id: "main" for node_id in TEST_MAP["nodes"]},
     "groups": [{"id": "main", "name": "Main", "tile_counts": {}}],
 }
+
+
+class FakeRedis:
+    def __init__(self):
+        self.values = {}
+        self.sorted_sets = {}
+        self.streams = {}
+        self.read_offsets = {}
+        self.published = []
+
+    async def get(self, key):
+        return self.values.get(key)
+
+    async def set(self, key, value, ex=None, nx=False):
+        if nx and key in self.values:
+            return False
+        self.values[key] = value
+        return True
+
+    async def delete(self, key):
+        self.values.pop(key, None)
+
+    async def zadd(self, key, mapping):
+        self.sorted_sets.setdefault(key, {}).update(mapping)
+
+    async def zrevrange(self, key, start, end):
+        values = sorted((self.sorted_sets.get(key) or {}).items(), key=lambda item: item[1], reverse=True)
+        return [value for value, _score in values[start : end + 1]]
+
+    async def xadd(self, key, fields):
+        stream = self.streams.setdefault(key, [])
+        entry_id = f"{len(stream) + 1}-0"
+        stream.append((entry_id, dict(fields)))
+        return entry_id
+
+    async def xgroup_create(self, *args, **kwargs):
+        return True
+
+    async def xreadgroup(self, *, groupname, consumername, streams, count=1, block=0):
+        stream_key = next(iter(streams.keys()))
+        offset_key = (groupname, consumername, stream_key)
+        start = self.read_offsets.get(offset_key, 0)
+        entries = list(self.streams.get(stream_key, []))[start : start + count]
+        self.read_offsets[offset_key] = start + len(entries)
+        if entries:
+            return [(stream_key, entries)]
+        await asyncio.sleep(max(0, min(float(block or 0) / 1000, 0.01)))
+        return []
+
+    async def xack(self, *args, **kwargs):
+        return 1
+
+    async def publish(self, channel, payload):
+        self.published.append((channel, payload))
+        return 0
 
 
 @pytest.fixture(autouse=True)
@@ -183,6 +239,64 @@ def test_start_goldfish_game_initializes_16_node_board():
         assert len(projection["map"]["nodes"]) == 16
         assert projection["poulpita"]["node_id"] == "1A"
         assert projection["poulpita"]["previous_node_id"] is None
+
+    run(scenario())
+
+
+def test_room_and_state_are_rehydrated_from_redis_after_service_restart():
+    async def scenario():
+        redis = FakeRedis()
+        user = User(id="user_1", username="Player One")
+        first_service = GameRoomService(redis_client=redis)
+        room = await first_service.create_room(user=user, game_type="goldfish")
+
+        restarted_service = GameRoomService(redis_client=redis)
+        public_room = await restarted_service.get_room(room_id=room["id"], user=user)
+        projection = await restarted_service.get_projection(room_id=room["id"], user=user)
+
+        assert public_room["id"] == room["id"]
+        assert public_room["state"] == ROOM_STATE_SETUP
+        assert projection["room_id"] == room["id"]
+        assert projection["version"] == 0
+        assert projection["selected_level_id"] == "test-level"
+
+    run(scenario())
+
+
+def test_distributed_worker_processes_command_from_redis_stream(monkeypatch):
+    async def scenario():
+        monkeypatch.setenv("USE_DISTRIBUTED_GAME_RUNTIME", "true")
+        monkeypatch.setenv("GAME_COMMAND_RESULT_TIMEOUT_SECONDS", "1.0")
+        monkeypatch.setenv("GAME_COMMAND_RESULT_POLL_SECONDS", "0.01")
+        redis = FakeRedis()
+        user = User(id="user_1", username="Player One")
+        gateway_service = GameRoomService(redis_client=redis)
+        worker_service = GameRoomService(redis_client=redis)
+        room = await gateway_service.create_room(user=user, game_type="goldfish")
+        worker = GameWorker(worker_service, enabled=True)
+        worker.start()
+        try:
+            result = await gateway_service.enqueue_game_command(
+                room_id=room["id"],
+                user=user,
+                command={
+                    "command_id": "cmd_start_distributed",
+                    "room_id": room["id"],
+                    "actor_user_id": user.id,
+                    "actor_seat_id": "goldfish",
+                    "expected_version": 0,
+                    "type": "start_goldfish_game",
+                    "payload": {},
+                },
+            )
+        finally:
+            await worker.stop()
+
+        projection = await gateway_service.get_projection(room_id=room["id"], user=user)
+        assert result["ok"] is True
+        assert result["version"] == 1
+        assert projection["phase"] == "night_idle"
+        assert projection["version"] == 1
 
     run(scenario())
 

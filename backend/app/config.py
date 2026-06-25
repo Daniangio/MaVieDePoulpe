@@ -24,6 +24,15 @@ class Settings(BaseSettings):
     CHAT_RETENTION_SECONDS: int = 86400
     CHAT_HISTORY_LIMIT: int = 80
 
+    USE_DISTRIBUTED_GAME_RUNTIME: bool = False
+    DISTRIBUTED_GAME_GATEWAY_RUN_WORKER: bool = False
+    GAME_COMMAND_STREAM_KEY: str = "game:commands"
+    GAME_COMMAND_CONSUMER_GROUP: str = "game-workers"
+    GAME_COMMAND_CONSUMER_NAME: str = "worker-dev"
+    GAME_COMMAND_RESULT_TTL_SECONDS: int = 60
+    GAME_COMMAND_RESULT_TIMEOUT_SECONDS: float = 8.0
+    GAME_COMMAND_RESULT_POLL_SECONDS: float = 0.05
+
     CORS_ALLOW_ORIGINS: str = "*"
 
 

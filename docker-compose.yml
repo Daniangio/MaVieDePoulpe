@@ -78,8 +78,41 @@ services:
       REDIS_PASSWORD: "${REDIS_PASSWORD:-}"
       FIREBASE_ADMIN_CREDENTIALS: "${FIREBASE_ADMIN_CREDENTIALS:-secrets/firebase-admin.dev.json}"
       AUTO_CREATE_SCHEMA: "true"
+      USE_DISTRIBUTED_GAME_RUNTIME: "${USE_DISTRIBUTED_GAME_RUNTIME:-true}"
+      DISTRIBUTED_GAME_GATEWAY_RUN_WORKER: "${DISTRIBUTED_GAME_GATEWAY_RUN_WORKER:-false}"
+      GAME_COMMAND_CONSUMER_NAME: "gateway-dev"
     working_dir: /workspace
     tty: true
+
+  backend-worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: >
+      sh -c "pip install -r backend/requirements.txt &&
+             python -m backend.app.worker_main"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - .:/workspace
+    environment:
+      DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER:-maviedepoulpe}:${POSTGRES_PASSWORD:-maviedepoulpe_dev_password}@postgres:5432/${POSTGRES_DB:-maviedepoulpe}"
+      REDIS_URL: "${REDIS_URL:-redis://redis:6379/0}"
+      REDIS_PASSWORD: "${REDIS_PASSWORD:-}"
+      FIREBASE_ADMIN_CREDENTIALS: "${FIREBASE_ADMIN_CREDENTIALS:-secrets/firebase-admin.dev.json}"
+      AUTO_CREATE_SCHEMA: "true"
+      USE_DISTRIBUTED_GAME_RUNTIME: "true"
+      DISTRIBUTED_GAME_GATEWAY_RUN_WORKER: "true"
+      GAME_COMMAND_CONSUMER_NAME: "worker-dev"
+    working_dir: /workspace
+    tty: true
+    restart: unless-stopped
 
   redisinsight:
     profiles: ["ops"]

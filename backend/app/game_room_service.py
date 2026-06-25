@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import random
 import time
 import uuid
@@ -37,12 +38,57 @@ CAPABILITY_NAMES = {
 }
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_str(name: str, default: str) -> str:
+    return os.getenv(name, default).strip() or default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
 def _history_key(user_id: str) -> str:
     return f"game:user:{user_id}:history"
+
+
+def _room_key(room_id: str) -> str:
+    return f"game:room:{room_id}"
+
+
+def _state_key(room_id: str) -> str:
+    return f"game:state:{room_id}"
+
+
+def _result_key(room_id: str) -> str:
+    return f"game:result:{room_id}"
+
+
+def _command_result_key(command_id: str) -> str:
+    return f"game:command_result:{command_id}"
+
+
+def _projection_channel(room_id: str) -> str:
+    return f"game:room:{room_id}:projection"
 
 
 def _iso_to_epoch(value: Any) -> float:
@@ -227,6 +273,8 @@ def _build_tile_catalog() -> dict[str, Any]:
         "interactions": catalog["interactions"],
         "cards": cards,
         "card_categories": catalog.get("card_categories") or [],
+        "tokens": catalog.get("tokens") or {},
+        "poulpita_panel": catalog.get("poulpita_panel") or {},
     }
 
 
@@ -314,6 +362,13 @@ def _project_state(state: dict[str, Any]) -> dict[str, Any]:
     capabilities = deepcopy(state.get("capabilities") or {})
     capability_order = list(CAPABILITY_ORDER)
     player_boards = [capabilities[capability_id] for capability_id in capability_order if capability_id in capabilities]
+    tile_catalog = deepcopy(state.get("tile_catalog") or {})
+    try:
+        latest_catalog = get_game_content_catalog()
+        tile_catalog["tokens"] = latest_catalog.get("tokens") or tile_catalog.get("tokens") or {}
+        tile_catalog["poulpita_panel"] = latest_catalog.get("poulpita_panel") or tile_catalog.get("poulpita_panel") or {}
+    except Exception:
+        pass
     projected_tiles = {}
     for node_id, node_tiles in (state.get("tiles") or {}).items():
         projected_tiles[node_id] = [
@@ -352,7 +407,7 @@ def _project_state(state: dict[str, Any]) -> dict[str, Any]:
         "map": deepcopy(state["map"]),
         "poulpita": deepcopy(state["poulpita"]),
         "tiles": projected_tiles,
-        "tile_catalog": deepcopy(state.get("tile_catalog") or {}),
+        "tile_catalog": tile_catalog,
         "interaction": deepcopy(state.get("interaction")),
         "events": list(state.get("event_log") or [])[-20:],
     }
@@ -520,15 +575,91 @@ def _apply_failure_effects(
 class GameRoomService:
     def __init__(self, redis_client=None) -> None:
         self.redis = redis_client
+        self.node_id = f"game-service-{uuid.uuid4().hex}"
         self._memory_rooms: dict[str, dict[str, Any]] = {}
         self._memory_states: dict[str, dict[str, Any]] = {}
         self._memory_results: dict[str, dict[str, Any]] = {}
         self._memory_history: dict[str, list[str]] = {}
         self._room_locks: dict[str, asyncio.Lock] = {}
         self._room_sockets: dict[str, set[WebSocket]] = {}
+        self._room_pubsub_tasks: dict[str, asyncio.Task] = {}
 
     def configure_redis(self, redis_client) -> None:
         self.redis = redis_client
+
+    async def close(self) -> None:
+        tasks = list(self._room_pubsub_tasks.values())
+        self._room_pubsub_tasks.clear()
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    async def _redis_get_json(self, key: str) -> dict[str, Any] | None:
+        if self.redis is None:
+            return None
+        raw = await self.redis.get(key)
+        if not raw:
+            return None
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode("utf-8", errors="ignore")
+        try:
+            parsed = json.loads(str(raw))
+        except (TypeError, json.JSONDecodeError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    async def _redis_set_json(self, key: str, payload: dict[str, Any], *, ex: int | None = None) -> None:
+        if self.redis is None:
+            return
+        encoded = json.dumps(payload, default=str, separators=(",", ":"))
+        if ex is None:
+            await self.redis.set(key, encoded)
+        else:
+            await self.redis.set(key, encoded, ex=ex)
+
+    async def _save_room(self, room: dict[str, Any]) -> None:
+        room_id = str(room.get("id") or "")
+        if not room_id:
+            return
+        self._memory_rooms[room_id] = deepcopy(room)
+        await self._redis_set_json(_room_key(room_id), room)
+
+    async def _load_room(self, room_id: str) -> dict[str, Any] | None:
+        if self.redis is not None:
+            room = await self._redis_get_json(_room_key(room_id))
+            if room is not None:
+                self._memory_rooms[room_id] = room
+                return room
+        room = self._memory_rooms.get(room_id)
+        if room is not None:
+            return room
+        return None
+
+    async def _save_state(self, room_id: str, state: dict[str, Any]) -> None:
+        self._memory_states[room_id] = deepcopy(state)
+        await self._redis_set_json(_state_key(room_id), state)
+
+    async def _load_state(self, room_id: str) -> dict[str, Any] | None:
+        if self.redis is not None:
+            state = await self._redis_get_json(_state_key(room_id))
+            if state is not None:
+                self._memory_states[room_id] = state
+                return state
+        state = self._memory_states.get(room_id)
+        if state is not None:
+            return state
+        return None
+
+    async def _save_result(self, result: dict[str, Any]) -> None:
+        room_id = str(result.get("room_id") or result.get("id") or "")
+        if not room_id:
+            return
+        self._memory_results[room_id] = deepcopy(result)
+        await self._redis_set_json(_result_key(room_id), result)
 
     async def create_room(self, *, user: User, game_type: str = "goldfish", map_id: str | None = None, level_id: str | None = None) -> dict[str, Any]:
         normalized_game_type = str(game_type or "goldfish").strip() or "goldfish"
@@ -550,28 +681,31 @@ class GameRoomService:
             "map_id": selected_map["id"],
             "level_id": selected_level["id"],
         }
-        self._memory_rooms[room_id] = room
-        self._memory_states[room_id] = _setup_state(room_id, level_id=selected_level["id"])
+        await self._save_room(room)
+        await self._save_state(room_id, _setup_state(room_id, level_id=selected_level["id"]))
         self._room_locks[room_id] = asyncio.Lock()
         return _public_room(room)
 
     async def get_room(self, *, room_id: str, user: User) -> dict[str, Any] | None:
-        room = self._memory_rooms.get(room_id)
+        room = await self._load_room(room_id)
         if not room or room.get("owner_user_id") != user.id:
             return None
         return _public_room(room)
 
     async def join_room(self, *, room_id: str, user: User) -> dict[str, str] | None:
-        room = self._memory_rooms.get(room_id)
+        room = await self._load_room(room_id)
         if not room or room.get("owner_user_id") != user.id:
             return None
         return {"room_id": room_id, "seat_id": "goldfish"}
 
     async def get_projection(self, *, room_id: str, user: User) -> dict[str, Any] | None:
-        room = self._memory_rooms.get(room_id)
+        room = await self._load_room(room_id)
         if not room or room.get("owner_user_id") != user.id:
             return None
-        return _project_state(self._memory_states[room_id])
+        state = await self._load_state(room_id)
+        if state is None:
+            return None
+        return _project_state(state)
 
     async def get_game_state(self, *, room_id: str, user: User, selected_tile: str | None = None) -> dict[str, Any] | None:
         return await self.get_projection(room_id=room_id, user=user)
@@ -583,23 +717,74 @@ class GameRoomService:
         user: User,
         command: dict[str, Any],
     ) -> dict[str, Any]:
+        if self.redis is not None and _env_bool("USE_DISTRIBUTED_GAME_RUNTIME", False):
+            return await self._enqueue_distributed_command(room_id=room_id, user=user, command=command)
         return await self.apply_command(room_id=room_id, user=user, command=command)
 
+    async def _enqueue_distributed_command(
+        self,
+        *,
+        room_id: str,
+        user: User,
+        command: dict[str, Any],
+    ) -> dict[str, Any]:
+        command_id = str(command.get("command_id") or "").strip() or f"cmd_{uuid.uuid4().hex}"
+        command = {**command, "command_id": command_id}
+        result_key = _command_result_key(command_id)
+        await self.redis.delete(result_key)
+        await self.redis.xadd(
+            _env_str("GAME_COMMAND_STREAM_KEY", COMMAND_STREAM_KEY),
+            {
+                "command_id": command_id,
+                "room_id": room_id,
+                "user": json.dumps(user.model_dump(), default=str, separators=(",", ":")),
+                "command": json.dumps(command, default=str, separators=(",", ":")),
+                "queued_at": _now_iso(),
+            },
+        )
+        deadline = time.monotonic() + max(0.1, _env_float("GAME_COMMAND_RESULT_TIMEOUT_SECONDS", 8.0))
+        poll_seconds = max(0.01, _env_float("GAME_COMMAND_RESULT_POLL_SECONDS", 0.05))
+        while time.monotonic() < deadline:
+            raw = await self.redis.get(result_key)
+            if raw:
+                if isinstance(raw, (bytes, bytearray)):
+                    raw = raw.decode("utf-8", errors="ignore")
+                try:
+                    parsed = json.loads(str(raw))
+                except (TypeError, json.JSONDecodeError):
+                    parsed = None
+                if isinstance(parsed, dict):
+                    return parsed
+            await asyncio.sleep(poll_seconds)
+        projection = await self.get_projection(room_id=room_id, user=user)
+        return {
+            "ok": False,
+            "status": "rejected",
+            "command_id": command_id,
+            "revision": int((projection or {}).get("version") or 0),
+            "reason": "command_timeout",
+            "message": "The game worker did not process the command in time.",
+            "current_version": int((projection or {}).get("version") or 0),
+            "projection": projection,
+        }
+
     async def apply_command(self, *, room_id: str, user: User, command: dict[str, Any]) -> dict[str, Any]:
-        room = self._memory_rooms.get(room_id)
+        room = await self._load_room(room_id)
         if not room or room.get("owner_user_id") != user.id:
             raise LookupError("Game room not found.")
         lock = self._room_locks.setdefault(room_id, asyncio.Lock())
         async with lock:
-            state = self._memory_states[room_id]
+            state = await self._load_state(room_id)
+            if state is None:
+                raise LookupError("Game state not found.")
             try:
                 next_state, events = self._reduce(state, command, user=user, room_id=room_id, room=room)
             except CommandRejection as rejection:
                 return rejection.payload(_project_state(state))
-            self._memory_states[room_id] = next_state
             if next_state["phase"] != PHASE_SETUP:
                 room.update({"state": ROOM_STATE_IN_GAME, "started_at": room.get("started_at") or _now_iso()})
-                self._memory_rooms[room_id] = room
+            await self._save_room(room)
+            await self._save_state(room_id, next_state)
             projection = _project_state(next_state)
         await self.broadcast_projection(room_id)
         return {
@@ -1018,12 +1203,16 @@ class GameRoomService:
         self._reject(state, command_id, "unknown_command", f"Unknown command type: {command_type or '<missing>'}.")
 
     async def connect_room_socket(self, *, room_id: str, user: User, websocket: WebSocket) -> bool:
-        room = self._memory_rooms.get(room_id)
+        room = await self._load_room(room_id)
         if not room or room.get("owner_user_id") != user.id:
+            return False
+        state = await self._load_state(room_id)
+        if state is None:
             return False
         await websocket.accept()
         self._room_sockets.setdefault(room_id, set()).add(websocket)
-        await websocket.send_json({"type": "state_projection", "payload": _project_state(self._memory_states[room_id])})
+        await self._ensure_room_subscription(room_id)
+        await websocket.send_json({"type": "state_projection", "payload": _project_state(state)})
         return True
 
     def disconnect_room_socket(self, *, room_id: str, websocket: WebSocket) -> None:
@@ -1033,12 +1222,26 @@ class GameRoomService:
         sockets.discard(websocket)
         if not sockets:
             self._room_sockets.pop(room_id, None)
+            task = self._room_pubsub_tasks.pop(room_id, None)
+            if task is not None:
+                task.cancel()
 
     async def broadcast_projection(self, room_id: str) -> None:
-        sockets = list(self._room_sockets.get(room_id) or [])
-        if not sockets or room_id not in self._memory_states:
+        state = await self._load_state(room_id)
+        if state is None:
             return
-        message = {"type": "state_projection", "payload": _project_state(self._memory_states[room_id])}
+        message = {"type": "state_projection", "payload": _project_state(state)}
+        await self._send_local_projection(room_id, message)
+        if self.redis is not None:
+            await self.redis.publish(
+                _projection_channel(room_id),
+                json.dumps({"origin": self.node_id, "message": message}, default=str, separators=(",", ":")),
+            )
+
+    async def _send_local_projection(self, room_id: str, message: dict[str, Any]) -> None:
+        sockets = list(self._room_sockets.get(room_id) or [])
+        if not sockets:
+            return
         stale: list[WebSocket] = []
         for websocket in sockets:
             try:
@@ -1048,24 +1251,63 @@ class GameRoomService:
         for websocket in stale:
             self.disconnect_room_socket(room_id=room_id, websocket=websocket)
 
+    async def _ensure_room_subscription(self, room_id: str) -> None:
+        if self.redis is None or room_id in self._room_pubsub_tasks:
+            return
+        self._room_pubsub_tasks[room_id] = asyncio.create_task(
+            self._run_room_subscription(room_id),
+            name=f"game-room-pubsub-{room_id}",
+        )
+
+    async def _run_room_subscription(self, room_id: str) -> None:
+        pubsub = self.redis.pubsub()
+        try:
+            await pubsub.subscribe(_projection_channel(room_id))
+            while room_id in self._room_pubsub_tasks:
+                raw = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                if not raw:
+                    await asyncio.sleep(0)
+                    continue
+                data = raw.get("data")
+                if isinstance(data, (bytes, bytearray)):
+                    data = data.decode("utf-8", errors="ignore")
+                try:
+                    payload = json.loads(str(data))
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(payload, dict) or payload.get("origin") == self.node_id:
+                    continue
+                message = payload.get("message")
+                if isinstance(message, dict):
+                    await self._send_local_projection(room_id, message)
+        except asyncio.CancelledError:
+            raise
+        finally:
+            try:
+                await pubsub.unsubscribe(_projection_channel(room_id))
+                await pubsub.aclose()
+            except Exception:
+                pass
+
     async def enqueue_end_room(self, *, room_id: str, user: User) -> dict[str, Any]:
-        room = self._memory_rooms.get(room_id)
+        room = await self._load_room(room_id)
         if not room or room.get("owner_user_id") != user.id:
             raise LookupError("Game room not found.")
         if room.get("state") == ROOM_STATE_FINISHED:
             return _public_room(room)
         await self.finish_room(room_id=room_id, user_id=user.id)
         await self.broadcast_projection(room_id)
-        return _public_room(self._memory_rooms[room_id])
+        updated_room = await self._load_room(room_id)
+        return _public_room(updated_room or room)
 
     async def finish_room(self, *, room_id: str, user_id: str) -> dict[str, Any] | None:
-        room = self._memory_rooms.get(room_id)
+        room = await self._load_room(room_id)
         if not room or room.get("owner_user_id") != user_id:
             return None
         if room.get("state") == ROOM_STATE_FINISHED:
             return await self.get_result(room_id=room_id, user_id=user_id)
         now = _now_iso()
-        state = self._memory_states.get(room_id) or _setup_state(room_id, level_id=room.get("level_id"))
+        state = await self._load_state(room_id) or _setup_state(room_id, level_id=room.get("level_id"))
         result = {
             "id": room_id,
             "room_id": room_id,
@@ -1083,9 +1325,9 @@ class GameRoomService:
         next_state["phase"] = PHASE_FINISHED
         next_state["version"] = int(next_state.get("version") or 0) + 1
         room.update({"state": ROOM_STATE_FINISHED, "ended_at": now, "result_id": room_id})
-        self._memory_rooms[room_id] = room
-        self._memory_states[room_id] = next_state
-        self._memory_results[room_id] = result
+        await self._save_room(room)
+        await self._save_state(room_id, next_state)
+        await self._save_result(result)
         self._memory_history.setdefault(user_id, [])
         if room_id not in self._memory_history[user_id]:
             self._memory_history[user_id].append(room_id)
@@ -1095,6 +1337,11 @@ class GameRoomService:
 
     async def get_result(self, *, room_id: str, user_id: str) -> dict[str, Any] | None:
         result = self._memory_results.get(room_id)
+        if self.redis is not None:
+            redis_result = await self._redis_get_json(_result_key(room_id))
+            if redis_result is not None:
+                result = redis_result
+                self._memory_results[room_id] = redis_result
         if not result or result.get("user_id") != user_id:
             return None
         return self._public_result(result)
@@ -1102,6 +1349,9 @@ class GameRoomService:
     async def list_history(self, *, user_id: str, limit: int = 25) -> list[dict[str, Any]]:
         normalized_limit = max(1, min(100, int(limit or 25)))
         room_ids = list(reversed(self._memory_history.get(user_id, [])))[:normalized_limit]
+        if self.redis is not None:
+            redis_room_ids = await self.redis.zrevrange(_history_key(user_id), 0, normalized_limit - 1)
+            room_ids = [str(room_id) for room_id in redis_room_ids]
         results: list[dict[str, Any]] = []
         for room_id in room_ids:
             result = await self.get_result(room_id=str(room_id), user_id=user_id)
@@ -1125,14 +1375,111 @@ class GameRoomService:
 
 
 class GameWorker:
-    def __init__(self, service: GameRoomService, *, stream_key: str = COMMAND_STREAM_KEY) -> None:
+    def __init__(
+        self,
+        service: GameRoomService,
+        *,
+        stream_key: str | None = None,
+        consumer_group: str | None = None,
+        consumer_name: str | None = None,
+        enabled: bool = True,
+    ) -> None:
         self.service = service
-        self.stream_key = stream_key
+        self.stream_key = stream_key or _env_str("GAME_COMMAND_STREAM_KEY", COMMAND_STREAM_KEY)
+        self.consumer_group = consumer_group or _env_str("GAME_COMMAND_CONSUMER_GROUP", "game-workers")
+        self.consumer_name = consumer_name or _env_str("GAME_COMMAND_CONSUMER_NAME", "worker-dev")
+        self.enabled = enabled
         self._task: Optional[asyncio.Task] = None
         self._stopped = asyncio.Event()
+        self._group_ready = False
 
     def start(self) -> None:
+        if not self.enabled or self.service.redis is None:
+            return
+        if self._task is not None and not self._task.done():
+            return
         self._stopped.clear()
+        self._task = asyncio.create_task(self._run(), name=f"game-worker-{self.consumer_name}")
 
     async def stop(self) -> None:
         self._stopped.set()
+        if self._task is None:
+            return
+        self._task.cancel()
+        try:
+            await self._task
+        except asyncio.CancelledError:
+            pass
+        self._task = None
+
+    async def _run(self) -> None:
+        while not self._stopped.is_set():
+            try:
+                await self._ensure_group()
+                messages = await self.service.redis.xreadgroup(
+                    groupname=self.consumer_group,
+                    consumername=self.consumer_name,
+                    streams={self.stream_key: ">"},
+                    count=16,
+                    block=1000,
+                )
+                if not messages:
+                    continue
+                for _stream, entries in messages:
+                    for entry_id, fields in entries:
+                        await self._process_entry(str(entry_id), fields or {})
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print(f"[game-worker] loop error: {exc}")
+                await asyncio.sleep(0.5)
+
+    async def _ensure_group(self) -> None:
+        if self._group_ready:
+            return
+        try:
+            await self.service.redis.xgroup_create(
+                name=self.stream_key,
+                groupname=self.consumer_group,
+                id="0",
+                mkstream=True,
+            )
+        except Exception:
+            pass
+        self._group_ready = True
+
+    async def _process_entry(self, entry_id: str, fields: dict[str, Any]) -> None:
+        command_id = self._field(fields, "command_id") or f"cmd_{uuid.uuid4().hex}"
+        result: dict[str, Any]
+        try:
+            room_id = self._field(fields, "room_id")
+            user_payload = json.loads(self._field(fields, "user") or "{}")
+            command = json.loads(self._field(fields, "command") or "{}")
+            user = User(**user_payload)
+            result = await self.service.apply_command(room_id=room_id, user=user, command=command)
+        except Exception as exc:
+            result = {
+                "ok": False,
+                "status": "rejected",
+                "command_id": command_id,
+                "revision": 0,
+                "reason": "worker_error",
+                "message": str(exc),
+                "current_version": 0,
+            }
+        await self.service._redis_set_json(
+            _command_result_key(command_id),
+            result,
+            ex=max(1, _env_int("GAME_COMMAND_RESULT_TTL_SECONDS", 60)),
+        )
+        try:
+            await self.service.redis.xack(self.stream_key, self.consumer_group, entry_id)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _field(fields: dict[str, Any], key: str) -> str:
+        value = fields.get(key)
+        if isinstance(value, (bytes, bytearray)):
+            return value.decode("utf-8", errors="ignore")
+        return str(value or "")
