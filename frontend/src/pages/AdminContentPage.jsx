@@ -306,6 +306,7 @@ const AdminContentPage = () => {
     try {
       const form = new FormData();
       form.set("zones_json", JSON.stringify(poulpitaPanelDraft.zones || {}));
+      form.set("sizes_json", JSON.stringify(poulpitaPanelDraft.sizes || []));
       if (poulpitaPanelDraft.image_width) form.set("image_width", String(poulpitaPanelDraft.image_width));
       if (poulpitaPanelDraft.image_height) form.set("image_height", String(poulpitaPanelDraft.image_height));
       const file = poulpitaPanelImageRef.current?.files?.[0] || null;
@@ -898,6 +899,20 @@ const PoulpitaPanelEditor = ({ draft, setDraft, imageRef, previewUrl, setPreview
   };
 
   const sampleCounts = { neurons: 6, seashells: 4 };
+  const sizes = draft.sizes?.length ? draft.sizes : [{ amount: 1, unit: "kg", energy_cost: 0 }];
+  const updateSize = (index, patch) => {
+    setDraft((current) => ({
+      ...current,
+      sizes: (current.sizes || [{ amount: 1, unit: "kg", energy_cost: 0 }]).map((entry, entryIndex) => entryIndex === index ? { ...entry, ...patch, energy_cost: entryIndex === 0 ? 0 : patch.energy_cost ?? entry.energy_cost } : entry),
+    }));
+  };
+  const addSize = () => {
+    setDraft((current) => ({ ...current, sizes: [...(current.sizes || [{ amount: 1, unit: "kg", energy_cost: 0 }]), { amount: 1, unit: "kg", energy_cost: 1 }] }));
+  };
+  const removeSize = (index) => {
+    if (index === 0) return;
+    setDraft((current) => ({ ...current, sizes: (current.sizes || []).filter((_entry, entryIndex) => entryIndex !== index) }));
+  };
   return (
     <section className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
       <div className={panel}>
@@ -942,6 +957,37 @@ const PoulpitaPanelEditor = ({ draft, setDraft, imageRef, previewUrl, setPreview
       <aside className={panel}>
         <h2 className="font-semibold text-teal-950">Container Image</h2>
         <input ref={imageRef} className={`${input} mt-3 text-sm`} type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => onImageChange(event.target.files?.[0] || null)} />
+        <div className="mt-5">
+          <div className="flex items-center justify-between gap-2">
+            <h3 className="text-sm font-semibold text-teal-950">Size ladder</h3>
+            <button className={subtleButton} onClick={addSize} type="button">Add size</button>
+          </div>
+          <div className="mt-2 space-y-2">
+            {sizes.map((size, index) => (
+              <div className="rounded border border-cyan-100 bg-cyan-50 p-2" key={index}>
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="text-xs text-slate-600">
+                    Amount
+                    <input className={`${input} mt-1 py-1 text-xs`} min="0.01" step="0.01" type="number" value={size.amount ?? size.kg ?? 1} onChange={(event) => updateSize(index, { amount: Number(event.target.value || 0) })} />
+                  </label>
+                  <label className="text-xs text-slate-600">
+                    Energy cost
+                    <input className={`${input} mt-1 py-1 text-xs`} disabled={index === 0} min="0" step="1" type="number" value={index === 0 ? 0 : size.energy_cost} onChange={(event) => updateSize(index, { energy_cost: Number(event.target.value || 0) })} />
+                  </label>
+                </div>
+                <label className="mt-2 block text-xs text-slate-600">
+                  Unit
+                  <select className={`${input} mt-1 py-1 text-xs`} value={size.unit || "kg"} onChange={(event) => updateSize(index, { unit: event.target.value })}>
+                    <option value="mg">mg</option>
+                    <option value="g">g</option>
+                    <option value="kg">kg</option>
+                  </select>
+                </label>
+                {index === 0 ? <p className="mt-1 text-[0.65rem] text-slate-500">Initial size has no energy cost.</p> : <button className={`${dangerButton} mt-2 py-1 text-xs`} onClick={() => removeSize(index)} type="button">Remove</button>}
+              </div>
+            ))}
+          </div>
+        </div>
         <div className="mt-4 space-y-3 text-xs text-slate-600">
           {Object.entries(draft.zones || {}).map(([zoneId, zone]) => (
             <div className="rounded border border-cyan-100 bg-cyan-50 p-2" key={zoneId}>

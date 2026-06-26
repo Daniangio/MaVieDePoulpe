@@ -135,7 +135,9 @@ class GameStateResponse(BaseModel):
     map: Dict[str, Any]
     poulpita: Dict[str, Any]
     tiles: Dict[str, Any] = Field(default_factory=dict)
-    shelters: Dict[str, int] = Field(default_factory=dict)
+    shelters: Dict[str, Any] = Field(default_factory=dict)
+    objectives: List[Dict[str, Any]] = Field(default_factory=list)
+    objective_progress: Dict[str, Any] = Field(default_factory=dict)
     tile_catalog: Dict[str, Any] = Field(default_factory=dict)
     interaction: Optional[Dict[str, Any]] = None
     events: List[Dict[str, Any]] = Field(default_factory=list)

@@ -23,30 +23,72 @@ const TimeTracker = ({ projection }: { projection: GameProjection | null }) => {
   const spent = Math.max(0, Number(projection?.night_time_spent || 0));
   const total = Math.max(24, Number(projection?.night_time_total || 24));
   const visibleTotal = Math.max(total, spent);
+  const visibleHours = Math.ceil(visibleTotal / 4);
   const shelterAt = Math.max(0, Number(projection?.night_shelter_available_at || 16));
   return (
-    <div className="rounded bg-slate-800 p-3">
+    <div className="shrink-0 rounded bg-slate-800 p-2">
       <div className="flex items-center justify-between text-xs">
         <span className="text-slate-400">Night clock</span>
         <strong>{Math.floor(spent / 4)}h {(spent % 4) * 15}m</strong>
       </div>
-      <div className="mt-2 grid grid-cols-6 gap-1">
-        {Array.from({ length: visibleTotal }).map((_, index) => (
+      <div className="mt-1.5 flex flex-wrap gap-x-2 gap-y-1.5">
+        {Array.from({ length: visibleHours }).map((_, hourIndex) => (
+          <div className="flex items-center gap-1" key={hourIndex}>
+            <span className="w-4 text-right text-[0.58rem] font-semibold text-slate-400">{hourIndex + 1}h</span>
+            <div className="flex gap-0.5">
+              {Array.from({ length: 4 }).map((__, quarterIndex) => {
+                const index = hourIndex * 4 + quarterIndex;
+                if (index >= visibleTotal) return null;
+                return (
+                  <span
+                    aria-hidden="true"
+                    className={[
+                      "h-2.5 w-2.5 shrink-0 rounded-[2px] border",
+                      index < spent ? (index >= total ? "border-rose-400 bg-rose-400" : "border-cyan-300 bg-cyan-300") : "border-slate-600 bg-slate-900",
+                      index + 1 === shelterAt ? "ring-1 ring-amber-300" : "",
+                    ].join(" ")}
+                    key={index}
+                    title={`${hourIndex + 1}h ${quarterIndex * 15}m`}
+                  />
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+      {spent > total ? <p className="mt-1 text-[0.65rem] text-rose-200">Overtime: {spent - total} extra AP spent.</p> : null}
+    </div>
+  );
+};
+
+const EnergyBar = ({ energy }: { energy: number }) => {
+  const current = Math.max(0, Math.min(32, Number(energy || 0)));
+  return (
+    <div className="shrink-0 rounded bg-slate-800 p-2">
+      <div className="flex items-center justify-between text-xs">
+        <span className="text-slate-400">Energy</span>
+        <strong>{current}/32</strong>
+      </div>
+      <div className="mt-1.5 flex flex-wrap gap-0.5">
+        {Array.from({ length: 32 }).map((_, index) => (
           <span
             aria-hidden="true"
-            className={[
-              "h-3 rounded-sm border",
-              index < spent ? (index >= total ? "border-rose-400 bg-rose-400" : "border-cyan-300 bg-cyan-300") : "border-slate-600 bg-slate-900",
-              index + 1 === shelterAt ? "ring-1 ring-amber-300" : "",
-            ].join(" ")}
+            className={["h-2.5 w-2.5 shrink-0 rounded-[2px] border", index < current ? "border-emerald-300 bg-emerald-300" : "border-slate-600 bg-slate-900"].join(" ")}
             key={index}
-            title={`${Math.floor((index + 1) / 4)}h ${((index + 1) % 4) * 15}m`}
           />
         ))}
       </div>
-      {spent > total ? <p className="mt-2 text-xs text-rose-200">Overtime: {spent - total} extra AP spent.</p> : null}
     </div>
   );
+};
+
+const shelterData = (entry: any) => {
+  if (typeof entry === "number") return { count: Math.max(0, Number(entry || 0)), seashells: 0, secure: false };
+  return {
+    count: Math.max(0, Number(entry?.count || 0)),
+    seashells: Math.max(0, Number(entry?.seashells || 0)),
+    secure: Boolean(entry?.secure) || Number(entry?.seashells || 0) >= 3,
+  };
 };
 
 const DotTrack = ({
@@ -101,6 +143,7 @@ const CapabilityBoard = ({
   onEndNight,
   onEndDay,
   onBuyUpgrade,
+  showActions = true,
 }: {
   capability: CapabilityProjection;
   active: boolean;
@@ -117,6 +160,7 @@ const CapabilityBoard = ({
   onEndNight?: () => void;
   onEndDay?: () => void;
   onBuyUpgrade?: (upgradeIndex: number) => void;
+  showActions?: boolean;
 }) => {
   const initiableEvents = (capability.initiates_event_ids || [])
     .map((eventId) => projection?.tile_catalog?.events?.[eventId])
@@ -139,7 +183,7 @@ const CapabilityBoard = ({
     active &&
     projection?.phase === "night_action" &&
     Boolean(currentNodeId) &&
-    Number(projection?.shelters?.[currentNodeId] || 0) > 0 &&
+    shelterData(projection?.shelters?.[currentNodeId]).count > 0 &&
     Number(projection?.night_time_spent || 0) >= Number(projection?.night_shelter_available_at || 16);
   const purchasedUpgrades = new Set((capability.purchased_hand_size_upgrade_indices || []).map((index) => Number(index)));
   const sharedNeurons = Number(projection?.poulpita?.neurons || 0);
@@ -147,10 +191,10 @@ const CapabilityBoard = ({
   return (
   <ArticleTag
     className={[
-      "group/board relative min-w-0 rounded-md border bg-slate-900 text-left text-slate-100 shadow-xl transition",
+      "group/board relative min-w-0 overflow-auto rounded-md border bg-slate-900 text-left text-slate-100 shadow-xl transition",
       compact ? "cursor-pointer hover:z-50 hover:border-cyan-300 hover:bg-slate-800 hover:shadow-cyan-500/20 focus:outline-none focus:ring-2 focus:ring-cyan-300" : "",
       active ? "border-teal-300" : focused ? "border-amber-300" : "border-slate-700",
-      compact ? "h-full p-2" : "h-full p-3",
+      compact ? "h-full p-1" : "h-full p-2",
     ].join(" ")}
     onClick={compact ? onFocus : undefined}
     type={compact ? "button" : undefined}
@@ -180,7 +224,6 @@ const CapabilityBoard = ({
           <DotTrack current={availableActions} label="Actions" mode="available" total={capability.max_actions_per_control} />
         </div>
         <div className={compact ? "rounded bg-slate-800 p-1.5" : "rounded bg-slate-800 p-1"}>
-          <DotTrack current={Math.min(handCount, handLimit)} label={`Cards`} mode="available" total={handLimit} />
           {compact ? (
             <div className="mt-1 flex flex-wrap gap-1">
               {(capability.hand || []).slice(0, 6).map((card) => {
@@ -232,7 +275,7 @@ const CapabilityBoard = ({
         </div>
       </div>
     </div>
-    {!compact ? (
+    {!compact && showActions ? (
       <div className="mt-3 flex flex-wrap gap-2">
         <button
           className="rounded bg-teal-400 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-teal-300 disabled:opacity-50"
@@ -294,6 +337,76 @@ const CapabilityBoard = ({
   );
 };
 
+const ActionPanel = ({
+  capability,
+  active,
+  moveMode,
+  onCollect,
+  onDraw,
+  onEndDay,
+  onEndNight,
+  onMoveMode,
+  onTakeControl,
+  pending,
+  projection,
+}: {
+  capability: CapabilityProjection | null;
+  active: boolean;
+  moveMode: boolean;
+  onCollect: () => void;
+  onDraw: () => void;
+  onEndDay: () => void;
+  onEndNight: () => void;
+  onMoveMode: () => void;
+  onTakeControl: () => void;
+  pending: boolean;
+  projection: GameProjection | null;
+}) => {
+  if (!capability) return <div className="rounded-md border border-slate-800 bg-slate-900 p-3 text-sm text-slate-500">No actions.</div>;
+  const isNightAction = projection?.phase === "night_action";
+  const isNight = projection?.phase === "night_idle" || projection?.phase === "night_action";
+  const currentNodeId = projection?.poulpita?.node_id || "";
+  const canEndNight =
+    active &&
+    projection?.phase === "night_action" &&
+    Boolean(currentNodeId) &&
+    shelterData(projection?.shelters?.[currentNodeId]).count > 0 &&
+    Number(projection?.night_time_spent || 0) >= Number(projection?.night_shelter_available_at || 16);
+  return (
+    <div className="flex h-full flex-col gap-2 overflow-auto rounded-md border border-slate-800 bg-slate-900 p-2">
+      <h3 className="text-sm font-semibold text-white">Actions</h3>
+      <div className="grid grid-cols-2 gap-1.5">
+        <button className="rounded bg-teal-400 px-1.5 py-2 text-[0.68rem] font-semibold leading-tight text-slate-950 hover:bg-teal-300 disabled:opacity-50" disabled={pending || active || !isNight} onClick={onTakeControl} type="button">
+          Take control
+        </button>
+        <button className="rounded border border-slate-600 px-1.5 py-2 text-[0.68rem] leading-tight text-slate-100 hover:bg-slate-800 disabled:opacity-50" disabled={pending || !active || !isNightAction} onClick={onCollect} type="button">
+          Collect AP
+        </button>
+        <button
+          className={["rounded border px-1.5 py-2 text-[0.68rem] leading-tight text-slate-100 disabled:opacity-50", moveMode ? "border-amber-300 bg-amber-950" : "border-slate-600 hover:bg-slate-800"].join(" ")}
+          disabled={pending || !active || !isNightAction || capability.pa < 1}
+          onClick={onMoveMode}
+          type="button"
+        >
+          Move
+        </button>
+        <button className="rounded border border-slate-600 px-1.5 py-2 text-[0.68rem] leading-tight text-slate-100 hover:bg-slate-800 disabled:opacity-50" disabled={pending || !active || !isNightAction || capability.pa < 1} onClick={onDraw} type="button">
+          Draw
+        </button>
+        {projection?.phase === "day" ? (
+          <button className="rounded border border-cyan-300 px-1.5 py-2 text-[0.68rem] leading-tight text-cyan-100 hover:bg-cyan-950 disabled:opacity-50" disabled={pending} onClick={onEndDay} type="button">
+            End day
+          </button>
+        ) : (
+          <button className="rounded border border-cyan-300 px-1.5 py-2 text-[0.68rem] leading-tight text-cyan-100 hover:bg-cyan-950 disabled:opacity-50" disabled={pending || !canEndNight} onClick={onEndNight} type="button">
+            End night
+          </button>
+        )}
+      </div>
+    </div>
+  );
+};
+
 const CardButton = ({
   card,
   projection,
@@ -333,14 +446,14 @@ const CardButton = ({
     >
       <button
         className={[
-          "flex h-24 w-20 flex-col items-center justify-between rounded-md border bg-slate-800 p-2 text-xs text-white transition disabled:opacity-50",
+          "flex h-20 w-16 flex-col items-center justify-between rounded-md border bg-slate-800 p-1.5 text-[0.65rem] text-white transition disabled:opacity-50",
           selected ? "border-amber-300 ring-2 ring-amber-200" : "border-cyan-700 hover:border-cyan-300",
         ].join(" ")}
         disabled={disabled}
         onClick={onClick}
         type="button"
       >
-        {imageUrl ? <img alt="" className="h-10 w-10 rounded object-cover" src={imageUrl} /> : <span className="flex h-10 w-10 items-center justify-center rounded bg-slate-700">{interaction?.name?.slice(0, 2) || "?"}</span>}
+        {imageUrl ? <img alt="" className="h-8 w-8 rounded object-cover" src={imageUrl} /> : <span className="flex h-8 w-8 items-center justify-center rounded bg-slate-700">{interaction?.name?.slice(0, 2) || "?"}</span>}
         <span className="line-clamp-2 text-center">{interaction?.name || card.interaction_id}</span>
       </button>
       {showPreview && generatedCard && previewPosition
@@ -369,12 +482,107 @@ const ResourceToken = ({ token, label }: { token?: any; label: string }) => {
   );
 };
 
-const PoulpitaResourcePanel = ({ projection }: { projection: GameProjection | null }) => {
+const formatSize = (size: any) => `${Number(size?.amount ?? size?.kg ?? 0).toLocaleString()} ${size?.unit || "kg"}`;
+
+const SizeBar = ({
+  canBuy,
+  currentSize,
+  nextCost,
+  nextSize,
+  onBuy,
+  pending,
+  sizeIndex,
+  totalSizes,
+  upgradedToday,
+}: {
+  canBuy: boolean;
+  currentSize: any;
+  nextCost: number;
+  nextSize: any;
+  onBuy: () => void;
+  pending: boolean;
+  sizeIndex: number;
+  totalSizes: number;
+  upgradedToday: boolean;
+}) => (
+  <div className="mb-1.5 shrink-0 rounded border border-slate-700 p-2">
+    <div className="flex items-center justify-between gap-2">
+      <div>
+        <span className="block text-[0.62rem] uppercase text-slate-400">Size</span>
+        <strong className="text-slate-100">{formatSize(currentSize)}</strong>
+      </div>
+      <button
+        className="rounded border border-cyan-300 px-2 py-1 text-[0.68rem] font-semibold text-cyan-100 hover:bg-cyan-950 disabled:opacity-50"
+        disabled={pending || !canBuy}
+        onClick={onBuy}
+        type="button"
+      >
+        {nextSize ? `Grow: ${nextCost} energy` : "Max size"}
+      </button>
+    </div>
+    <div className="mt-2 flex gap-1">
+      {Array.from({ length: Math.max(1, totalSizes) }).map((_, index) => (
+        <span
+          aria-hidden="true"
+          className={["h-2 flex-1 rounded", index <= sizeIndex ? "bg-cyan-300" : "bg-slate-700"].join(" ")}
+          key={index}
+        />
+      ))}
+    </div>
+    {upgradedToday ? <p className="mt-1 text-[0.62rem] text-slate-400">Already grown today.</p> : nextSize ? <p className="mt-1 text-[0.62rem] text-slate-400">Next: {formatSize(nextSize)}</p> : null}
+  </div>
+);
+
+const ObjectivesPanel = ({ projection }: { projection: GameProjection | null }) => {
+  const objectives = projection?.objectives || [];
+  return (
+    <div className="shrink-0 rounded bg-slate-800 p-2">
+      <div className="flex items-center justify-between text-xs">
+        <span className="text-slate-400">Objectives</span>
+        <strong>{objectives.filter((objective: any) => objective.completed).length}/{objectives.length}</strong>
+      </div>
+      <div className="mt-1.5 max-h-20 space-y-1 overflow-auto pr-1">
+        {objectives.map((objective: any) => (
+          <div className="flex items-center gap-1.5 rounded border border-slate-700 px-2 py-0.5 text-[0.68rem]" key={objective.id}>
+            <span className={["h-2.5 w-2.5 shrink-0 rounded-full border", objective.completed ? "border-teal-300 bg-teal-300" : "border-slate-500 bg-transparent"].join(" ")} />
+            <span className={["min-w-0 truncate", objective.completed ? "text-teal-100" : "text-slate-300"].join(" ")} title={objective.label || objective.type}>
+              {objective.label || objective.type}
+              {objective.type === "increase_size" ? ` (${objective.current || 0}/${objective.target || 1})` : ""}
+            </span>
+          </div>
+        ))}
+        {objectives.length === 0 ? <p className="text-xs text-slate-500">No level objectives.</p> : null}
+      </div>
+    </div>
+  );
+};
+
+const PoulpitaResourcePanel = ({
+  onBuySize,
+  onMoveShellToShelter,
+  pending,
+  projection,
+}: {
+  onBuySize: () => void;
+  onMoveShellToShelter: () => void;
+  pending: boolean;
+  projection: GameProjection | null;
+}) => {
   const panel = projection?.tile_catalog?.poulpita_panel || {};
   const tokens = projection?.tile_catalog?.tokens || {};
   const containerUrl = contentImageUrl(panel);
   const zones = panel.zones || {};
   const aspectRatio = panel.image_width && panel.image_height ? `${panel.image_width} / ${panel.image_height}` : "4 / 3";
+  const sizes = panel.sizes || [{ amount: 1, unit: "kg", energy_cost: 0 }];
+  const sizeIndex = Math.max(0, Number(projection?.poulpita.size_index || 0));
+  const currentSize = sizes[sizeIndex] || sizes[0] || { amount: 1, unit: "kg", energy_cost: 0 };
+  const nextSize = sizes[sizeIndex + 1] || null;
+  const currentShelter = shelterData(projection?.shelters?.[projection?.poulpita.node_id || ""]);
+  const baseNextSizeCost = Number(nextSize?.energy_cost || 0);
+  const nextSizeCost = Math.max(0, baseNextSizeCost - (currentShelter.secure ? 1 : 0));
+  const energy = Number(projection?.poulpita.energy || 0);
+  const canBuySize = projection?.phase === "day" && Boolean(nextSize) && !projection?.poulpita.size_upgraded_today && (nextSizeCost === 0 || energy - nextSizeCost > 0);
+  const canMoveShellToShelter = projection?.phase === "day" && currentShelter.count > 0 && Number(projection?.poulpita.seashells || 0) > 0 && !pending;
   const resources = [
     { zoneId: "neurons", label: "Neurons", count: Number(projection?.poulpita.neurons || 0), token: tokens.neuron },
     { zoneId: "seashells", label: "Shells", count: Number(projection?.poulpita.seashells || 0), token: tokens.seashell },
@@ -382,30 +590,39 @@ const PoulpitaResourcePanel = ({ projection }: { projection: GameProjection | nu
 
   if (!containerUrl) {
     return (
-      <div className="mt-auto grid grid-cols-3 gap-2 text-xs">
-        <div className="rounded bg-slate-800 p-3">
-          <span className="block text-slate-400">Energy</span>
-          <strong>{projection?.poulpita.energy ?? 0}</strong>
-        </div>
+      <div className="min-h-0 space-y-1.5 overflow-hidden text-xs">
+        <SizeBar currentSize={currentSize} canBuy={canBuySize} nextCost={nextSizeCost} nextSize={nextSize} onBuy={onBuySize} pending={pending} sizeIndex={sizeIndex} totalSizes={sizes.length} upgradedToday={Boolean(projection?.poulpita.size_upgraded_today)} />
+        {currentShelter.secure && nextSize ? <p className="-mt-1 text-[0.62rem] text-teal-200">Secure shelter discount: -1 energy.</p> : null}
+        <div className="grid grid-cols-2 gap-1.5">
         {resources.map((resource) => (
-          <div className="rounded bg-slate-800 p-3" key={resource.zoneId}>
+          <div className="min-h-0 rounded bg-slate-800 p-2" key={resource.zoneId}>
             <span className="block text-slate-400">{resource.label}</span>
             <div className="mt-1 flex flex-wrap gap-1">
-              {Array.from({ length: resource.count }).map((_, index) => <ResourceToken key={index} label={resource.label} token={resource.token} />)}
+              {Array.from({ length: resource.count }).map((_, index) =>
+                resource.zoneId === "seashells" ? (
+                  <button className="rounded-full disabled:cursor-default" disabled={!canMoveShellToShelter} key={index} onClick={onMoveShellToShelter} title={canMoveShellToShelter ? "Move shell to current shelter" : "Shell"}>
+                    <ResourceToken label={resource.label} token={resource.token} />
+                  </button>
+                ) : (
+                  <ResourceToken key={index} label={resource.label} token={resource.token} />
+                ),
+              )}
             </div>
           </div>
         ))}
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="mt-auto rounded bg-slate-800 p-3 text-xs">
-      <div className="mb-2 flex items-center justify-between">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded bg-slate-800 p-2 text-xs">
+      <div className="mb-1.5 flex shrink-0 items-center justify-between">
         <span className="text-slate-400">Poulpita Board</span>
-        <strong className="text-slate-100">Energy {projection?.poulpita.energy ?? 0}</strong>
       </div>
-      <div className="relative max-h-[42vh] overflow-hidden rounded border border-slate-700 bg-slate-950" style={{ aspectRatio }}>
+      <SizeBar currentSize={currentSize} canBuy={canBuySize} nextCost={nextSizeCost} nextSize={nextSize} onBuy={onBuySize} pending={pending} sizeIndex={sizeIndex} totalSizes={sizes.length} upgradedToday={Boolean(projection?.poulpita.size_upgraded_today)} />
+      {currentShelter.secure && nextSize ? <p className="-mt-1 mb-1.5 shrink-0 text-[0.62rem] text-teal-200">Secure shelter discount: -1 energy.</p> : null}
+      <div className="relative min-h-0 flex-1 overflow-hidden rounded border border-slate-700 bg-slate-950" style={{ aspectRatio }}>
         <img alt="Poulpita resource board" className="absolute inset-0 h-full w-full object-contain" src={containerUrl} />
         {resources.map((resource) => {
           const zone = zones[resource.zoneId];
@@ -417,7 +634,15 @@ const PoulpitaResourcePanel = ({ projection }: { projection: GameProjection | nu
               style={{ left: `${zone.x * 100}%`, top: `${zone.y * 100}%`, width: `${zone.width * 100}%`, height: `${zone.height * 100}%` }}
               title={`${resource.label}: ${resource.count}`}
             >
-              {Array.from({ length: resource.count }).map((_, index) => <ResourceToken key={index} label={resource.label} token={resource.token} />)}
+              {Array.from({ length: resource.count }).map((_, index) =>
+                resource.zoneId === "seashells" ? (
+                  <button className="rounded-full disabled:cursor-default" disabled={!canMoveShellToShelter} key={index} onClick={onMoveShellToShelter} title={canMoveShellToShelter ? "Move shell to current shelter" : "Shell"}>
+                    <ResourceToken label={resource.label} token={resource.token} />
+                  </button>
+                ) : (
+                  <ResourceToken key={index} label={resource.label} token={resource.token} />
+                ),
+              )}
             </div>
           );
         })}
@@ -675,6 +900,7 @@ const GameRoomPage = () => {
     const events = projection?.events || [];
     return events.length ? events[events.length - 1] : null;
   }, [projection?.events]);
+  const gameWon = projection?.phase === "game_over" && (latestEvent?.type === "game_won" || Boolean(projection?.objectives?.length && projection.objectives.every((objective: any) => objective.completed)));
 
   const loadProjection = useCallback(async () => {
     if (!token || !roomId) return;
@@ -875,6 +1101,21 @@ const GameRoomPage = () => {
     void submitCommand("end_day");
   };
 
+  const buyPoulpitaSize = () => {
+    setMoveMode(false);
+    void submitCommand("buy_poulpita_size");
+  };
+
+  const moveShellToShelter = () => {
+    setMoveMode(false);
+    void submitCommand("move_seashell_to_shelter");
+  };
+
+  const moveShellFromShelter = () => {
+    setMoveMode(false);
+    void submitCommand("move_seashell_from_shelter");
+  };
+
   const movePoulpita = (targetNodeId: NodeId) => {
     if (!selectedCapabilityId) return;
     setMoveMode(false);
@@ -1000,25 +1241,6 @@ const GameRoomPage = () => {
         </div>
       </header>
 
-      <section className="relative z-30 grid h-[15vh] grid-cols-4 gap-2 overflow-visible border-b border-slate-800 bg-slate-950 px-4 py-1">
-        {otherCapabilities.map((capability) => (
-          <CapabilityBoard
-            active={projection?.active_capability_id === capability.id}
-            capability={capability}
-            compact
-            focused={false}
-            key={capability.id}
-            moveMode={moveMode}
-            onFocus={() => {
-              setFocusedCapabilityId(capability.id);
-              setMoveMode(false);
-            }}
-            pending={pending}
-            projection={projection}
-          />
-        ))}
-      </section>
-
       {feedback || error ? (
         <div className={["pointer-events-none fixed left-1/2 top-[22vh] z-50 w-[min(42rem,calc(100vw-2rem))] -translate-x-1/2 transition-opacity duration-500", alertsVisible ? "opacity-100" : "opacity-0"].join(" ")}>
           {feedback ? <p className="rounded-md border border-amber-500/50 bg-amber-950/95 px-3 py-2 text-sm text-amber-100">{feedback}</p> : null}
@@ -1027,21 +1249,63 @@ const GameRoomPage = () => {
       ) : null}
       {projection?.phase === "game_over" ? (
         <div className="pointer-events-none fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/45">
-          <div className="animate-[pulse_1.2s_ease-in-out_2] rounded-lg border border-rose-300 bg-rose-950 px-8 py-5 text-center shadow-2xl">
-            <p className="text-sm uppercase tracking-wide text-rose-200">Game lost</p>
+          <div className={["animate-[pulse_1.2s_ease-in-out_2] rounded-lg border px-8 py-5 text-center shadow-2xl", gameWon ? "border-teal-300 bg-teal-950" : "border-rose-300 bg-rose-950"].join(" ")}>
+            <p className={["text-sm uppercase tracking-wide", gameWon ? "text-teal-200" : "text-rose-200"].join(" ")}>{gameWon ? "Game won" : "Game lost"}</p>
             <h2 className="mt-1 text-2xl font-semibold text-white">
-              {String(latestEvent?.reason || "") === "poulpita_no_energy" ? "Poulpita has no energy left" : "No actions remain"}
+              {gameWon
+                ? "All objectives completed"
+                : String(latestEvent?.reason || "") === "poulpita_no_energy"
+                  ? "Poulpita has no energy left"
+                  : "No actions remain"}
             </h2>
-            <p className="mt-2 text-sm text-rose-100">Post-game opens in a few seconds.</p>
+            <p className={["mt-2 text-sm", gameWon ? "text-teal-100" : "text-rose-100"].join(" ")}>Post-game opens in a few seconds.</p>
           </div>
         </div>
       ) : null}
 
-      <section className="grid h-[80vh] grid-cols-[minmax(0,75%)_minmax(14rem,25%)] grid-rows-[minmax(0,50vh)_minmax(0,30vh)] overflow-hidden">
+      <section className="grid h-[95vh] grid-cols-[17rem_minmax(0,1fr)_minmax(14rem,25%)] grid-rows-[minmax(0,1fr)_minmax(11rem,24vh)] overflow-hidden">
+        <aside className="row-span-2 flex min-h-0 flex-col gap-2 overflow-hidden border-r border-slate-800 bg-slate-950 p-2">
+          <div className="flex min-h-0 flex-1 flex-col gap-2">
+            {otherCapabilities.map((capability) => (
+              <div className="min-h-0 flex-1" key={capability.id}>
+                <CapabilityBoard
+                  active={projection?.active_capability_id === capability.id}
+                  capability={capability}
+                  compact
+                  focused={false}
+                  moveMode={moveMode}
+                  onFocus={() => {
+                    setFocusedCapabilityId(capability.id);
+                    setMoveMode(false);
+                  }}
+                  pending={pending}
+                  projection={projection}
+                />
+              </div>
+            ))}
+          </div>
+          <div className="min-h-0 h-[24vh] max-h-[24vh]">
+            {selectedCapability ? (
+              <CapabilityBoard
+                active={projection?.active_capability_id === selectedCapability.id}
+                capability={selectedCapability}
+                compact
+                focused
+                moveMode={moveMode}
+                onFocus={() => {
+                  setFocusedCapabilityId(selectedCapability.id);
+                  setMoveMode(false);
+                }}
+                pending={pending}
+                projection={projection}
+              />
+            ) : null}
+          </div>
+        </aside>
         <div className="relative min-w-0 overflow-hidden border-r border-slate-800">
           {projection ? (
             <>
-              <BoardView focusedCapabilityId={selectedCapabilityId} moveMode={moveMode} onInspectTile={inspectTile} onMove={movePoulpita} pending={pending} projection={projection} />
+              <BoardView focusedCapabilityId={selectedCapabilityId} moveMode={moveMode} onInspectTile={inspectTile} onMove={movePoulpita} onMoveShellFromShelter={moveShellFromShelter} pending={pending} projection={projection} />
               <InteractionPanel
                 failMoveTargetNodeId={failMoveTargetNodeId}
                 onFail={failInteraction}
@@ -1062,34 +1326,30 @@ const GameRoomPage = () => {
             <div className="flex h-full items-center justify-center text-sm text-slate-400">Loading room state.</div>
           )}
         </div>
-        <aside className="row-span-2 flex h-full flex-col gap-3 overflow-hidden bg-slate-900 p-4">
-          <div>
+        <aside className="row-span-2 flex min-h-0 flex-col gap-2 overflow-hidden bg-slate-900 p-2">
+          <div className="shrink-0">
             <p className="text-xs uppercase text-slate-500">Poulpita</p>
-            <h2 className="mt-1 text-xl font-semibold text-white">{phaseLabel(projection)}</h2>
+            <h2 className="mt-0.5 truncate text-base font-semibold text-white">{phaseLabel(projection)}</h2>
           </div>
+          <ObjectivesPanel projection={projection} />
           <TimeTracker projection={projection} />
-          <PoulpitaResourcePanel projection={projection} />
+          <EnergyBar energy={Number(projection?.poulpita.energy || 0)} />
+          <PoulpitaResourcePanel onBuySize={buyPoulpitaSize} onMoveShellToShelter={moveShellToShelter} pending={pending} projection={projection} />
         </aside>
-        <div className="grid min-h-0 grid-cols-[minmax(18rem,28rem)_1fr] gap-2 overflow-hidden border-t border-r border-slate-800 bg-slate-950 p-1">
-          {selectedCapability ? (
-            <CapabilityBoard
-              active={projection?.active_capability_id === selectedCapability.id}
-              capability={selectedCapability}
-              focused
-              moveMode={moveMode}
-              onCollect={collectActionPoints}
-              onDraw={drawActionCard}
-              onBuyUpgrade={buyHandSizeUpgrade}
-              onEndDay={endDay}
-              onEndNight={endNight}
-              onMoveMode={() => setMoveMode((value) => !value)}
-              onTakeControl={takeControl}
-              pending={pending}
-              projection={projection}
-            />
-          ) : (
-            <div className="rounded-md border border-slate-800 bg-slate-900 p-3 text-sm text-slate-400">No focused player board.</div>
-          )}
+        <div className="grid min-h-0 grid-cols-[11rem_1fr] gap-2 overflow-hidden border-t border-r border-slate-800 bg-slate-950 p-1">
+          <ActionPanel
+            active={Boolean(projection?.active_capability_id && projection.active_capability_id === selectedCapability?.id)}
+            capability={selectedCapability || null}
+            moveMode={moveMode}
+            onCollect={collectActionPoints}
+            onDraw={drawActionCard}
+            onEndDay={endDay}
+            onEndNight={endNight}
+            onMoveMode={() => setMoveMode((value) => !value)}
+            onTakeControl={takeControl}
+            pending={pending}
+            projection={projection}
+          />
           <div className="rounded-md border border-slate-800 bg-slate-900 p-3">
             <div className="flex items-center justify-between gap-3">
               <h3 className="text-sm font-semibold text-white">Player hand</h3>

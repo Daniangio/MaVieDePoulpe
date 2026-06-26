@@ -23,6 +23,8 @@ export type PoulpitaProjection = {
   energy?: number;
   neurons?: number;
   seashells?: number;
+  size_index?: number;
+  size_upgraded_today?: boolean;
 };
 
 export type CardProjection = {
@@ -80,7 +82,9 @@ export type GameProjection = {
   map: MapProjection;
   poulpita: PoulpitaProjection;
   tiles?: Record<NodeId, Array<{ instance_id: string; tile_id: string; face_up?: boolean }>>;
-  shelters?: Record<NodeId, number>;
+  shelters?: Record<NodeId, number | { count?: number; seashells?: number; secure?: boolean }>;
+  objectives?: Array<Record<string, any>>;
+  objective_progress?: Record<string, any>;
   tile_catalog?: {
     tiles?: Record<string, any>;
     events?: Record<string, any>;

@@ -53,6 +53,7 @@ TEST_LEVEL = {
     "id": "test-level",
     "name": "Test level",
     "map_id": "test-map",
+    "starting_energy": 3,
     "node_tile_counts": {node_id: 0 for node_id in TEST_MAP["nodes"]},
     "node_group_ids": {node_id: "main" for node_id in TEST_MAP["nodes"]},
     "groups": [{"id": "main", "name": "Main", "tile_counts": {}}],
@@ -764,7 +765,7 @@ def test_success_reward_places_shelter_and_enables_end_night_after_four_hours():
         )
 
         assert resolved["ok"] is True
-        assert resolved["projection"]["shelters"]["1A"] == 1
+        assert resolved["projection"]["shelters"]["1A"]["count"] == 1
         assert ended["ok"] is True
         assert ended["projection"]["phase"] == "day"
 
@@ -847,6 +848,131 @@ def test_end_night_is_free_and_day_upgrades_stack_before_next_night():
         assert night["projection"]["day_index"] == 2
         assert night_capability["current_max_cards_in_hand"] == 4
         assert night_capability["control_takes_this_night"] == 0
+
+    run(scenario())
+
+
+def test_poulpita_size_can_increase_once_per_day_without_spending_to_zero():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "day"
+        state["poulpita"]["energy"] = 3
+        state["poulpita"]["size_index"] = 0
+        state["poulpita"]["size_upgraded_today"] = False
+        state["tile_catalog"] = {
+            "poulpita_panel": {
+                "sizes": [
+                    {"kg": 0.5, "energy_cost": 0},
+                    {"kg": 1.0, "energy_cost": 3},
+                    {"kg": 2.0, "energy_cost": 1},
+                ]
+            }
+        }
+
+        rejected_zero = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_size_zero",
+            expected_version=1,
+            command_type="buy_poulpita_size",
+        )
+        state["poulpita"]["energy"] = 4
+        accepted = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_size_buy",
+            expected_version=1,
+            command_type="buy_poulpita_size",
+        )
+        duplicate = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_size_duplicate",
+            expected_version=2,
+            command_type="buy_poulpita_size",
+        )
+        await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_size_end_day",
+            expected_version=2,
+            command_type="end_day",
+        )
+        next_state = service._memory_states[room["id"]]
+
+        assert rejected_zero["ok"] is False
+        assert rejected_zero["reason"] == "insufficient_energy"
+        assert accepted["ok"] is True
+        assert accepted["projection"]["poulpita"]["energy"] == 1
+        assert accepted["projection"]["poulpita"]["size_index"] == 1
+        assert accepted["projection"]["poulpita"]["size_upgraded_today"] is True
+        assert duplicate["ok"] is False
+        assert duplicate["reason"] == "size_already_upgraded_today"
+        assert next_state["poulpita"]["size_upgraded_today"] is False
+
+    run(scenario())
+
+
+def test_goldfish_game_uses_level_starting_energy():
+    async def scenario():
+        service, _user, _room, start = await create_started_room()
+
+        assert start["projection"]["poulpita"]["energy"] == 3
+        assert service is not None
+
+    run(scenario())
+
+
+def test_day_shell_transfer_secures_shelter_and_completes_objective():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "day"
+        state["poulpita"]["node_id"] = "1A"
+        state["poulpita"]["seashells"] = 3
+        state["shelters"] = {"1A": {"count": 1, "seashells": 0, "secure": False}}
+        state["objectives"] = [{"id": "secure", "type": "secure_shelter"}]
+        state["objective_progress"] = {"size_increases": 0, "found_shelter": True, "secured_shelter": False}
+
+        first = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_shell_1",
+            expected_version=1,
+            command_type="move_seashell_to_shelter",
+        )
+        second = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_shell_2",
+            expected_version=2,
+            command_type="move_seashell_to_shelter",
+        )
+        third = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_shell_3",
+            expected_version=3,
+            command_type="move_seashell_to_shelter",
+        )
+
+        assert first["ok"] is True
+        assert first["projection"]["shelters"]["1A"]["seashells"] == 1
+        assert second["projection"]["shelters"]["1A"]["secure"] is False
+        assert third["ok"] is True
+        assert third["projection"]["shelters"]["1A"]["seashells"] == 3
+        assert third["projection"]["shelters"]["1A"]["secure"] is True
+        assert third["projection"]["objectives"][0]["completed"] is True
+        assert third["projection"]["phase"] == "game_over"
+        assert service._memory_results[room["id"]]["outcome"] == "won"
 
     run(scenario())
 

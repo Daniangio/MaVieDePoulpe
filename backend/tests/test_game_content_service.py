@@ -136,9 +136,16 @@ def test_level_save_validates_group_capacity_and_node_assignment(tmp_path, monke
             {"id": "shore", "name": "Shore", "tile_counts": {"crab": 2}},
             {"id": "deep", "name": "Deep", "tile_counts": {"fish": 1}},
         ],
+        objectives=[{"type": "increase_size", "target": 2}, {"type": "find_shelter"}],
+        starting_energy=7,
     )
 
     assert level["node_tile_counts"] == {"N1": 2, "N2": 1}
+    assert level["starting_energy"] == 7
+    assert level["objectives"] == [
+        {"id": "objective-1", "type": "increase_size", "target": 2},
+        {"id": "objective-2", "type": "find_shelter"},
+    ]
     assert len(service.get_content_state()["levels"]) == 1
 
     try:
@@ -180,6 +187,16 @@ def test_tokens_and_poulpita_panel_are_configurable(tmp_path, monkeypatch):
     assert saved["image_width"] == 800
     assert saved["image_height"] == 600
     assert saved["zones"]["neurons"] == {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4}
+    resized = run(
+        service.update_poulpita_panel(
+            zones=saved["zones"],
+            sizes=[{"amount": 500, "unit": "mg", "energy_cost": 99}, {"kg": 1.2, "unit": "g", "energy_cost": 2}],
+            image=None,
+            image_width=800,
+            image_height=600,
+        )
+    )
+    assert resized["sizes"] == [{"amount": 500.0, "unit": "mg", "energy_cost": 0}, {"amount": 1.2, "unit": "g", "energy_cost": 2}]
     assert service.get_game_content_catalog()["poulpita_panel"]["zones"]["seashells"]["x"] == 0.5
 
 

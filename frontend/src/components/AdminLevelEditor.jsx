@@ -9,6 +9,8 @@ const emptyLevelDraft = () => ({
   node_tile_counts: {},
   node_group_ids: {},
   groups: [{ id: "group-1", name: "Group 1", tile_counts: {} }],
+  objectives: [],
+  starting_energy: 3,
 });
 
 const groupColors = ["#0d9488", "#2563eb", "#c026d3", "#ea580c", "#16a34a", "#be123c", "#7c3aed", "#0891b2"];
@@ -144,6 +146,8 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
       form.set("node_tile_counts_json", JSON.stringify(draft.node_tile_counts || {}));
       form.set("node_group_ids_json", JSON.stringify(draft.node_group_ids || {}));
       form.set("groups_json", JSON.stringify(draft.groups || []));
+      form.set("objectives_json", JSON.stringify(draft.objectives || []));
+      form.set("starting_energy", String(Math.max(0, Math.min(32, Number(draft.starting_energy ?? 3)))));
       const saved = await request(draft.id ? `/api/admin/content/levels/${draft.id}` : "/api/admin/content/levels", { method: draft.id ? "PUT" : "POST", body: form });
       setDraft(saved);
       await onReload();
@@ -152,6 +156,34 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
     } finally {
       setBusy(false);
     }
+  };
+
+  const addObjective = (type) => {
+    setDraft((current) => ({
+      ...current,
+      objectives: [
+        ...(current.objectives || []),
+        {
+          id: `objective-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+          type,
+          target: type === "increase_size" ? 1 : undefined,
+        },
+      ],
+    }));
+  };
+
+  const updateObjective = (objectiveId, patch) => {
+    setDraft((current) => ({
+      ...current,
+      objectives: (current.objectives || []).map((objective) => (objective.id === objectiveId ? { ...objective, ...patch } : objective)),
+    }));
+  };
+
+  const removeObjective = (objectiveId) => {
+    setDraft((current) => ({
+      ...current,
+      objectives: (current.objectives || []).filter((objective) => objective.id !== objectiveId),
+    }));
   };
 
   const deleteLevel = async (level) => {
@@ -194,7 +226,7 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
         </aside>
 
         <div className="grid gap-4">
-          <div className="grid gap-3 lg:grid-cols-[1fr_18rem]">
+          <div className="grid gap-3 lg:grid-cols-[1fr_18rem_10rem]">
             <label className="block text-sm">
               <span className="text-slate-600">Level name</span>
               <input className="mt-1 w-full rounded-md border border-cyan-200 bg-white px-3 py-2 text-slate-800" value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} />
@@ -204,6 +236,17 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
               <select className="mt-1 w-full rounded-md border border-cyan-200 bg-white px-3 py-2 text-slate-800" value={draft.map_id} onChange={(event) => changeMap(event.target.value)}>
                 {maps.map((map) => <option key={map.id} value={map.id}>{map.name}</option>)}
               </select>
+            </label>
+            <label className="block text-sm">
+              <span className="text-slate-600">Starting energy</span>
+              <input
+                className="mt-1 w-full rounded-md border border-cyan-200 bg-white px-3 py-2 text-slate-800"
+                max="32"
+                min="0"
+                type="number"
+                value={Number(draft.starting_energy ?? 3)}
+                onChange={(event) => setDraft((current) => ({ ...current, starting_energy: Math.max(0, Math.min(32, Number(event.target.value || 0))) }))}
+              />
             </label>
           </div>
 
@@ -240,6 +283,45 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
                   tiles={content.tiles || []}
                 />
               ))}
+            </div>
+          </div>
+
+          <div className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold text-teal-950">Objectives</h3>
+                <p className="text-xs text-slate-600">All objectives listed here must be completed to win the level.</p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button className="rounded-md border border-cyan-300 bg-white px-3 py-2 text-xs text-teal-900 hover:bg-cyan-50" onClick={() => addObjective("increase_size")} type="button">Increase size</button>
+                <button className="rounded-md border border-cyan-300 bg-white px-3 py-2 text-xs text-teal-900 hover:bg-cyan-50" onClick={() => addObjective("find_shelter")} type="button">Find shelter</button>
+                <button className="rounded-md border border-cyan-300 bg-white px-3 py-2 text-xs text-teal-900 hover:bg-cyan-50" onClick={() => addObjective("secure_shelter")} type="button">Secure shelter</button>
+              </div>
+            </div>
+            <div className="grid gap-2">
+              {(draft.objectives || []).map((objective) => (
+                <div className="grid gap-2 rounded-md border border-cyan-100 bg-white p-2 text-sm md:grid-cols-[1fr_9rem_auto]" key={objective.id}>
+                  <select
+                    className="rounded border border-cyan-200 bg-white px-2 py-1 text-slate-800"
+                    onChange={(event) => updateObjective(objective.id, { type: event.target.value, target: event.target.value === "increase_size" ? Number(objective.target || 1) : undefined })}
+                    value={objective.type}
+                  >
+                    <option value="increase_size">Increase size</option>
+                    <option value="find_shelter">Find a shelter</option>
+                    <option value="secure_shelter">Secure a shelter</option>
+                  </select>
+                  {objective.type === "increase_size" ? (
+                    <label className="flex items-center gap-2 text-xs text-slate-600">
+                      Times
+                      <input className="w-full rounded border border-cyan-200 bg-white px-2 py-1 text-sm text-slate-800" min="1" type="number" value={Number(objective.target || 1)} onChange={(event) => updateObjective(objective.id, { target: Number(event.target.value) })} />
+                    </label>
+                  ) : (
+                    <span className="text-xs text-slate-500">No value</span>
+                  )}
+                  <button className="rounded border border-rose-300 bg-white px-2 py-1 text-xs text-rose-700 hover:bg-rose-50" onClick={() => removeObjective(objective.id)} type="button">Remove</button>
+                </div>
+              ))}
+              {(draft.objectives || []).length === 0 ? <p className="rounded border border-dashed border-cyan-200 bg-white p-3 text-sm text-slate-500">No objectives: this level will not auto-win.</p> : null}
             </div>
           </div>
 

@@ -11,6 +11,7 @@ type BoardViewProps = {
   pending: boolean;
   onMove: (targetNodeId: NodeId) => void;
   onInspectTile?: (tileInstanceId: string) => void;
+  onMoveShellFromShelter?: (nodeId: NodeId) => void;
 };
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
@@ -38,7 +39,28 @@ const BoardTileToken = ({ event, faceDown, highlighted, title }: { event: any; f
   );
 };
 
-const BoardView = ({ projection, focusedCapabilityId, moveMode, pending, onMove, onInspectTile }: BoardViewProps) => {
+const tileOrbitPosition = (index: number) => {
+  const radius = 34;
+  const anglePattern = [90, 25, 155, -25, -155, -90, 0, 180];
+  const angle = anglePattern[index % anglePattern.length];
+  const ring = Math.floor(index / anglePattern.length) + 1;
+  const radians = (angle * Math.PI) / 180;
+  return {
+    x: Math.cos(radians) * radius * ring,
+    y: Math.sin(radians) * radius * ring,
+  };
+};
+
+const normalizeShelter = (entry: any) => {
+  if (typeof entry === "number") return { count: Math.max(0, Number(entry || 0)), seashells: 0, secure: false };
+  return {
+    count: Math.max(0, Number(entry?.count || 0)),
+    seashells: Math.max(0, Number(entry?.seashells || 0)),
+    secure: Boolean(entry?.secure) || Number(entry?.seashells || 0) >= 3,
+  };
+};
+
+const BoardView = ({ projection, focusedCapabilityId, moveMode, pending, onMove, onInspectTile, onMoveShellFromShelter }: BoardViewProps) => {
   const boardRef = useRef<HTMLElement | null>(null);
   const currentNodeId = projection.poulpita.node_id;
   const focusedCapability = focusedCapabilityId ? projection.capabilities?.[focusedCapabilityId] : null;
@@ -123,9 +145,13 @@ const BoardView = ({ projection, focusedCapabilityId, moveMode, pending, onMove,
             const isAdjacent = adjacentNodeIds.includes(node.id);
             const canMove = moveMode && projection.phase === "night_action" && isAdjacent && !pending;
             const nodeTiles = projection.tiles?.[node.id] || [];
-            const shelterCount = Number(projection.shelters?.[node.id] || 0);
+            const shelter = normalizeShelter(projection.shelters?.[node.id]);
+            const shelterCount = shelter.count;
             const shelterToken = projection.tile_catalog?.tokens?.shelter;
             const shelterImageUrl = shelterToken?.image_url ? buildApiUrl(shelterToken.image_url) : "";
+            const seashellToken = projection.tile_catalog?.tokens?.seashell;
+            const seashellImageUrl = seashellToken?.image_url ? buildApiUrl(seashellToken.image_url) : "";
+            const canMoveShellBack = projection.phase === "day" && isCurrent && shelter.seashells > 0 && !pending;
             return (
               <div className="absolute -translate-x-1/2 -translate-y-1/2" key={node.id} style={{ left: `${node.x * 100}%`, top: `${node.y * 100}%` }}>
                 <button
@@ -150,16 +176,36 @@ const BoardView = ({ projection, focusedCapabilityId, moveMode, pending, onMove,
                 >
                   <span>{isCurrent ? "P" : node.id}</span>
                   {isPrevious && !isCurrent ? <span className="absolute right-0 top-0 h-2 w-2 rounded-full bg-slate-400" /> : null}
-                  {shelterCount > 0 ? (
-                    <span className="absolute -right-2 -top-2 flex h-6 min-w-6 items-center justify-center overflow-hidden rounded-full border border-cyan-100 bg-cyan-100 text-[0.55rem] font-bold text-teal-950 shadow" title={`${shelterCount} shelter token${shelterCount === 1 ? "" : "s"}`}>
-                      {shelterImageUrl ? <img alt="" className="h-full w-full object-cover" draggable={false} src={shelterImageUrl} /> : shelterCount > 1 ? shelterCount : "S"}
-                      {shelterCount > 1 && shelterImageUrl ? <span className="absolute -bottom-0.5 -right-0.5 rounded-full bg-teal-950 px-1 text-[0.5rem] leading-3 text-cyan-50">{shelterCount}</span> : null}
-                    </span>
-                  ) : null}
                 </button>
+                {shelterCount > 0 ? (
+                  <span className={["absolute right-1/2 top-0 z-20 flex h-10 min-w-10 -translate-y-[50%] items-center justify-center overflow-hidden rounded-full border bg-cyan-100 text-[0.55rem] font-bold text-teal-950 shadow", shelter.secure ? "border-emerald-300 ring-2 ring-emerald-300" : "border-cyan-100"].join(" ")} title={`${shelterCount} shelter token${shelterCount === 1 ? "" : "s"}${shelter.secure ? " - secure" : ""}`}>
+                    {shelterImageUrl ? <img alt="" className="h-full w-full object-cover" draggable={false} src={shelterImageUrl} /> : shelterCount > 1 ? shelterCount : "S"}
+                    {shelterCount > 1 && shelterImageUrl ? <span className="absolute -bottom-0.5 -right-0.5 rounded-full bg-teal-950 px-1 text-[0.5rem] leading-3 text-cyan-50">{shelterCount}</span> : null}
+                  </span>
+                ) : null}
+                {shelter.seashells > 0 ? (
+                  <div className="absolute left-[calc(100%+0.15rem)] top-3 z-20 flex flex-col gap-0.5">
+                    {Array.from({ length: shelter.seashells }).map((_, index) => (
+                      <button
+                        className="flex h-5 w-5 items-center justify-center overflow-hidden rounded-full border border-amber-200 bg-white text-[0.45rem] font-bold text-amber-900 shadow disabled:cursor-default"
+                        disabled={!canMoveShellBack}
+                        key={index}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          if (canMoveShellBack) onMoveShellFromShelter?.(node.id);
+                        }}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        title={canMoveShellBack ? "Move shell back to Poulpita" : "Stored shell"}
+                        type="button"
+                      >
+                        {seashellImageUrl ? <img alt="" className="h-full w-full object-cover" draggable={false} src={seashellImageUrl} /> : "Sh"}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
                 {nodeTiles.length ? (
-                  <div className="absolute left-1/2 top-11 flex -translate-x-1/2 gap-1">
-                    {nodeTiles.slice(0, 4).map((tileInstance) => {
+                  <>
+                    {nodeTiles.slice(0, 8).map((tileInstance, tileIndex) => {
                       const isFaceDown = tileInstance.face_up === false || !tileInstance.tile_id;
                       const tile = projection.tile_catalog?.tiles?.[tileInstance.tile_id];
                       const event = tile?.event || projection.tile_catalog?.events?.[tile?.event_id];
@@ -170,11 +216,12 @@ const BoardView = ({ projection, focusedCapabilityId, moveMode, pending, onMove,
                         !projection.interaction &&
                         Boolean(tile?.event_id && (focusedCapability?.initiates_event_ids || []).includes(tile.event_id));
                       const title = isFaceDown ? "Hidden tile" : tile?.name || event?.name || tileInstance.tile_id;
+                      const position = tileOrbitPosition(tileIndex);
                       return (
                         <button
                           aria-disabled={!canInspect}
                           className={[
-                            "group/tile relative h-8 w-8 overflow-visible bg-transparent p-0",
+                            "group/tile absolute left-1/2 top-1/2 z-10 h-10 w-10 overflow-visible bg-transparent p-0",
                             canInspect ? "cursor-pointer" : "cursor-default",
                           ].join(" ")}
                           key={tileInstance.instance_id}
@@ -187,6 +234,7 @@ const BoardView = ({ projection, focusedCapabilityId, moveMode, pending, onMove,
                           }}
                           onMouseLeave={() => setHoveredTile(null)}
                           onPointerDown={(event) => event.stopPropagation()}
+                          style={{ transform: `translate(calc(-50% + ${position.x*1.2}px), calc(-50% + ${position.y*1.2}px))` }}
                           title={title}
                           type="button"
                         >
@@ -194,8 +242,8 @@ const BoardView = ({ projection, focusedCapabilityId, moveMode, pending, onMove,
                         </button>
                       );
                     })}
-                    {nodeTiles.length > 4 ? <span className="text-xs text-white">+{nodeTiles.length - 4}</span> : null}
-                  </div>
+                    {nodeTiles.length > 8 ? <span className="absolute left-1/2 top-1/2 z-10 translate-x-8 -translate-y-2 text-xs font-semibold text-white">+{nodeTiles.length - 8}</span> : null}
+                  </>
                 ) : null}
               </div>
             );

@@ -196,10 +196,12 @@ def _setup_state(room_id: str, *, level_id: str | None = None) -> dict[str, Any]
         "last_active_capability_id": None,
         "focused_capability_id": DEFAULT_FOCUSED_CAPABILITY_ID,
         "map": _map_projection(map_config),
-        "poulpita": {"node_id": None, "previous_node_id": None, "energy": 0, "neurons": 0, "seashells": 0},
+        "poulpita": {"node_id": None, "previous_node_id": None, "energy": 0, "neurons": 0, "seashells": 0, "size_index": 0, "size_upgraded_today": False},
         "capabilities": _initial_capabilities(),
         "tiles": {},
         "shelters": {},
+        "objectives": deepcopy(level_config.get("objectives") or []),
+        "objective_progress": {"size_increases": 0, "found_shelter": False, "secured_shelter": False},
         "tile_catalog": {},
         "interaction": None,
         "event_log": [],
@@ -336,6 +338,7 @@ def _goldfish_state(room_id: str, *, level_id: str | None = None) -> dict[str, A
     map_config = get_map(level_config["map_id"])
     _validate_map_config(map_config)
     tile_catalog = _build_tile_catalog()
+    starting_energy = max(0, min(32, int(level_config.get("starting_energy") or 3)))
     state = {
         "room_id": room_id,
         "mode": "goldfish",
@@ -353,13 +356,17 @@ def _goldfish_state(room_id: str, *, level_id: str | None = None) -> dict[str, A
         "poulpita": {
             "node_id": str(map_config["starting_node_id"]),
             "previous_node_id": None,
-            "energy": 0,
+            "energy": starting_energy,
             "neurons": 0,
             "seashells": 0,
+            "size_index": 0,
+            "size_upgraded_today": False,
         },
         "capabilities": _initial_capabilities(deal_hands=True),
         "tiles": _level_tiles(level_config, tile_catalog),
         "shelters": {},
+        "objectives": deepcopy(level_config.get("objectives") or []),
+        "objective_progress": {"size_increases": 0, "found_shelter": False, "secured_shelter": False},
         "tile_catalog": tile_catalog,
         "interaction": None,
         "event_log": [
@@ -427,7 +434,9 @@ def _project_state(state: dict[str, Any]) -> dict[str, Any]:
         "map": deepcopy(state["map"]),
         "poulpita": deepcopy(state["poulpita"]),
         "tiles": projected_tiles,
-        "shelters": deepcopy(state.get("shelters") or {}),
+        "shelters": _projected_shelters(state),
+        "objectives": _objective_status(state),
+        "objective_progress": deepcopy(state.get("objective_progress") or {}),
         "tile_catalog": tile_catalog,
         "interaction": deepcopy(state.get("interaction")),
         "events": list(state.get("event_log") or [])[-20:],
@@ -457,6 +466,7 @@ def _require_active_control(service: "GameRoomService", state: dict[str, Any], c
 def _reset_night_runtime(next_state: dict[str, Any]) -> None:
     next_state["night_time_spent"] = 0
     next_state["active_capability_id"] = None
+    next_state.setdefault("poulpita", {})["size_upgraded_today"] = False
     for capability in (next_state.get("capabilities") or {}).values():
         capability["pa"] = 0
         capability["control_takes_this_night"] = 0
@@ -530,6 +540,90 @@ def _mark_game_lost_if_needed(next_state: dict[str, Any], *, reason: str | None 
             "event_id": f"evt_{uuid.uuid4().hex}",
             "type": "game_lost",
             "reason": loss_reason,
+            "version": int(next_state.get("version") or 0),
+            "created_at": _now_iso(),
+        }
+    )
+    return True
+
+
+def _normalize_shelter_entry(entry: Any) -> dict[str, int]:
+    if isinstance(entry, dict):
+        count = max(0, int(entry.get("count") or entry.get("tokens") or 0))
+        seashells = max(0, int(entry.get("seashells") or entry.get("shells") or 0))
+    else:
+        count = max(0, int(entry or 0))
+        seashells = 0
+    return {"count": count, "seashells": seashells, "secure": seashells >= 3}
+
+
+def _shelter_entry(state: dict[str, Any], node_id: str | None) -> dict[str, int]:
+    if not node_id:
+        return {"count": 0, "seashells": 0, "secure": False}
+    return _normalize_shelter_entry((state.get("shelters") or {}).get(str(node_id)))
+
+
+def _ensure_shelter_entry(next_state: dict[str, Any], node_id: str) -> dict[str, int]:
+    shelters = next_state.setdefault("shelters", {})
+    normalized = _normalize_shelter_entry(shelters.get(node_id))
+    shelters[node_id] = normalized
+    return normalized
+
+
+def _has_shelter(state: dict[str, Any], node_id: str | None) -> bool:
+    return _shelter_entry(state, node_id).get("count", 0) > 0
+
+
+def _current_shelter_secure(state: dict[str, Any]) -> bool:
+    current_node_id = str((state.get("poulpita") or {}).get("node_id") or "")
+    return bool(_shelter_entry(state, current_node_id).get("secure"))
+
+
+def _projected_shelters(state: dict[str, Any]) -> dict[str, Any]:
+    return {
+        str(node_id): _normalize_shelter_entry(entry)
+        for node_id, entry in (state.get("shelters") or {}).items()
+        if _normalize_shelter_entry(entry).get("count", 0) > 0
+    }
+
+
+def _objective_status(state: dict[str, Any]) -> list[dict[str, Any]]:
+    progress = state.get("objective_progress") or {}
+    statuses = []
+    for objective in state.get("objectives") or []:
+        objective_type = str(objective.get("type") or "")
+        target = max(1, int(objective.get("target") or 1))
+        current = 0
+        completed = False
+        label = objective_type
+        if objective_type == "increase_size":
+            current = max(0, int(progress.get("size_increases") or 0))
+            completed = current >= target
+            label = f"Increase size {target} time{'s' if target != 1 else ''}"
+        elif objective_type == "find_shelter":
+            completed = bool(progress.get("found_shelter"))
+            label = "Find a shelter"
+        elif objective_type == "secure_shelter":
+            completed = bool(progress.get("secured_shelter"))
+            label = "Secure a shelter"
+        statuses.append({**objective, "label": label, "current": current, "target": target if objective_type == "increase_size" else None, "completed": completed})
+    return statuses
+
+
+def _mark_game_won_if_needed(next_state: dict[str, Any]) -> bool:
+    objectives = next_state.get("objectives") or []
+    if not objectives or next_state.get("phase") == PHASE_FINISHED:
+        return False
+    if not all(objective.get("completed") for objective in _objective_status(next_state)):
+        return False
+    next_state["phase"] = PHASE_FINISHED
+    next_state["game_outcome"] = "won"
+    next_state["game_over_reason"] = "objectives_completed"
+    next_state.setdefault("event_log", []).append(
+        {
+            "event_id": f"evt_{uuid.uuid4().hex}",
+            "type": "game_won",
+            "reason": "objectives_completed",
             "version": int(next_state.get("version") or 0),
             "created_at": _now_iso(),
         }
@@ -628,8 +722,10 @@ def _apply_effects(next_state: dict[str, Any], effects: list[dict[str, Any]], *,
         elif effect_type == "place_shelter_token":
             target_node_id = str(node_id or next_state.get("poulpita", {}).get("node_id") or "")
             if target_node_id:
-                shelters = next_state.setdefault("shelters", {})
-                shelters[target_node_id] = int(shelters.get(target_node_id) or 0) + 1
+                shelter = _ensure_shelter_entry(next_state, target_node_id)
+                shelter["count"] = int(shelter.get("count") or 0) + 1
+                shelter["secure"] = int(shelter.get("seashells") or 0) >= 3
+                next_state.setdefault("objective_progress", {})["found_shelter"] = True
 
 
 def _move_poulpita_without_ap(next_state: dict[str, Any], target_node_id: str) -> None:
@@ -961,6 +1057,8 @@ class GameRoomService:
                 summary = "Poulpita lost all energy."
             elif reason == "no_controls_or_actions":
                 summary = "No controls or actions remained."
+        elif outcome == "won":
+            summary = "Poulpita completed all level objectives."
         return {
             "id": room.get("id", state.get("room_id", "")),
             "room_id": room.get("id", state.get("room_id", "")),
@@ -1139,7 +1237,7 @@ class GameRoomService:
             capability_id = str(payload.get("capability_id") or "")
             _require_active_control(self, state, command_id, capability_id)
             current_node_id = str(state.get("poulpita", {}).get("node_id") or "")
-            if int((state.get("shelters") or {}).get(current_node_id) or 0) <= 0:
+            if not _has_shelter(state, current_node_id):
                 self._reject(state, command_id, "no_shelter_here", "Poulpita must be on a shelter token to end the night.")
             if int(state.get("night_time_spent") or 0) < NIGHT_SHELTER_AVAILABLE_CHUNKS:
                 self._reject(state, command_id, "too_early_to_end_night", "At least 4 hours must pass before ending the night.")
@@ -1153,6 +1251,46 @@ class GameRoomService:
                 "type": "day_started",
                 "command_id": command_id,
                 "capability_id": capability_id,
+                "version": int(next_state["version"]),
+                "created_at": _now_iso(),
+            }
+            next_state.setdefault("event_log", []).append(event)
+            return next_state, [event]
+
+        if command_type in {"move_seashell_to_shelter", "move_seashell_from_shelter"}:
+            if state["phase"] != PHASE_DAY:
+                self._reject(state, command_id, "phase_not_day", "Shells can be moved to shelters only during the day.")
+            current_node_id = str((state.get("poulpita") or {}).get("node_id") or "")
+            if not _has_shelter(state, current_node_id):
+                self._reject(state, command_id, "no_shelter_here", "Poulpita must be on a shelter.")
+            next_state = deepcopy(state)
+            shelter = _ensure_shelter_entry(next_state, current_node_id)
+            poulpita = next_state.setdefault("poulpita", {})
+            if command_type == "move_seashell_to_shelter":
+                if int(poulpita.get("seashells") or 0) <= 0:
+                    self._reject(state, command_id, "no_poulpita_shells", "Poulpita has no seashells to store.")
+                previous_shells = int(shelter.get("seashells") or 0)
+                poulpita["seashells"] = int(poulpita.get("seashells") or 0) - 1
+                shelter["seashells"] = previous_shells + 1
+                if previous_shells < 3 <= int(shelter.get("seashells") or 0):
+                    next_state.setdefault("objective_progress", {})["secured_shelter"] = True
+                event_type = "seashell_moved_to_shelter"
+            else:
+                if int(shelter.get("seashells") or 0) <= 0:
+                    self._reject(state, command_id, "no_shelter_shells", "This shelter has no seashells.")
+                shelter["seashells"] = int(shelter.get("seashells") or 0) - 1
+                poulpita["seashells"] = int(poulpita.get("seashells") or 0) + 1
+                event_type = "seashell_moved_to_poulpita"
+            shelter["secure"] = int(shelter.get("seashells") or 0) >= 3
+            next_state.setdefault("objective_progress", {})["found_shelter"] = True
+            next_state["version"] = int(state["version"]) + 1
+            _mark_game_won_if_needed(next_state)
+            event = {
+                "event_id": f"evt_{uuid.uuid4().hex}",
+                "type": event_type,
+                "command_id": command_id,
+                "node_id": current_node_id,
+                "shelter_seashells": int(shelter.get("seashells") or 0),
                 "version": int(next_state["version"]),
                 "created_at": _now_iso(),
             }
@@ -1204,6 +1342,44 @@ class GameRoomService:
             next_state.setdefault("event_log", []).append(event)
             return next_state, [event]
 
+        if command_type == "buy_poulpita_size":
+            if state["phase"] != PHASE_DAY:
+                self._reject(state, command_id, "phase_not_day", "Poulpita can grow only during the day.")
+            poulpita = state.get("poulpita") or {}
+            if poulpita.get("size_upgraded_today"):
+                self._reject(state, command_id, "size_already_upgraded_today", "Poulpita can grow only once per day.")
+            sizes = ((state.get("tile_catalog") or {}).get("poulpita_panel") or {}).get("sizes") or [{"kg": 1.0, "energy_cost": 0}]
+            current_size_index = max(0, int(poulpita.get("size_index") or 0))
+            next_size_index = current_size_index + 1
+            if next_size_index >= len(sizes):
+                self._reject(state, command_id, "max_size_reached", "Poulpita is already at the maximum configured size.")
+            next_size = sizes[next_size_index] or {}
+            base_cost = max(1, int(next_size.get("energy_cost") or 1))
+            cost = max(0, base_cost - (1 if _current_shelter_secure(state) else 0))
+            current_energy = int(poulpita.get("energy") or 0)
+            if cost > 0 and current_energy - cost <= 0:
+                self._reject(state, command_id, "insufficient_energy", "Poulpita must have enough energy and cannot spend down to 0.")
+            next_state = deepcopy(state)
+            next_state["poulpita"]["energy"] = current_energy - cost
+            next_state["poulpita"]["size_index"] = next_size_index
+            next_state["poulpita"]["size_upgraded_today"] = True
+            next_state["version"] = int(state["version"]) + 1
+            next_state.setdefault("objective_progress", {})["size_increases"] = int((next_state.get("objective_progress") or {}).get("size_increases") or 0) + 1
+            _mark_game_won_if_needed(next_state)
+            event = {
+                "event_id": f"evt_{uuid.uuid4().hex}",
+                "type": "poulpita_size_increased",
+                "command_id": command_id,
+                "size_index": next_size_index,
+                "amount": float(next_size.get("amount") or next_size.get("kg") or 0),
+                "unit": str(next_size.get("unit") or "kg"),
+                "energy_cost": cost,
+                "version": int(next_state["version"]),
+                "created_at": _now_iso(),
+            }
+            next_state.setdefault("event_log", []).append(event)
+            return next_state, [event]
+
         if command_type == "end_day":
             if state["phase"] != PHASE_DAY:
                 self._reject(state, command_id, "phase_not_day", "Day can be ended only during the day.")
@@ -1213,6 +1389,7 @@ class GameRoomService:
             next_state["night_time_spent"] = 0
             next_state["active_capability_id"] = None
             next_state["last_active_capability_id"] = None
+            next_state.setdefault("poulpita", {})["size_upgraded_today"] = False
             for capability in (next_state.get("capabilities") or {}).values():
                 capability["pa"] = 0
                 capability["control_takes_this_night"] = 0
@@ -1450,6 +1627,7 @@ class GameRoomService:
                 node_tiles = next_state.get("tiles", {}).get(interaction.get("node_id")) or []
                 next_state["tiles"][interaction.get("node_id")] = [entry for entry in node_tiles if entry.get("instance_id") != interaction.get("tile_instance_id")]
                 _apply_tile_visibility(next_state)
+                _mark_game_won_if_needed(next_state)
                 event_type = "interaction_resolved"
             else:
                 payload = command.get("payload") or {}

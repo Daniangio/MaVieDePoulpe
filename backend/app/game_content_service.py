@@ -55,6 +55,7 @@ TOKEN_TYPES = [
     {"id": "shelter", "name": "Shelter token"},
 ]
 POULPITA_PANEL_ZONE_IDS = {"neurons", "seashells"}
+SIZE_UNITS = {"mg", "g", "kg"}
 
 
 def _slug(value: str) -> str:
@@ -110,6 +111,9 @@ def _read_content() -> dict[str, Any]:
         tile.setdefault("success_effects", [])
         tile.setdefault("counter_attack_effects", [])
         tile.setdefault("failure_effects", [])
+    for level in content["levels"]:
+        level["objectives"] = _normalize_level_objectives(level.get("objectives") or [])
+        level["starting_energy"] = max(0, min(32, int(level.get("starting_energy") or 3)))
     return content
 
 
@@ -134,6 +138,7 @@ def _default_poulpita_panel() -> dict[str, Any]:
         "image_filename": None,
         "image_width": None,
         "image_height": None,
+        "sizes": [{"amount": 1.0, "unit": "kg", "energy_cost": 0}],
         "zones": {
             "neurons": {"x": 0.08, "y": 0.12, "width": 0.38, "height": 0.76},
             "seashells": {"x": 0.54, "y": 0.12, "width": 0.38, "height": 0.76},
@@ -156,10 +161,25 @@ def _normalize_zone(zone: dict[str, Any] | None, fallback: dict[str, float]) -> 
 def _normalize_poulpita_panel(raw_panel: dict[str, Any]) -> dict[str, Any]:
     default = _default_poulpita_panel()
     zones = raw_panel.get("zones") if isinstance(raw_panel, dict) else {}
+    raw_sizes = raw_panel.get("sizes") if isinstance(raw_panel, dict) else None
+    sizes = []
+    for index, entry in enumerate(raw_sizes or default["sizes"]):
+        if not isinstance(entry, dict):
+            continue
+        amount = max(0.01, float(entry.get("amount") or entry.get("kg") or entry.get("size_kg") or 1))
+        unit = str(entry.get("unit") or "kg").lower()
+        if unit not in SIZE_UNITS:
+            unit = "kg"
+        energy_cost = 0 if index == 0 else max(1, int(entry.get("energy_cost") or entry.get("cost") or 1))
+        sizes.append({"amount": amount, "unit": unit, "energy_cost": energy_cost})
+    if not sizes:
+        sizes = deepcopy(default["sizes"])
+    sizes[0]["energy_cost"] = 0
     return {
         "image_filename": raw_panel.get("image_filename") if isinstance(raw_panel, dict) else None,
         "image_width": int(raw_panel.get("image_width")) if isinstance(raw_panel, dict) and raw_panel.get("image_width") else None,
         "image_height": int(raw_panel.get("image_height")) if isinstance(raw_panel, dict) and raw_panel.get("image_height") else None,
+        "sizes": sizes,
         "zones": {
             zone_id: _normalize_zone((zones or {}).get(zone_id), default["zones"][zone_id])
             for zone_id in POULPITA_PANEL_ZONE_IDS
@@ -369,6 +389,7 @@ async def update_token(*, token_id: str, image: UploadFile | None) -> dict[str, 
 async def update_poulpita_panel(
     *,
     zones: dict[str, Any],
+    sizes: list[dict[str, Any]] | None = None,
     image: UploadFile | None,
     image_width: int | None = None,
     image_height: int | None = None,
@@ -385,6 +406,7 @@ async def update_poulpita_panel(
             "image_filename": image_filename,
             "image_width": image_width or current.get("image_width"),
             "image_height": image_height or current.get("image_height"),
+            "sizes": sizes if sizes is not None else current.get("sizes"),
             "zones": zones,
         }
     )
@@ -676,6 +698,23 @@ def _normalize_level_groups(groups: list[dict[str, Any]], tile_set: set[str]) ->
     return normalized
 
 
+def _normalize_level_objectives(objectives: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized = []
+    for index, objective in enumerate(objectives or []):
+        if not isinstance(objective, dict):
+            raise ValueError("Level objectives must be objects.")
+        objective_type = str(objective.get("type") or "").strip()
+        objective_id = str(objective.get("id") or f"objective-{index + 1}")
+        if objective_type == "increase_size":
+            target = max(1, int(objective.get("target") or objective.get("count") or 1))
+            normalized.append({"id": objective_id, "type": objective_type, "target": target})
+        elif objective_type in {"find_shelter", "secure_shelter"}:
+            normalized.append({"id": objective_id, "type": objective_type})
+        elif objective_type:
+            raise ValueError(f"Unsupported objective type: {objective_type}.")
+    return normalized
+
+
 def save_level(
     *,
     name: str,
@@ -683,6 +722,8 @@ def save_level(
     node_tile_counts: dict[str, Any],
     node_group_ids: dict[str, Any],
     groups: list[dict[str, Any]],
+    objectives: list[dict[str, Any]] | None = None,
+    starting_energy: int | None = None,
     level_id: str | None = None,
 ) -> dict[str, Any]:
     content = _read_content()
@@ -712,6 +753,8 @@ def save_level(
         "node_tile_counts": normalized_counts,
         "node_group_ids": normalized_node_groups,
         "groups": normalized_groups,
+        "objectives": _normalize_level_objectives(objectives or []),
+        "starting_energy": max(0, min(32, int(starting_energy if starting_energy is not None else 3))),
     }
     if level_id:
         content["levels"][_find_index(content["levels"], level_id)] = level

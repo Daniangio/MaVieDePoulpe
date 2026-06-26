@@ -538,6 +538,8 @@ async def admin_create_level(
     node_tile_counts_json: str = Form(...),
     node_group_ids_json: str = Form(...),
     groups_json: str = Form(...),
+    objectives_json: str = Form(default="[]"),
+    starting_energy: int = Form(default=3),
     _admin: User = Depends(require_admin),
 ):
     try:
@@ -547,6 +549,8 @@ async def admin_create_level(
             node_tile_counts=_json_form_object(node_tile_counts_json, "node_tile_counts_json"),
             node_group_ids=_json_form_object(node_group_ids_json, "node_group_ids_json"),
             groups=_json_form_list(groups_json, "groups_json"),
+            objectives=_json_form_list(objectives_json, "objectives_json"),
+            starting_energy=starting_energy,
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -562,6 +566,8 @@ async def admin_update_level(
     node_tile_counts_json: str = Form(...),
     node_group_ids_json: str = Form(...),
     groups_json: str = Form(...),
+    objectives_json: str = Form(default="[]"),
+    starting_energy: int = Form(default=3),
     _admin: User = Depends(require_admin),
 ):
     try:
@@ -572,6 +578,8 @@ async def admin_update_level(
             node_tile_counts=_json_form_object(node_tile_counts_json, "node_tile_counts_json"),
             node_group_ids=_json_form_object(node_group_ids_json, "node_group_ids_json"),
             groups=_json_form_list(groups_json, "groups_json"),
+            objectives=_json_form_list(objectives_json, "objectives_json"),
+            starting_energy=starting_energy,
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -605,6 +613,7 @@ async def admin_update_token(
 @router.put("/admin/content/poulpita-panel")
 async def admin_update_poulpita_panel(
     zones_json: str = Form(...),
+    sizes_json: str = Form(default="[]"),
     image_width: int | None = Form(default=None),
     image_height: int | None = Form(default=None),
     image: UploadFile | None = File(default=None),
@@ -613,6 +622,7 @@ async def admin_update_poulpita_panel(
     try:
         return await update_poulpita_panel(
             zones=_json_form_object(zones_json, "zones_json"),
+            sizes=_json_form_list(sizes_json, "sizes_json"),
             image=image,
             image_width=image_width,
             image_height=image_height,
