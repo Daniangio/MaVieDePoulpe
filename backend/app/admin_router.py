@@ -18,9 +18,13 @@ from .game_content_service import (
     delete_event,
     delete_interaction,
     delete_level,
+    delete_surprise_card,
+    delete_surprise_deck,
     delete_tile,
     get_content_state,
     save_level,
+    save_surprise_card,
+    save_surprise_deck,
     save_tile,
     save_player_board,
     update_token,
@@ -531,6 +535,97 @@ async def admin_delete_tile(tile_id: str, _admin: User = Depends(require_admin))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.post("/admin/content/surprise-cards")
+async def admin_create_surprise_card(
+    name: str = Form(...),
+    costs_json: str = Form(default="[]"),
+    effects_json: str = Form(default="[]"),
+    image: UploadFile | None = File(default=None),
+    _admin: User = Depends(require_admin),
+):
+    try:
+        return await save_surprise_card(
+            name=name,
+            costs=_json_form_list(costs_json, "costs_json"),
+            effects=_json_form_list(effects_json, "effects_json"),
+            image=image,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/admin/content/surprise-cards/{card_id}")
+async def admin_update_surprise_card(
+    card_id: str,
+    name: str = Form(...),
+    costs_json: str = Form(default="[]"),
+    effects_json: str = Form(default="[]"),
+    image: UploadFile | None = File(default=None),
+    _admin: User = Depends(require_admin),
+):
+    try:
+        return await save_surprise_card(
+            card_id=card_id,
+            name=name,
+            costs=_json_form_list(costs_json, "costs_json"),
+            effects=_json_form_list(effects_json, "effects_json"),
+            image=image,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/admin/content/surprise-cards/{card_id}")
+async def admin_delete_surprise_card(card_id: str, _admin: User = Depends(require_admin)):
+    try:
+        delete_surprise_card(card_id)
+        return {"status": "deleted"}
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/admin/content/surprise-decks")
+async def admin_create_surprise_deck(
+    name: str = Form(...),
+    card_ids_json: str = Form(default="[]"),
+    _admin: User = Depends(require_admin),
+):
+    try:
+        return save_surprise_deck(name=name, card_ids=[str(item) for item in _json_form_list(card_ids_json, "card_ids_json")])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/admin/content/surprise-decks/{deck_id}")
+async def admin_update_surprise_deck(
+    deck_id: str,
+    name: str = Form(...),
+    card_ids_json: str = Form(default="[]"),
+    _admin: User = Depends(require_admin),
+):
+    try:
+        return save_surprise_deck(deck_id=deck_id, name=name, card_ids=[str(item) for item in _json_form_list(card_ids_json, "card_ids_json")])
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/admin/content/surprise-decks/{deck_id}")
+async def admin_delete_surprise_deck(deck_id: str, _admin: User = Depends(require_admin)):
+    try:
+        delete_surprise_deck(deck_id)
+        return {"status": "deleted"}
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/admin/content/levels")
 async def admin_create_level(
     name: str = Form(...),
@@ -540,6 +635,7 @@ async def admin_create_level(
     groups_json: str = Form(...),
     objectives_json: str = Form(default="[]"),
     starting_energy: int = Form(default=3),
+    surprise_deck_id: str = Form(default=""),
     _admin: User = Depends(require_admin),
 ):
     try:
@@ -551,6 +647,7 @@ async def admin_create_level(
             groups=_json_form_list(groups_json, "groups_json"),
             objectives=_json_form_list(objectives_json, "objectives_json"),
             starting_energy=starting_energy,
+            surprise_deck_id=surprise_deck_id,
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -568,6 +665,7 @@ async def admin_update_level(
     groups_json: str = Form(...),
     objectives_json: str = Form(default="[]"),
     starting_energy: int = Form(default=3),
+    surprise_deck_id: str = Form(default=""),
     _admin: User = Depends(require_admin),
 ):
     try:
@@ -580,6 +678,7 @@ async def admin_update_level(
             groups=_json_form_list(groups_json, "groups_json"),
             objectives=_json_form_list(objectives_json, "objectives_json"),
             starting_energy=starting_energy,
+            surprise_deck_id=surprise_deck_id,
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

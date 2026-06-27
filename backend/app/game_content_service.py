@@ -25,7 +25,17 @@ DEFAULT_CATEGORIES = [
 ]
 COUNTER_ATTACK_CATEGORY_ID = "__counter_attack__"
 COUNTER_ATTACK_CATEGORY = {"id": COUNTER_ATTACK_CATEGORY_ID, "name": "Counter-attack", "special": True}
-SUCCESS_EFFECT_TYPES = {"gain_energy", "gain_neurons", "gain_seashells", "place_shelter_token"}
+SUCCESS_EFFECT_TYPES = {"gain_energy", "gain_neurons", "gain_seashells", "place_shelter_token", "draw_surprise_card"}
+SURPRISE_COST_TYPES = {"play_cards", "pay_ap"}
+SURPRISE_EFFECT_TYPES = {
+    "gain_ap",
+    "gain_neurons",
+    "advance_night",
+    "gain_energy",
+    "lose_energy",
+    "remove_tiles_category_here",
+    "remove_tiles_category_adjacent",
+}
 FAILURE_EFFECT_TYPES = {
     "lose_energy",
     "lose_neurons",
@@ -70,6 +80,8 @@ def _empty_content() -> dict[str, Any]:
         "events": [],
         "tiles": [],
         "levels": [],
+        "surprise_cards": [],
+        "surprise_decks": [],
         "player_boards": _default_player_boards(),
         "tokens": _default_tokens(),
         "poulpita_panel": _default_poulpita_panel(),
@@ -99,6 +111,8 @@ def _read_content() -> dict[str, Any]:
     content.setdefault("events", [])
     content.setdefault("tiles", [])
     content.setdefault("levels", [])
+    content.setdefault("surprise_cards", [])
+    content.setdefault("surprise_decks", [])
     for category in content["categories"]:
         category["compulsory_on_same_node"] = bool(category.get("compulsory_on_same_node") or False)
     content["player_boards"] = _normalize_player_boards(content.get("player_boards") or [])
@@ -114,6 +128,7 @@ def _read_content() -> dict[str, Any]:
     for level in content["levels"]:
         level["objectives"] = _normalize_level_objectives(level.get("objectives") or [])
         level["starting_energy"] = max(0, min(32, int(level.get("starting_energy") or 3)))
+        level["surprise_deck_id"] = level.get("surprise_deck_id") or ""
     return content
 
 
@@ -335,6 +350,62 @@ def _generated_cards(content: dict[str, Any]) -> list[dict[str, Any]]:
     return cards
 
 
+def _normalize_surprise_costs(costs: list[dict[str, Any]], interaction_set: set[str], capability_ids: set[str]) -> list[dict[str, Any]]:
+    normalized = []
+    for cost in costs or []:
+        if not isinstance(cost, dict):
+            raise ValueError("Surprise costs must be objects.")
+        cost_type = str(cost.get("type") or "")
+        if cost_type not in SURPRISE_COST_TYPES:
+            raise ValueError(f"Unsupported surprise cost: {cost_type or '<missing>'}.")
+        if cost_type == "play_cards":
+            interaction_ids = []
+            for interaction_id in cost.get("interaction_ids") or []:
+                interaction_id = str(interaction_id)
+                if interaction_id not in interaction_set:
+                    raise ValueError("Surprise card cost references an unknown interaction.")
+                interaction_ids.append(interaction_id)
+            if not interaction_ids:
+                raise ValueError("Play-cards surprise cost needs at least one interaction.")
+            normalized.append({"type": cost_type, "interaction_ids": interaction_ids})
+        elif cost_type == "pay_ap":
+            amount = max(1, int(cost.get("amount") or 1))
+            capability_id = str(cost.get("capability_id") or "")
+            if capability_id and capability_id not in capability_ids:
+                raise ValueError("Surprise AP cost references an unknown ability.")
+            normalized.append({"type": cost_type, "amount": amount, "capability_id": capability_id})
+    return normalized
+
+
+def _normalize_surprise_effects(effects: list[dict[str, Any]], category_ids: set[str], capability_ids: set[str]) -> list[dict[str, Any]]:
+    normalized = []
+    for effect in effects or []:
+        if not isinstance(effect, dict):
+            raise ValueError("Surprise effects must be objects.")
+        effect_type = str(effect.get("type") or "")
+        if effect_type not in SURPRISE_EFFECT_TYPES:
+            raise ValueError(f"Unsupported surprise effect: {effect_type or '<missing>'}.")
+        entry: dict[str, Any] = {"type": effect_type}
+        if effect_type in {"gain_ap", "gain_neurons", "advance_night", "gain_energy", "lose_energy"}:
+            entry["amount"] = max(1, int(effect.get("amount") or 1))
+        if effect_type == "gain_ap":
+            capability_id = str(effect.get("capability_id") or "")
+            if capability_id not in capability_ids:
+                raise ValueError("Gain AP surprise effect requires an ability.")
+            entry["capability_id"] = capability_id
+        if effect_type in {"remove_tiles_category_here", "remove_tiles_category_adjacent"}:
+            category_id = str(effect.get("category_id") or "")
+            if category_id not in category_ids:
+                raise ValueError("Remove-tile surprise effect requires an existing category.")
+            entry["category_id"] = category_id
+        normalized.append(entry)
+    return normalized
+
+
+def _surprise_card_with_urls(card: dict[str, Any]) -> dict[str, Any]:
+    return _with_urls(card)
+
+
 def get_content_state() -> dict[str, Any]:
     content = _read_content()
     return {
@@ -344,6 +415,8 @@ def get_content_state() -> dict[str, Any]:
         "events": [_with_urls(event) for event in content.get("events", [])],
         "tiles": [dict(tile) for tile in content.get("tiles", [])],
         "levels": [dict(level) for level in content.get("levels", [])],
+        "surprise_cards": [_surprise_card_with_urls(card) for card in content.get("surprise_cards", [])],
+        "surprise_decks": [dict(deck) for deck in content.get("surprise_decks", [])],
         "player_boards": [dict(board) for board in content.get("player_boards", [])],
         "tokens": [_with_urls(token) for token in content.get("tokens", [])],
         "poulpita_panel": _poulpita_panel_with_urls(content.get("poulpita_panel") or _default_poulpita_panel()),
@@ -423,6 +496,8 @@ def get_game_content_catalog() -> dict[str, dict[str, Any]]:
         "events": {event["id"]: _with_urls(event) for event in content.get("events", [])},
         "interactions": {interaction["id"]: _with_urls(interaction) for interaction in content.get("interactions", [])},
         "cards": {card["id"]: card for card in _generated_cards(content)},
+        "surprise_cards": {card["id"]: _surprise_card_with_urls(card) for card in content.get("surprise_cards", [])},
+        "surprise_decks": {deck["id"]: dict(deck) for deck in content.get("surprise_decks", [])},
         "card_categories": [dict(category) for category in content.get("categories", [])] + [dict(COUNTER_ATTACK_CATEGORY)],
         "tokens": {token["id"]: _with_urls(token) for token in content.get("tokens", [])},
         "poulpita_panel": _poulpita_panel_with_urls(content.get("poulpita_panel") or _default_poulpita_panel()),
@@ -551,6 +626,84 @@ def delete_event(event_id: str) -> None:
     _write_content(content)
 
 
+async def save_surprise_card(
+    *,
+    name: str,
+    costs: list[dict[str, Any]] | None = None,
+    effects: list[dict[str, Any]] | None = None,
+    image: UploadFile | None = None,
+    card_id: str | None = None,
+) -> dict[str, Any]:
+    content = _read_content()
+    interaction_set = {interaction.get("id") for interaction in content["interactions"]}
+    category_ids = {category.get("id") for category in content["categories"]}
+    capability_ids = set(PLAYER_BOARD_ORDER)
+    image_filename = None
+    if card_id:
+        current = content["surprise_cards"][_find_index(content["surprise_cards"], card_id)]
+        image_filename = current.get("image_filename")
+    next_image = await _save_uploaded_image(f"surprise-{name}", image)
+    if next_image:
+        _delete_image(image_filename)
+        image_filename = next_image
+    if not card_id and not image_filename:
+        raise ValueError("Upload a surprise card image.")
+    card = {
+        "id": card_id or f"{_slug(name)}-{uuid.uuid4().hex[:8]}",
+        "name": _normalize_name(name),
+        "image_filename": image_filename,
+        "costs": _normalize_surprise_costs(costs or [], interaction_set, capability_ids),
+        "effects": _normalize_surprise_effects(effects or [], category_ids, capability_ids),
+    }
+    if card_id:
+        content["surprise_cards"][_find_index(content["surprise_cards"], card_id)] = card
+    else:
+        content["surprise_cards"].append(card)
+    _write_content(content)
+    return _surprise_card_with_urls(card)
+
+
+def delete_surprise_card(card_id: str) -> None:
+    content = _read_content()
+    if any(card_id in (deck.get("card_ids") or []) for deck in content.get("surprise_decks", [])):
+        raise ValueError("Surprise card is used by one or more decks.")
+    index = _find_index(content["surprise_cards"], card_id)
+    _delete_image(content["surprise_cards"][index].get("image_filename"))
+    del content["surprise_cards"][index]
+    _write_content(content)
+
+
+def save_surprise_deck(*, name: str, card_ids: list[str], deck_id: str | None = None) -> dict[str, Any]:
+    content = _read_content()
+    card_set = {card.get("id") for card in content.get("surprise_cards", [])}
+    normalized_card_ids = []
+    for card_id in card_ids or []:
+        card_id = str(card_id)
+        if card_id not in card_set:
+            raise ValueError("Surprise deck references an unknown card.")
+        normalized_card_ids.append(card_id)
+    deck = {
+        "id": deck_id or f"{_slug(name)}-{uuid.uuid4().hex[:8]}",
+        "name": _normalize_name(name),
+        "card_ids": normalized_card_ids,
+    }
+    if deck_id:
+        content["surprise_decks"][_find_index(content["surprise_decks"], deck_id)] = deck
+    else:
+        content["surprise_decks"].append(deck)
+    _write_content(content)
+    return dict(deck)
+
+
+def delete_surprise_deck(deck_id: str) -> None:
+    content = _read_content()
+    if any(level.get("surprise_deck_id") == deck_id for level in content.get("levels", [])):
+        raise ValueError("Surprise deck is used by one or more levels.")
+    index = _find_index(content["surprise_decks"], deck_id)
+    del content["surprise_decks"][index]
+    _write_content(content)
+
+
 def _normalize_interaction_ids(interaction_ids: list[str], interaction_set: set[str]) -> list[str]:
     normalized = []
     for interaction_id in interaction_ids:
@@ -594,6 +747,7 @@ def _normalize_effects(
         amount = int(effect.get("amount") or 0)
         no_amount_types = {
             "place_shelter_token",
+            "draw_surprise_card",
             "lose_half_ap",
             "lose_all_ap",
             "pulpita_move_previous",
@@ -626,8 +780,6 @@ def save_tile(
     interaction_set = {interaction.get("id") for interaction in content["interactions"]}
     category_ids = {category.get("id") for category in content["categories"]}
     normalized_interactions = _normalize_interaction_ids(interaction_ids, interaction_set)
-    if not normalized_interactions:
-        raise ValueError("A tile needs at least one required interaction.")
     tile = {
         "id": tile_id or f"{_slug(name)}-{uuid.uuid4().hex[:8]}",
         "name": _normalize_name(name),
@@ -724,6 +876,7 @@ def save_level(
     groups: list[dict[str, Any]],
     objectives: list[dict[str, Any]] | None = None,
     starting_energy: int | None = None,
+    surprise_deck_id: str | None = None,
     level_id: str | None = None,
 ) -> dict[str, Any]:
     content = _read_content()
@@ -733,6 +886,9 @@ def save_level(
         raise ValueError("Level map has no nodes.")
     tile_set = {str(tile.get("id")) for tile in content["tiles"]}
     normalized_groups = _normalize_level_groups(groups, tile_set)
+    normalized_surprise_deck_id = str(surprise_deck_id or "")
+    if normalized_surprise_deck_id and not any(deck.get("id") == normalized_surprise_deck_id for deck in content.get("surprise_decks", [])):
+        raise ValueError("Level surprise deck does not exist.")
     group_ids = {group["id"] for group in normalized_groups}
     normalized_counts = _normalize_node_tile_counts(node_tile_counts or {}, node_ids)
     normalized_node_groups = {}
@@ -755,6 +911,7 @@ def save_level(
         "groups": normalized_groups,
         "objectives": _normalize_level_objectives(objectives or []),
         "starting_energy": max(0, min(32, int(starting_energy if starting_energy is not None else 3))),
+        "surprise_deck_id": normalized_surprise_deck_id,
     }
     if level_id:
         content["levels"][_find_index(content["levels"], level_id)] = level

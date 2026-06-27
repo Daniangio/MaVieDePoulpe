@@ -226,3 +226,28 @@ def test_categories_can_be_compulsory_and_tiles_have_priority(tmp_path, monkeypa
     assert catalog["categories"][category["id"]]["compulsory_on_same_node"] is True
     assert tile["priority"] == 7
     assert catalog["tiles"][tile["id"]]["priority"] == 7
+
+
+def test_tile_can_have_no_required_interactions(tmp_path, monkeypatch):
+    monkeypatch.setattr(service, "CONTENT_ROOT", tmp_path)
+    monkeypatch.setattr(service, "CONTENT_IMAGES_ROOT", tmp_path / "images")
+    monkeypatch.setattr(service, "CONTENT_JSON_PATH", tmp_path / "content.json")
+    service._write_content(
+        {
+            "categories": [{"id": "prey", "name": "Prey"}],
+            "interactions": [],
+            "events": [{"id": "shell", "name": "Shell", "category_id": "prey", "image_filename": None}],
+            "tiles": [],
+            "levels": [],
+            "player_boards": [],
+        }
+    )
+
+    tile = service.save_tile(
+        name="Free shell",
+        event_id="shell",
+        interaction_ids=[],
+        success_effects=[{"type": "gain_neurons", "amount": 1}],
+    )
+
+    assert tile["interaction_ids"] == []

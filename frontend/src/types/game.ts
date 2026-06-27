@@ -95,6 +95,7 @@ export type GameProjection = {
     poulpita_panel?: Record<string, any>;
   };
   interaction?: any;
+  pending_surprise?: any;
   events: Array<Record<string, unknown>>;
 };
 

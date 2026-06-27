@@ -27,6 +27,8 @@ const emptyTile = {
   counter_attack_effects: [],
   failure_effects: [],
 };
+const emptySurpriseCard = { id: "", name: "", image_url: "", costs: [], effects: [] };
+const emptySurpriseDeck = { id: "", name: "", card_ids: [] };
 const emptyPlayerBoard = {
   id: "",
   name: "",
@@ -43,6 +45,7 @@ const successEffectOptions = [
   ["gain_neurons", "Gain neurons"],
   ["gain_seashells", "Gain seashells"],
   ["place_shelter_token", "Place shelter token"],
+  ["draw_surprise_card", "Draw surprise card"],
 ];
 
 const failureEffectOptions = [
@@ -59,7 +62,21 @@ const failureEffectOptions = [
   ["move_tile_previous", "Move tile to previous node"],
   ["remove_preys", "Remove tiles by category"],
 ];
-const noAmountEffectTypes = new Set(["place_shelter_token", "lose_half_ap", "lose_all_ap", "pulpita_move_previous", "pulpita_move_free", "keep_tile", "remove_tile", "move_tile_previous", "remove_preys"]);
+const noAmountEffectTypes = new Set(["place_shelter_token", "draw_surprise_card", "lose_half_ap", "lose_all_ap", "pulpita_move_previous", "pulpita_move_free", "keep_tile", "remove_tile", "move_tile_previous", "remove_preys"]);
+
+const surpriseCostOptions = [
+  ["play_cards", "Play cards"],
+  ["pay_ap", "Pay AP"],
+];
+const surpriseEffectOptions = [
+  ["gain_ap", "Gain AP"],
+  ["gain_neurons", "Gain neurons"],
+  ["advance_night", "Advance night"],
+  ["gain_energy", "Gain energy"],
+  ["lose_energy", "Lose energy"],
+  ["remove_tiles_category_here", "Remove category here"],
+  ["remove_tiles_category_adjacent", "Remove category adjacent"],
+];
 
 const contentTabs = [
   ["map", "Map"],
@@ -69,6 +86,8 @@ const contentTabs = [
   ["events", "Events/Animals"],
   ["tiles", "Tiles"],
   ["cards", "Cards"],
+  ["surprise_cards", "Surprise Cards"],
+  ["surprise_decks", "Surprise Decks"],
   ["player_boards", "Player Boards"],
   ["tokens", "Tokens"],
   ["poulpita_panel", "Poulpita Panel"],
@@ -83,12 +102,14 @@ const dangerButton = "rounded-md border border-rose-300 bg-white px-3 py-2 text-
 
 const AdminContentPage = () => {
   const { token, user } = useStore();
-  const [content, setContent] = useState({ categories: [], card_categories: [], interactions: [], events: [], tiles: [], levels: [], player_boards: [], tokens: [], poulpita_panel: null, cards: [] });
+  const [content, setContent] = useState({ categories: [], card_categories: [], interactions: [], events: [], tiles: [], levels: [], surprise_cards: [], surprise_decks: [], player_boards: [], tokens: [], poulpita_panel: null, cards: [] });
   const [categoryName, setCategoryName] = useState("");
   const [categoryCompulsory, setCategoryCompulsory] = useState(false);
   const [interactionDraft, setInteractionDraft] = useState(emptyInteraction);
   const [eventDraft, setEventDraft] = useState(emptyEvent);
   const [tileDraft, setTileDraft] = useState(emptyTile);
+  const [surpriseCardDraft, setSurpriseCardDraft] = useState(emptySurpriseCard);
+  const [surpriseDeckDraft, setSurpriseDeckDraft] = useState(emptySurpriseDeck);
   const [playerBoardDraft, setPlayerBoardDraft] = useState(emptyPlayerBoard);
   const [poulpitaPanelDraft, setPoulpitaPanelDraft] = useState(null);
   const [poulpitaPanelPreviewUrl, setPoulpitaPanelPreviewUrl] = useState("");
@@ -98,6 +119,7 @@ const AdminContentPage = () => {
   const interactionImageRef = useRef(null);
   const eventImageRef = useRef(null);
   const tokenImageRefs = useRef({});
+  const surpriseCardImageRef = useRef(null);
   const poulpitaPanelImageRef = useRef(null);
 
   const categoriesById = useMemo(() => Object.fromEntries(content.categories.map((category) => [category.id, category])), [content.categories]);
@@ -152,6 +174,11 @@ const AdminContentPage = () => {
     if (eventImageRef.current) eventImageRef.current.value = "";
   };
   const resetTile = () => setTileDraft(emptyTile);
+  const resetSurpriseCard = () => {
+    setSurpriseCardDraft(emptySurpriseCard);
+    if (surpriseCardImageRef.current) surpriseCardImageRef.current.value = "";
+  };
+  const resetSurpriseDeck = () => setSurpriseDeckDraft(emptySurpriseDeck);
 
   const saveCategory = async (category = null) => {
     setBusy(true);
@@ -259,6 +286,50 @@ const AdminContentPage = () => {
     }
   };
 
+  const saveSurpriseCard = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const file = surpriseCardImageRef.current?.files?.[0] || null;
+      if (!surpriseCardDraft.id && !file) throw new Error("Upload a surprise card image.");
+      const form = new FormData();
+      form.set("name", surpriseCardDraft.name);
+      form.set("costs_json", JSON.stringify(surpriseCardDraft.costs || []));
+      form.set("effects_json", JSON.stringify(surpriseCardDraft.effects || []));
+      if (file) form.set("image", file);
+      await request(surpriseCardDraft.id ? `/api/admin/content/surprise-cards/${surpriseCardDraft.id}` : "/api/admin/content/surprise-cards", {
+        method: surpriseCardDraft.id ? "PUT" : "POST",
+        body: form,
+      });
+      resetSurpriseCard();
+      await loadContent();
+    } catch (saveError) {
+      setError(saveError.message || "Failed to save surprise card.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveSurpriseDeck = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const form = new FormData();
+      form.set("name", surpriseDeckDraft.name);
+      form.set("card_ids_json", JSON.stringify(surpriseDeckDraft.card_ids || []));
+      await request(surpriseDeckDraft.id ? `/api/admin/content/surprise-decks/${surpriseDeckDraft.id}` : "/api/admin/content/surprise-decks", {
+        method: surpriseDeckDraft.id ? "PUT" : "POST",
+        body: form,
+      });
+      resetSurpriseDeck();
+      await loadContent();
+    } catch (saveError) {
+      setError(saveError.message || "Failed to save surprise deck.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const savePlayerBoard = async () => {
     if (!playerBoardDraft.id) return;
     setBusy(true);
@@ -355,6 +426,63 @@ const AdminContentPage = () => {
 
   const removeEffect = (field, index) => {
     setTileDraft((current) => ({ ...current, [field]: (current[field] || []).filter((_effect, effectIndex) => effectIndex !== index) }));
+  };
+
+  const addSurpriseCost = (type) => {
+    setSurpriseCardDraft((current) => ({
+      ...current,
+      costs: [
+        ...(current.costs || []),
+        type === "play_cards"
+          ? { type, interaction_ids: [content.interactions?.[0]?.id].filter(Boolean) }
+          : { type, amount: 1, capability_id: "" },
+      ],
+    }));
+  };
+
+  const updateSurpriseCost = (index, patch) => {
+    setSurpriseCardDraft((current) => ({
+      ...current,
+      costs: (current.costs || []).map((cost, costIndex) => (costIndex === index ? { ...cost, ...patch } : cost)),
+    }));
+  };
+
+  const removeSurpriseCost = (index) => {
+    setSurpriseCardDraft((current) => ({ ...current, costs: (current.costs || []).filter((_cost, costIndex) => costIndex !== index) }));
+  };
+
+  const addSurpriseEffect = (type) => {
+    setSurpriseCardDraft((current) => ({
+      ...current,
+      effects: [
+        ...(current.effects || []),
+        {
+          type,
+          amount: ["gain_ap", "gain_neurons", "advance_night", "gain_energy", "lose_energy"].includes(type) ? 1 : undefined,
+          capability_id: type === "gain_ap" ? "agility" : undefined,
+          category_id: type.startsWith("remove_tiles_category") ? content.categories?.[0]?.id || "" : undefined,
+        },
+      ],
+    }));
+  };
+
+  const updateSurpriseEffect = (index, patch) => {
+    setSurpriseCardDraft((current) => ({
+      ...current,
+      effects: (current.effects || []).map((effect, effectIndex) => (effectIndex === index ? { ...effect, ...patch } : effect)),
+    }));
+  };
+
+  const removeSurpriseEffect = (index) => {
+    setSurpriseCardDraft((current) => ({ ...current, effects: (current.effects || []).filter((_effect, effectIndex) => effectIndex !== index) }));
+  };
+
+  const setSurpriseDeckCardCount = (cardId, count) => {
+    setSurpriseDeckDraft((current) => {
+      const cardIds = (current.card_ids || []).filter((id) => id !== cardId);
+      for (let index = 0; index < Math.max(0, Number(count || 0)); index += 1) cardIds.push(cardId);
+      return { ...current, card_ids: cardIds };
+    });
   };
 
   const togglePlayerBoardInitiation = (eventId) => {
@@ -474,6 +602,41 @@ const AdminContentPage = () => {
       ) : null}
 
       {activeTab === "cards" ? <CardsView cardCategories={cardCategories} content={content} /> : null}
+
+      {activeTab === "surprise_cards" ? (
+        <SurpriseCardEditor
+          busy={busy}
+          categories={content.categories}
+          deleteItem={deleteItem}
+          draft={surpriseCardDraft}
+          imageRef={surpriseCardImageRef}
+          interactions={content.interactions}
+          onAddCost={addSurpriseCost}
+          onAddEffect={addSurpriseEffect}
+          onRemoveCost={removeSurpriseCost}
+          onRemoveEffect={removeSurpriseEffect}
+          onUpdateCost={updateSurpriseCost}
+          onUpdateEffect={updateSurpriseEffect}
+          reset={resetSurpriseCard}
+          save={saveSurpriseCard}
+          setDraft={setSurpriseCardDraft}
+          surpriseCards={content.surprise_cards || []}
+        />
+      ) : null}
+
+      {activeTab === "surprise_decks" ? (
+        <SurpriseDeckEditor
+          busy={busy}
+          deleteItem={deleteItem}
+          draft={surpriseDeckDraft}
+          onSetCardCount={setSurpriseDeckCardCount}
+          reset={resetSurpriseDeck}
+          save={saveSurpriseDeck}
+          setDraft={setSurpriseDeckDraft}
+          surpriseCards={content.surprise_cards || []}
+          surpriseDecks={content.surprise_decks || []}
+        />
+      ) : null}
 
       {activeTab === "player_boards" ? (
         <PlayerBoardEditor
@@ -646,6 +809,198 @@ const CardsView = ({ cardCategories, content }) => (
     </div>
   </section>
 );
+
+const abilityOptions = [
+  ["", "Any focused ability"],
+  ["agility", "Agility"],
+  ["camouflage", "Camouflage"],
+  ["force", "Force"],
+  ["propulsion", "Propulsion"],
+  ["intelligence", "Intelligence"],
+];
+
+const SurpriseCardEditor = ({
+  busy,
+  categories,
+  deleteItem,
+  draft,
+  imageRef,
+  interactions,
+  onAddCost,
+  onAddEffect,
+  onRemoveCost,
+  onRemoveEffect,
+  onUpdateCost,
+  onUpdateEffect,
+  reset,
+  save,
+  setDraft,
+  surpriseCards,
+}) => (
+  <section className="grid gap-4 xl:grid-cols-[26rem_1fr]">
+    <EditorPanel title="Surprise Card">
+      <label className="block text-sm">
+        <span className="text-slate-600">Name</span>
+        <input className={`${input} mt-1`} value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} />
+      </label>
+      <label className="mt-3 block text-sm">
+        <span className="text-slate-600">Image</span>
+        <input ref={imageRef} className={`${input} mt-1 text-sm`} type="file" accept="image/png,image/jpeg,image/webp" />
+      </label>
+      {draft.image_url ? <img alt="" className="mt-3 h-36 rounded border border-cyan-100 object-contain" src={imageUrl(draft)} /> : null}
+
+      <div className="mt-4 rounded-md border border-cyan-100 bg-white p-3">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-teal-950">Optional costs</h3>
+          <select className="rounded border border-cyan-200 bg-cyan-50 px-2 py-1 text-xs" defaultValue="" onChange={(event) => { if (event.target.value) onAddCost(event.target.value); event.target.value = ""; }}>
+            <option value="">Add cost</option>
+            {surpriseCostOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+          </select>
+        </div>
+        <div className="mt-2 space-y-2">
+          {(draft.costs || []).map((cost, index) => (
+            <div className="rounded bg-cyan-50 p-2" key={index}>
+              <div className="flex items-center gap-2">
+                <select className="min-w-0 flex-1 rounded border border-cyan-200 bg-white px-2 py-1 text-xs" value={cost.type} onChange={(event) => onUpdateCost(index, { type: event.target.value })}>
+                  {surpriseCostOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                </select>
+                <button className="rounded border border-rose-200 bg-white px-2 py-1 text-xs text-rose-700" onClick={() => onRemoveCost(index)} type="button">Remove</button>
+              </div>
+              {cost.type === "play_cards" ? (
+                <div className="mt-2 grid grid-cols-2 gap-1">
+                  {interactions.map((interaction) => (
+                    <label className="flex items-center gap-1 text-xs" key={interaction.id}>
+                      <input
+                        checked={(cost.interaction_ids || []).includes(interaction.id)}
+                        onChange={(event) => {
+                          const selected = new Set(cost.interaction_ids || []);
+                          if (event.target.checked) selected.add(interaction.id);
+                          else selected.delete(interaction.id);
+                          onUpdateCost(index, { interaction_ids: Array.from(selected) });
+                        }}
+                        type="checkbox"
+                      />
+                      {interaction.name}
+                    </label>
+                  ))}
+                </div>
+              ) : null}
+              {cost.type === "pay_ap" ? (
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                  <input className="rounded border border-cyan-200 bg-white px-2 py-1 text-xs" min="1" type="number" value={cost.amount || 1} onChange={(event) => onUpdateCost(index, { amount: Number(event.target.value) })} />
+                  <select className="rounded border border-cyan-200 bg-white px-2 py-1 text-xs" value={cost.capability_id || ""} onChange={(event) => onUpdateCost(index, { capability_id: event.target.value })}>
+                    {abilityOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                  </select>
+                </div>
+              ) : null}
+            </div>
+          ))}
+          {(draft.costs || []).length === 0 ? <p className="text-xs text-slate-500">No cost: effects happen automatically.</p> : null}
+        </div>
+      </div>
+
+      <div className="mt-4 rounded-md border border-cyan-100 bg-white p-3">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-teal-950">Effects</h3>
+          <select className="rounded border border-cyan-200 bg-cyan-50 px-2 py-1 text-xs" defaultValue="" onChange={(event) => { if (event.target.value) onAddEffect(event.target.value); event.target.value = ""; }}>
+            <option value="">Add effect</option>
+            {surpriseEffectOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+          </select>
+        </div>
+        <div className="mt-2 space-y-2">
+          {(draft.effects || []).map((effect, index) => (
+            <div className="flex flex-wrap items-center gap-2 rounded bg-cyan-50 p-2" key={index}>
+              <select className="min-w-0 flex-1 rounded border border-cyan-200 bg-white px-2 py-1 text-xs" value={effect.type} onChange={(event) => onUpdateEffect(index, { type: event.target.value })}>
+                {surpriseEffectOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              </select>
+              {["gain_ap", "gain_neurons", "advance_night", "gain_energy", "lose_energy"].includes(effect.type) ? <input className="w-16 rounded border border-cyan-200 bg-white px-2 py-1 text-xs" min="1" type="number" value={effect.amount || 1} onChange={(event) => onUpdateEffect(index, { amount: Number(event.target.value) })} /> : null}
+              {effect.type === "gain_ap" ? (
+                <select className="w-32 rounded border border-cyan-200 bg-white px-2 py-1 text-xs" value={effect.capability_id || "agility"} onChange={(event) => onUpdateEffect(index, { capability_id: event.target.value })}>
+                  {abilityOptions.filter(([value]) => value).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                </select>
+              ) : null}
+              {effect.type?.startsWith("remove_tiles_category") ? (
+                <select className="w-36 rounded border border-cyan-200 bg-white px-2 py-1 text-xs" value={effect.category_id || ""} onChange={(event) => onUpdateEffect(index, { category_id: event.target.value })}>
+                  <option value="">Category</option>
+                  {categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
+                </select>
+              ) : null}
+              <button className="rounded border border-rose-200 bg-white px-2 py-1 text-xs text-rose-700" onClick={() => onRemoveEffect(index)} type="button">Remove</button>
+            </div>
+          ))}
+          {(draft.effects || []).length === 0 ? <p className="text-xs text-slate-500">No effects.</p> : null}
+        </div>
+      </div>
+
+      <div className="mt-4 flex gap-2">
+        <button className={primaryButton} disabled={busy} onClick={save} type="button">{draft.id ? "Update" : "Create"}</button>
+        <button className={subtleButton} onClick={reset} type="button">Clear</button>
+      </div>
+    </EditorPanel>
+
+    <section className={panel}>
+      <h2 className="font-semibold text-teal-950">Surprise Cards</h2>
+      <div className="mt-3 grid gap-3 md:grid-cols-2">
+        {surpriseCards.map((card) => (
+          <article className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3" key={card.id}>
+            <div className="flex gap-3">
+              {imageUrl(card) ? <img alt="" className="h-20 w-14 rounded object-cover" src={imageUrl(card)} /> : null}
+              <div className="min-w-0 flex-1">
+                <h3 className="truncate text-sm font-semibold text-teal-950">{card.name}</h3>
+                <p className="text-xs text-slate-500">{(card.costs || []).length} costs - {(card.effects || []).length} effects</p>
+                <div className="mt-2 flex gap-2">
+                  <button className={subtleButton} onClick={() => setDraft({ ...emptySurpriseCard, ...card })} type="button">Edit</button>
+                  <button className={dangerButton} disabled={busy} onClick={() => deleteItem(`/api/admin/content/surprise-cards/${card.id}`, card.name)} type="button">Delete</button>
+                </div>
+              </div>
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  </section>
+);
+
+const SurpriseDeckEditor = ({ busy, deleteItem, draft, onSetCardCount, reset, save, setDraft, surpriseCards, surpriseDecks }) => {
+  const counts = (draft.card_ids || []).reduce((acc, cardId) => ({ ...acc, [cardId]: Number(acc[cardId] || 0) + 1 }), {});
+  return (
+    <section className="grid gap-4 xl:grid-cols-[26rem_1fr]">
+      <EditorPanel title="Surprise Deck">
+        <label className="block text-sm">
+          <span className="text-slate-600">Name</span>
+          <input className={`${input} mt-1`} value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} />
+        </label>
+        <div className="mt-3 space-y-2">
+          {surpriseCards.map((card) => (
+            <label className="flex items-center gap-2 rounded bg-cyan-50 p-2 text-sm" key={card.id}>
+              {imageUrl(card) ? <img alt="" className="h-10 w-7 rounded object-cover" src={imageUrl(card)} /> : null}
+              <span className="min-w-0 flex-1 truncate">{card.name}</span>
+              <input className="w-16 rounded border border-cyan-200 bg-white px-2 py-1 text-xs" min="0" type="number" value={counts[card.id] || 0} onChange={(event) => onSetCardCount(card.id, Number(event.target.value))} />
+            </label>
+          ))}
+        </div>
+        <div className="mt-4 flex gap-2">
+          <button className={primaryButton} disabled={busy} onClick={save} type="button">{draft.id ? "Update" : "Create"}</button>
+          <button className={subtleButton} onClick={reset} type="button">Clear</button>
+        </div>
+      </EditorPanel>
+      <section className={panel}>
+        <h2 className="font-semibold text-teal-950">Surprise Decks</h2>
+        <div className="mt-3 space-y-2">
+          {surpriseDecks.map((deck) => (
+            <div className="flex items-center gap-2 rounded-md border border-cyan-100 bg-cyan-50/70 p-2" key={deck.id}>
+              <button className="min-w-0 flex-1 text-left" onClick={() => setDraft({ ...emptySurpriseDeck, ...deck })} type="button">
+                <span className="block truncate text-sm font-semibold text-teal-950">{deck.name}</span>
+                <span className="text-xs text-slate-500">{(deck.card_ids || []).length} cards</span>
+              </button>
+              <button className={dangerButton} disabled={busy} onClick={() => deleteItem(`/api/admin/content/surprise-decks/${deck.id}`, deck.name)} type="button">Delete</button>
+            </div>
+          ))}
+        </div>
+      </section>
+    </section>
+  );
+};
 
 const PlayerBoardEditor = ({
   boards,
@@ -1012,7 +1367,7 @@ const TileList = ({ content, eventsById, categoriesById, interactionsById, setTi
           <h3 className="mt-3 truncate font-semibold text-teal-950">{tile.name}</h3>
           <p className="text-xs text-slate-500">{event?.name || "Missing event"} - {categoriesById[event?.category_id]?.name || "No category"}</p>
           <p className="mt-1 text-xs text-slate-600">Priority: {Number(tile.priority || 0)}</p>
-          <p className="mt-3 text-xs text-slate-600">Success: {(tile.interaction_ids || []).map((id) => interactionsById[id]?.name || id).join(", ")}</p>
+          <p className="mt-3 text-xs text-slate-600">Success: {(tile.interaction_ids || []).length ? (tile.interaction_ids || []).map((id) => interactionsById[id]?.name || id).join(", ") : "Always succeeds"}</p>
           <p className="mt-1 text-xs text-slate-600">Counter: {(tile.counter_attack_interaction_ids || []).map((id) => interactionsById[id]?.name || id).join(", ") || "None"}</p>
           <div className="mt-3 flex gap-2">
             <button className={subtleButton} onClick={() => setTileDraft({ ...emptyTile, ...tile })} type="button">Edit</button>

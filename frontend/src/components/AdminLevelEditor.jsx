@@ -11,6 +11,7 @@ const emptyLevelDraft = () => ({
   groups: [{ id: "group-1", name: "Group 1", tile_counts: {} }],
   objectives: [],
   starting_energy: 3,
+  surprise_deck_id: "",
 });
 
 const groupColors = ["#0d9488", "#2563eb", "#c026d3", "#ea580c", "#16a34a", "#be123c", "#7c3aed", "#0891b2"];
@@ -148,6 +149,7 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
       form.set("groups_json", JSON.stringify(draft.groups || []));
       form.set("objectives_json", JSON.stringify(draft.objectives || []));
       form.set("starting_energy", String(Math.max(0, Math.min(32, Number(draft.starting_energy ?? 3)))));
+      form.set("surprise_deck_id", draft.surprise_deck_id || "");
       const saved = await request(draft.id ? `/api/admin/content/levels/${draft.id}` : "/api/admin/content/levels", { method: draft.id ? "PUT" : "POST", body: form });
       setDraft(saved);
       await onReload();
@@ -226,7 +228,7 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
         </aside>
 
         <div className="grid gap-4">
-          <div className="grid gap-3 lg:grid-cols-[1fr_18rem_10rem]">
+          <div className="grid gap-3 lg:grid-cols-[1fr_16rem_10rem_14rem]">
             <label className="block text-sm">
               <span className="text-slate-600">Level name</span>
               <input className="mt-1 w-full rounded-md border border-cyan-200 bg-white px-3 py-2 text-slate-800" value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} />
@@ -247,6 +249,13 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
                 value={Number(draft.starting_energy ?? 3)}
                 onChange={(event) => setDraft((current) => ({ ...current, starting_energy: Math.max(0, Math.min(32, Number(event.target.value || 0))) }))}
               />
+            </label>
+            <label className="block text-sm">
+              <span className="text-slate-600">Surprise deck</span>
+              <select className="mt-1 w-full rounded-md border border-cyan-200 bg-white px-3 py-2 text-slate-800" value={draft.surprise_deck_id || ""} onChange={(event) => setDraft((current) => ({ ...current, surprise_deck_id: event.target.value }))}>
+                <option value="">None</option>
+                {(content.surprise_decks || []).map((deck) => <option key={deck.id} value={deck.id}>{deck.name}</option>)}
+              </select>
             </label>
           </div>
 
