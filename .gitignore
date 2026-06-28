@@ -2,7 +2,6 @@ node_modules/
 secrets/
 backend/data/maps/
 backend/data/content/
-images/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
