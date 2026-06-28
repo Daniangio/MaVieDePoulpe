@@ -1,0 +1,107 @@
+name: Deploy Production
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: true
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Compute image names
+        id: image_meta
+        run: |
+          owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          echo "backend_image=ghcr.io/${owner}/maviedepoulpe-backend" >> "$GITHUB_OUTPUT"
+          echo "frontend_image=ghcr.io/${owner}/maviedepoulpe-frontend" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./backend/Dockerfile.prod
+          push: true
+          tags: |
+            ${{ steps.image_meta.outputs.backend_image }}:latest
+            ${{ steps.image_meta.outputs.backend_image }}:${{ github.sha }}
+
+      - name: Build and push frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./frontend/Dockerfile.prod
+          push: true
+          tags: |
+            ${{ steps.image_meta.outputs.frontend_image }}:latest
+            ${{ steps.image_meta.outputs.frontend_image }}:${{ github.sha }}
+          build-args: |
+            VITE_API_URL=${{ secrets.PROD_VITE_API_URL }}
+            VITE_WS_URL=${{ secrets.PROD_VITE_WS_URL }}
+            VITE_FIREBASE_API_KEY=${{ secrets.PROD_VITE_FIREBASE_API_KEY }}
+            VITE_FIREBASE_AUTH_DOMAIN=${{ secrets.PROD_VITE_FIREBASE_AUTH_DOMAIN || secrets.VITE_FIREBASE_AUTH_DOMAIN }}
+            VITE_FIREBASE_PROJECT_ID=${{ secrets.PROD_VITE_FIREBASE_PROJECT_ID || secrets.VITE_FIREBASE_PROJECT_ID }}
+            VITE_FIREBASE_APP_ID=${{ secrets.PROD_VITE_FIREBASE_APP_ID || secrets.VITE_FIREBASE_APP_ID }}
+            VITE_FIREBASE_MESSAGING_SENDER_ID=${{ secrets.PROD_VITE_FIREBASE_MESSAGING_SENDER_ID || secrets.VITE_FIREBASE_MESSAGING_SENDER_ID }}
+            VITE_FIREBASE_STORAGE_BUCKET=${{ secrets.PROD_VITE_FIREBASE_STORAGE_BUCKET || secrets.VITE_FIREBASE_STORAGE_BUCKET }}
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Upload compose bundle to production VM
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.PROD_VM_HOST || secrets.VM_HOST }}
+          username: ${{ secrets.PROD_VM_USER || secrets.VM_USER }}
+          key: ${{ secrets.PROD_VM_SSH_PRIVATE_KEY || secrets.VM_SSH_PRIVATE_KEY }}
+          port: ${{ secrets.PROD_VM_SSH_PORT || secrets.VM_SSH_PORT || '22' }}
+          fingerprint: ${{ secrets.PROD_VM_SSH_FINGERPRINT || secrets.VM_SSH_FINGERPRINT }}
+          source: "deploy/docker-compose.yml,deploy/Caddyfile"
+          target: /opt/maviedepoulpe
+          strip_components: 1
+
+      - name: Pull and restart services on production VM
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.PROD_VM_HOST || secrets.VM_HOST }}
+          username: ${{ secrets.PROD_VM_USER || secrets.VM_USER }}
+          key: ${{ secrets.PROD_VM_SSH_PRIVATE_KEY || secrets.VM_SSH_PRIVATE_KEY }}
+          port: ${{ secrets.PROD_VM_SSH_PORT || secrets.VM_SSH_PORT || '22' }}
+          fingerprint: ${{ secrets.PROD_VM_SSH_FINGERPRINT || secrets.VM_SSH_FINGERPRINT }}
+          script_stop: true
+          command_timeout: 45m
+          script: |
+            cd /opt/maviedepoulpe
+            test -f .env
+            mkdir -p /opt/maviedepoulpe/secrets /opt/maviedepoulpe/data/maps
+            echo "${{ secrets.PROD_GHCR_TOKEN || secrets.GHCR_TOKEN }}" | docker login ghcr.io -u "${{ secrets.PROD_GHCR_USERNAME || secrets.GHCR_USERNAME }}" --password-stdin
+            docker compose --env-file .env pull backend frontend caddy redis postgres
+            docker compose --env-file .env up -d --remove-orphans
+            docker image prune -af --filter "until=24h"
