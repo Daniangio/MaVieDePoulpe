@@ -253,7 +253,6 @@ def test_tile_can_have_no_required_interactions(tmp_path, monkeypatch):
 
     assert tile["interaction_ids"] == []
 
-
 def test_admin_content_package_exports_without_images_and_imports_by_id(tmp_path, monkeypatch):
     content_root = tmp_path / "content"
     maps_root = tmp_path / "maps"
