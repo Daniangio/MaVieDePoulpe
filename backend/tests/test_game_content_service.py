@@ -278,8 +278,10 @@ def test_admin_content_package_exports_without_images_and_imports_by_id(tmp_path
             "interactions": [{"id": "charge", "name": "Charge", "image_filename": "charge.png"}],
             "events": [{"id": "crab", "name": "Crab", "category_id": "prey", "image_filename": "crab.png"}],
             "tiles": [{"id": "crab-tile", "name": "Crab tile", "event_id": "crab", "interaction_ids": ["charge"]}],
-            "levels": [],
-            "player_boards": [],
+            "levels": [{"id": "night-1", "name": "Night 1", "map_id": "reef", "node_tile_counts": {"N1": 0}, "node_group_ids": {"N1": "main"}, "groups": [{"id": "main", "name": "Main", "tile_counts": {}}], "surprise_deck_id": "surprise-deck"}],
+            "surprise_cards": [{"id": "surprise-card", "name": "Spark", "image_filename": "spark.png", "costs": [], "effects": [{"type": "gain_neurons", "amount": 1}]}],
+            "surprise_decks": [{"id": "surprise-deck", "name": "Surprises", "card_ids": ["surprise-card"]}],
+            "player_boards": [{"id": "agility", "name": "Agility", "initiates_event_ids": ["crab"], "deck": [{"interaction_id": "charge", "count": 2}], "default_max_cards_in_hand": 3, "hand_size_upgrades": [], "actions_per_control": 3, "control_takes_per_night": 3}],
         }
     )
 
@@ -289,6 +291,10 @@ def test_admin_content_package_exports_without_images_and_imports_by_id(tmp_path
     assert "image_url" not in exported["maps"][0]
     assert exported["content"]["interactions"][0]["image_filename"] is None
     assert exported["content"]["events"][0]["image_filename"] is None
+    assert exported["content"]["surprise_cards"][0]["image_filename"] is None
+    assert exported["content"]["surprise_decks"][0]["id"] == "surprise-deck"
+    assert exported["content"]["levels"][0]["surprise_deck_id"] == "surprise-deck"
+    assert exported["content"]["player_boards"][0]["id"] == "agility"
 
     imported = {
         "maps": [
@@ -315,6 +321,13 @@ def test_admin_content_package_exports_without_images_and_imports_by_id(tmp_path
             "interactions": [{"id": "charge", "name": "Updated charge", "image_filename": "must-not-import.png"}],
             "events": [{"id": "crab", "name": "Updated crab", "category_id": "prey", "image_filename": "must-not-import.png"}],
             "tiles": [{"id": "crab-tile", "name": "Updated tile", "event_id": "crab", "interaction_ids": ["charge"]}],
+            "surprise_cards": [
+                {"id": "surprise-card", "name": "Updated spark", "image_filename": "must-not-import.png", "costs": [], "effects": [{"type": "gain_neurons", "amount": 2}]},
+                {"id": "surprise-card-2", "name": "Second spark", "image_filename": "must-not-import.png", "costs": [], "effects": []},
+            ],
+            "surprise_decks": [{"id": "surprise-deck", "name": "Updated surprises", "card_ids": ["surprise-card", "surprise-card-2"]}],
+            "levels": [{"id": "night-1", "name": "Updated night", "map_id": "reef", "node_tile_counts": {"N1": 0}, "node_group_ids": {"N1": "main"}, "groups": [{"id": "main", "name": "Main", "tile_counts": {}}], "surprise_deck_id": "surprise-deck"}],
+            "player_boards": [{"id": "agility", "name": "Quickness", "initiates_event_ids": ["crab"], "deck": [{"interaction_id": "charge", "count": 4}], "default_max_cards_in_hand": 4, "hand_size_upgrades": [], "actions_per_control": 2, "control_takes_per_night": 5}],
         },
     }
 
@@ -326,6 +339,11 @@ def test_admin_content_package_exports_without_images_and_imports_by_id(tmp_path
     assert map_summary == {"created": 1, "updated": 1}
     assert content_summary["created"]["categories"] == 1
     assert content_summary["updated"]["categories"] == 1
+    assert content_summary["created"]["surprise_cards"] == 1
+    assert content_summary["updated"]["surprise_cards"] == 1
+    assert content_summary["updated"]["surprise_decks"] == 1
+    assert content_summary["updated"]["levels"] == 1
+    assert content_summary["updated"]["player_boards"] == 1
     assert reef["name"] == "Imported reef"
     assert reef["image_filename"] is None
     assert reef["image_url"] is None
@@ -333,3 +351,8 @@ def test_admin_content_package_exports_without_images_and_imports_by_id(tmp_path
     assert {category["id"]: category["name"] for category in state["categories"]}["prey"] == "Updated prey"
     assert state["interactions"][0]["image_filename"] is None
     assert state["events"][0]["image_filename"] is None
+    assert {card["id"]: card for card in state["surprise_cards"]}["surprise-card"]["name"] == "Updated spark"
+    assert {card["id"]: card for card in state["surprise_cards"]}["surprise-card"]["image_filename"] is None
+    assert {deck["id"]: deck for deck in state["surprise_decks"]}["surprise-deck"]["card_ids"] == ["surprise-card", "surprise-card-2"]
+    assert {level["id"]: level for level in state["levels"]}["night-1"]["name"] == "Updated night"
+    assert {board["id"]: board for board in state["player_boards"]}["agility"]["name"] == "Quickness"
