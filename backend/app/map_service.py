@@ -81,6 +81,13 @@ def _with_runtime_urls(map_data: dict[str, Any]) -> dict[str, Any]:
     return copy
 
 
+def _without_image_fields(map_data: dict[str, Any]) -> dict[str, Any]:
+    copy = dict(map_data)
+    copy["image_filename"] = None
+    copy.pop("image_url", None)
+    return copy
+
+
 def list_maps() -> list[dict[str, Any]]:
     MAPS_ROOT.mkdir(parents=True, exist_ok=True)
     maps = []
@@ -88,6 +95,39 @@ def list_maps() -> list[dict[str, Any]]:
         with path.open("r", encoding="utf-8") as handle:
             maps.append(_with_runtime_urls(json.load(handle)))
     return maps
+
+
+def export_maps_data() -> list[dict[str, Any]]:
+    return [_without_image_fields(map_data) for map_data in list_maps()]
+
+
+def import_maps_data(maps: list[dict[str, Any]]) -> dict[str, int]:
+    if not isinstance(maps, list):
+        raise ValueError("maps must be a JSON array.")
+    created = 0
+    updated = 0
+    for raw_map in maps:
+        if not isinstance(raw_map, dict):
+            raise ValueError("Each map must be an object.")
+        map_id = str(raw_map.get("id") or "").strip()
+        if not map_id:
+            raise ValueError("Each map requires an id.")
+        existed = _map_json_path(map_id).exists()
+        save_map_data(
+            map_id=map_id,
+            name=str(raw_map.get("name") or "Untitled map"),
+            nodes=raw_map.get("nodes") or {},
+            adjacency=raw_map.get("adjacency") or {},
+            image_filename=None,
+            image_width=raw_map.get("image_width"),
+            image_height=raw_map.get("image_height"),
+            starting_node_id=raw_map.get("starting_node_id"),
+        )
+        if existed:
+            updated += 1
+        else:
+            created += 1
+    return {"created": created, "updated": updated}
 
 
 def get_map(map_id: str | None) -> dict[str, Any]:

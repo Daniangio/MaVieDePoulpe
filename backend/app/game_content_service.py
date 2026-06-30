@@ -102,6 +102,47 @@ def _write_content(content: dict[str, Any]) -> None:
         json.dump(content, handle, indent=2, sort_keys=True)
 
 
+def _strip_image_fields(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_strip_image_fields(item) for item in value]
+    if isinstance(value, dict):
+        stripped = {}
+        for key, item in value.items():
+            if key == "image_url":
+                continue
+            if key == "image_filename":
+                stripped[key] = None
+                continue
+            stripped[key] = _strip_image_fields(item)
+        return stripped
+    return value
+
+
+def _merge_items_by_id(current_items: list[dict[str, Any]], imported_items: list[dict[str, Any]], label: str) -> tuple[list[dict[str, Any]], int, int]:
+    if not isinstance(imported_items, list):
+        raise ValueError(f"{label} must be a JSON array.")
+    merged = [dict(item) for item in current_items if isinstance(item, dict)]
+    positions = {str(item.get("id")): index for index, item in enumerate(merged) if item.get("id")}
+    created = 0
+    updated = 0
+    for raw_item in imported_items:
+        if not isinstance(raw_item, dict):
+            raise ValueError(f"Each {label} item must be an object.")
+        item = _strip_image_fields(raw_item)
+        item_id = str(item.get("id") or "").strip()
+        if not item_id:
+            raise ValueError(f"Each {label} item requires an id.")
+        item["id"] = item_id
+        if item_id in positions:
+            merged[positions[item_id]] = item
+            updated += 1
+        else:
+            positions[item_id] = len(merged)
+            merged.append(item)
+            created += 1
+    return merged, created, updated
+
+
 def _read_content() -> dict[str, Any]:
     _ensure_content()
     with CONTENT_JSON_PATH.open("r", encoding="utf-8") as handle:
@@ -422,6 +463,79 @@ def get_content_state() -> dict[str, Any]:
         "poulpita_panel": _poulpita_panel_with_urls(content.get("poulpita_panel") or _default_poulpita_panel()),
         "cards": _generated_cards(content),
     }
+
+
+def export_admin_content_package(*, maps: list[dict[str, Any]]) -> dict[str, Any]:
+    content = _read_content()
+    return {
+        "schema": "maviedepoulpe.admin-content.v1",
+        "maps": maps,
+        "content": _strip_image_fields(
+            {
+                "categories": content.get("categories", []),
+                "interactions": content.get("interactions", []),
+                "events": content.get("events", []),
+                "tiles": content.get("tiles", []),
+                "levels": content.get("levels", []),
+                "player_boards": content.get("player_boards", []),
+                "tokens": content.get("tokens", []),
+                "poulpita_panel": content.get("poulpita_panel") or _default_poulpita_panel(),
+            }
+        ),
+    }
+
+
+def import_admin_content_package(package: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(package, dict):
+        raise ValueError("Import file must contain a JSON object.")
+    imported_content = package.get("content")
+    if imported_content is None:
+        imported_content = {key: package.get(key) for key in ["categories", "interactions", "events", "tiles", "levels", "player_boards", "tokens", "poulpita_panel"] if key in package}
+    if not isinstance(imported_content, dict):
+        raise ValueError("content must be a JSON object.")
+
+    content = _read_content()
+    summary = {"created": {}, "updated": {}}
+    for key in ["categories", "interactions", "events", "tiles", "levels", "player_boards", "tokens"]:
+        if key not in imported_content:
+            continue
+        merged, created, updated = _merge_items_by_id(content.get(key) or [], imported_content.get(key) or [], key)
+        content[key] = merged
+        summary["created"][key] = created
+        summary["updated"][key] = updated
+    if "poulpita_panel" in imported_content:
+        panel = _strip_image_fields(imported_content.get("poulpita_panel") or {})
+        if not isinstance(panel, dict):
+            raise ValueError("poulpita_panel must be a JSON object.")
+        content["poulpita_panel"] = _normalize_poulpita_panel(panel)
+        summary["updated"]["poulpita_panel"] = 1
+    _write_content(_read_content_from_value(content))
+    return summary
+
+
+def _read_content_from_value(content: dict[str, Any]) -> dict[str, Any]:
+    content = dict(content)
+    content.setdefault("categories", [])
+    content.setdefault("interactions", [])
+    content.setdefault("events", [])
+    content.setdefault("tiles", [])
+    content.setdefault("levels", [])
+    content["player_boards"] = _normalize_player_boards(content.get("player_boards") or [])
+    content["tokens"] = _normalize_tokens(content.get("tokens") or [])
+    content["poulpita_panel"] = _normalize_poulpita_panel(content.get("poulpita_panel") or {})
+    for category in content["categories"]:
+        category["compulsory_on_same_node"] = bool(category.get("compulsory_on_same_node") or False)
+    for tile in content["tiles"]:
+        tile["priority"] = int(tile.get("priority") or 0)
+        tile.setdefault("interaction_ids", [])
+        tile.setdefault("counter_attack_interaction_ids", [])
+        tile.setdefault("success_effects", [])
+        tile.setdefault("counter_attack_effects", [])
+        tile.setdefault("failure_effects", [])
+    for level in content["levels"]:
+        level["objectives"] = _normalize_level_objectives(level.get("objectives") or [])
+        level["starting_energy"] = max(0, min(32, int(level.get("starting_energy") or 3)))
+    return content
 
 
 def get_player_board_configs() -> list[dict[str, Any]]:

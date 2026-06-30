@@ -121,6 +121,7 @@ const AdminContentPage = () => {
   const tokenImageRefs = useRef({});
   const surpriseCardImageRef = useRef(null);
   const poulpitaPanelImageRef = useRef(null);
+  const importFileRef = useRef(null);
 
   const categoriesById = useMemo(() => Object.fromEntries(content.categories.map((category) => [category.id, category])), [content.categories]);
   const eventsById = useMemo(() => Object.fromEntries(content.events.map((event) => [event.id, event])), [content.events]);
@@ -135,6 +136,54 @@ const AdminContentPage = () => {
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.detail || "Admin content request failed.");
     return payload;
+  };
+
+  const exportContentPackage = async () => {
+    if (!token) return;
+    setBusy(true);
+    setError("");
+    try {
+      const response = await fetch(buildApiUrl("/api/admin/content/package"), {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.detail || "Failed to export content.");
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `maviedepoulpe-admin-content-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (exportError) {
+      setError(exportError.message || "Failed to export content.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const importContentPackage = async (file) => {
+    if (!file) return;
+    setBusy(true);
+    setError("");
+    try {
+      const payload = JSON.parse(await file.text());
+      await request("/api/admin/content/package/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      await loadContent();
+    } catch (importError) {
+      setError(importError.message || "Failed to import content.");
+    } finally {
+      setBusy(false);
+      if (importFileRef.current) importFileRef.current.value = "";
+    }
   };
 
   const loadContent = async () => {
@@ -537,8 +586,26 @@ const AdminContentPage = () => {
     <div className="-m-4 min-h-screen bg-gradient-to-b from-cyan-50 via-teal-50 to-white p-4 text-slate-800">
       <PageSubnavigation items={adminSubnavItems} />
       <div className="mb-5">
-        <h1 className="text-2xl font-semibold text-teal-950">Game Content</h1>
-        <p className="mt-1 text-sm text-teal-800">Design interaction symbols, event tiles, counter-attacks, effects, and generated cards.</p>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h1 className="text-2xl font-semibold text-teal-950">Game Content</h1>
+            <p className="mt-1 text-sm text-teal-800">Design interaction symbols, event tiles, counter-attacks, effects, and generated cards.</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button className={subtleButton} disabled={busy} onClick={exportContentPackage} type="button">Export JSON</button>
+            <label className={`${subtleButton} cursor-pointer ${busy ? "opacity-60" : ""}`}>
+              Import JSON
+              <input
+                ref={importFileRef}
+                className="hidden"
+                disabled={busy}
+                type="file"
+                accept="application/json,.json"
+                onChange={(event) => void importContentPackage(event.target.files?.[0] || null)}
+              />
+            </label>
+          </div>
+        </div>
       </div>
 
       {error ? <p className="mb-4 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</p> : null}
