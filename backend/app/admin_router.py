@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -19,7 +20,9 @@ from .game_content_service import (
     delete_interaction,
     delete_level,
     delete_tile,
+    export_admin_content_package,
     get_content_state,
+    import_admin_content_package,
     save_level,
     save_tile,
     save_player_board,
@@ -29,7 +32,7 @@ from .game_content_service import (
     update_event,
     update_interaction,
 )
-from .map_service import create_map, delete_map, get_map, list_maps, update_map
+from .map_service import create_map, delete_map, export_maps_data, get_map, import_maps_data, list_maps, update_map
 from .runtime_state import get_presence_service
 from .schemas import (
     AdminAuditLogEntry,
@@ -338,6 +341,28 @@ async def admin_delete_map(map_id: str, _admin: User = Depends(require_admin)):
 @router.get("/admin/content")
 async def admin_get_content(_admin: User = Depends(require_admin)):
     return get_content_state()
+
+
+@router.get("/admin/content/package")
+async def admin_export_content_package(_admin: User = Depends(require_admin)):
+    payload = export_admin_content_package(maps=export_maps_data())
+    return JSONResponse(
+        content=payload,
+        headers={"Content-Disposition": 'attachment; filename="maviedepoulpe-admin-content.json"'},
+    )
+
+
+@router.post("/admin/content/package/import")
+async def admin_import_content_package(
+    payload: dict = Body(...),
+    _admin: User = Depends(require_admin),
+):
+    try:
+        maps_summary = import_maps_data(payload.get("maps") or [])
+        content_summary = import_admin_content_package(payload)
+        return {"status": "imported", "maps": maps_summary, "content": content_summary}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/admin/content/categories")

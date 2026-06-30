@@ -1,6 +1,7 @@
 import asyncio
 
 from backend.app import game_content_service as service
+from backend.app import map_service
 
 
 def run(coro):
@@ -226,3 +227,85 @@ def test_categories_can_be_compulsory_and_tiles_have_priority(tmp_path, monkeypa
     assert catalog["categories"][category["id"]]["compulsory_on_same_node"] is True
     assert tile["priority"] == 7
     assert catalog["tiles"][tile["id"]]["priority"] == 7
+
+
+def test_admin_content_package_exports_without_images_and_imports_by_id(tmp_path, monkeypatch):
+    content_root = tmp_path / "content"
+    maps_root = tmp_path / "maps"
+    monkeypatch.setattr(service, "CONTENT_ROOT", content_root)
+    monkeypatch.setattr(service, "CONTENT_IMAGES_ROOT", content_root / "images")
+    monkeypatch.setattr(service, "CONTENT_JSON_PATH", content_root / "content.json")
+    monkeypatch.setattr(map_service, "MAPS_ROOT", maps_root)
+    monkeypatch.setattr(service, "get_map", lambda map_id: map_service.get_map(map_id))
+
+    map_service.save_map_data(
+        map_id="reef",
+        name="Old reef",
+        nodes={"N1": {"x": 0.1, "y": 0.2, "tier": 1}},
+        adjacency={"N1": []},
+        image_filename="board.png",
+        image_width=1200,
+        image_height=800,
+        starting_node_id="N1",
+    )
+    service._write_content(
+        {
+            "categories": [{"id": "prey", "name": "Prey", "image_filename": "ignored.png"}],
+            "interactions": [{"id": "charge", "name": "Charge", "image_filename": "charge.png"}],
+            "events": [{"id": "crab", "name": "Crab", "category_id": "prey", "image_filename": "crab.png"}],
+            "tiles": [{"id": "crab-tile", "name": "Crab tile", "event_id": "crab", "interaction_ids": ["charge"]}],
+            "levels": [],
+            "player_boards": [],
+        }
+    )
+
+    exported = service.export_admin_content_package(maps=map_service.export_maps_data())
+
+    assert exported["maps"][0]["image_filename"] is None
+    assert "image_url" not in exported["maps"][0]
+    assert exported["content"]["interactions"][0]["image_filename"] is None
+    assert exported["content"]["events"][0]["image_filename"] is None
+
+    imported = {
+        "maps": [
+            {
+                "id": "reef",
+                "name": "Imported reef",
+                "nodes": {"N1": {"x": 0.3, "y": 0.4, "tier": 1}},
+                "adjacency": {"N1": []},
+                "starting_node_id": "N1",
+                "image_filename": "must-not-import.png",
+                "image_width": 640,
+                "image_height": 480,
+            },
+            {
+                "id": "lagoon",
+                "name": "Lagoon",
+                "nodes": {"A": {"x": 0.5, "y": 0.5, "tier": 1}},
+                "adjacency": {"A": []},
+                "starting_node_id": "A",
+            },
+        ],
+        "content": {
+            "categories": [{"id": "prey", "name": "Updated prey"}, {"id": "threat", "name": "Threat"}],
+            "interactions": [{"id": "charge", "name": "Updated charge", "image_filename": "must-not-import.png"}],
+            "events": [{"id": "crab", "name": "Updated crab", "category_id": "prey", "image_filename": "must-not-import.png"}],
+            "tiles": [{"id": "crab-tile", "name": "Updated tile", "event_id": "crab", "interaction_ids": ["charge"]}],
+        },
+    }
+
+    map_summary = map_service.import_maps_data(imported["maps"])
+    content_summary = service.import_admin_content_package(imported)
+    state = service.get_content_state()
+    reef = map_service.get_map("reef")
+
+    assert map_summary == {"created": 1, "updated": 1}
+    assert content_summary["created"]["categories"] == 1
+    assert content_summary["updated"]["categories"] == 1
+    assert reef["name"] == "Imported reef"
+    assert reef["image_filename"] is None
+    assert reef["image_url"] is None
+    assert map_service.get_map("lagoon")["name"] == "Lagoon"
+    assert {category["id"]: category["name"] for category in state["categories"]}["prey"] == "Updated prey"
+    assert state["interactions"][0]["image_filename"] is None
+    assert state["events"][0]["image_filename"] is None
