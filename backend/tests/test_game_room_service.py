@@ -663,7 +663,7 @@ def test_compulsory_same_node_interactions_follow_highest_priority_first():
             "tiles": {
                 "shark-high": {"id": "shark-high", "event_id": "shark", "priority": 9, "interaction_ids": ["hide"]},
                 "shark-low": {"id": "shark-low", "event_id": "shark", "priority": 4, "interaction_ids": ["hide"]},
-                "crab-tile": {"id": "crab-tile", "event_id": "crab", "priority": 99, "interaction_ids": ["hide"]},
+                "crab-tile": {"id": "crab-tile", "event_id": "crab", "priority": 3, "interaction_ids": ["hide"]},
             },
             "events": {
                 "shark": {"id": "shark", "category_id": "threat"},
@@ -713,6 +713,128 @@ def test_compulsory_same_node_interactions_follow_highest_priority_first():
         assert rejected_optional["reason"] == "compulsory_interaction_first"
         assert accepted_high["ok"] is True
         assert accepted_high["projection"]["interaction"]["tile_instance_id"] == "tile_shark_high"
+
+    run(scenario())
+
+
+def test_higher_priority_optional_interaction_can_precede_lower_compulsory_interaction():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = DEFAULT_ACTIVE_CAPABILITY_ID
+        state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["initiates_event_ids"] = ["shark", "crab"]
+        state["tile_catalog"] = {
+            "categories": {
+                "threat": {"id": "threat", "name": "Threat", "compulsory_on_same_node": True},
+                "prey": {"id": "prey", "name": "Prey", "compulsory_on_same_node": False},
+            },
+            "tiles": {
+                "shark-low": {"id": "shark-low", "event_id": "shark", "priority": 4, "interaction_ids": []},
+                "crab-high": {"id": "crab-high", "event_id": "crab", "priority": 9, "interaction_ids": []},
+            },
+            "events": {
+                "shark": {"id": "shark", "category_id": "threat"},
+                "crab": {"id": "crab", "category_id": "prey"},
+            },
+            "interactions": {},
+        }
+        state["tiles"] = {
+            "1A": [
+                {"instance_id": "tile_shark_low", "tile_id": "shark-low", "face_up": True},
+                {"instance_id": "tile_crab_high", "tile_id": "crab-high", "face_up": True},
+            ]
+        }
+
+        accepted_optional = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_start_optional_high",
+            expected_version=1,
+            command_type="start_interaction",
+            payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID, "tile_instance_id": "tile_crab_high"},
+        )
+        failed_optional = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_fail_optional_high",
+            expected_version=2,
+            command_type="fail_interaction",
+        )
+        accepted_compulsory = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_start_compulsory_low",
+            expected_version=3,
+            command_type="start_interaction",
+            payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID, "tile_instance_id": "tile_shark_low"},
+        )
+
+        assert accepted_optional["ok"] is True
+        assert accepted_optional["projection"]["interaction"]["tile_instance_id"] == "tile_crab_high"
+        assert failed_optional["ok"] is True
+        assert accepted_compulsory["ok"] is True
+        assert accepted_compulsory["projection"]["interaction"]["tile_instance_id"] == "tile_shark_low"
+
+    run(scenario())
+
+
+def test_latest_tile_priority_metadata_allows_high_priority_optional_interaction(monkeypatch):
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = DEFAULT_ACTIVE_CAPABILITY_ID
+        state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["initiates_event_ids"] = ["shark", "surprise"]
+        state["tile_catalog"] = {
+            "categories": {
+                "threat": {"id": "threat", "name": "Threat", "compulsory_on_same_node": True},
+                "exploration": {"id": "exploration", "name": "Exploration", "compulsory_on_same_node": False},
+            },
+            "tiles": {
+                "shark-low": {"id": "shark-low", "event_id": "shark", "priority": 4, "interaction_ids": []},
+                "surprise-high": {"id": "surprise-high", "event_id": "surprise", "priority": 0, "interaction_ids": []},
+            },
+            "events": {
+                "shark": {"id": "shark", "category_id": "threat"},
+                "surprise": {"id": "surprise", "category_id": "exploration"},
+            },
+            "interactions": {},
+        }
+        state["tiles"] = {
+            "1A": [
+                {"instance_id": "tile_shark_low", "tile_id": "shark-low", "face_up": True},
+                {"instance_id": "tile_surprise_high", "tile_id": "surprise-high", "face_up": True},
+            ]
+        }
+        monkeypatch.setattr(
+            "backend.app.game_room_service.get_game_content_catalog",
+            lambda: {
+                "categories": state["tile_catalog"]["categories"],
+                "tiles": {
+                    "shark-low": {"id": "shark-low", "event_id": "shark", "priority": 4, "interaction_ids": []},
+                    "surprise-high": {"id": "surprise-high", "event_id": "surprise", "priority": 100, "interaction_ids": []},
+                },
+                "events": state["tile_catalog"]["events"],
+                "interactions": {},
+            },
+        )
+
+        accepted = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_start_latest_optional_high",
+            expected_version=1,
+            command_type="start_interaction",
+            payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID, "tile_instance_id": "tile_surprise_high"},
+        )
+
+        assert accepted["ok"] is True
+        assert accepted["projection"]["interaction"]["tile_instance_id"] == "tile_surprise_high"
 
     run(scenario())
 
@@ -973,6 +1095,191 @@ def test_day_shell_transfer_secures_shelter_and_completes_objective():
         assert third["projection"]["objectives"][0]["completed"] is True
         assert third["projection"]["phase"] == "game_over"
         assert service._memory_results[room["id"]]["outcome"] == "won"
+
+    run(scenario())
+
+
+def test_success_reward_draws_and_resolves_surprise_card_with_card_cost():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = DEFAULT_ACTIVE_CAPABILITY_ID
+        state["tile_catalog"] = {
+            "tiles": {
+                "surprise-tile": {
+                    "id": "surprise-tile",
+                    "event_id": "crab",
+                    "interaction_ids": ["charge"],
+                    "success_effects": [{"type": "draw_surprise_card", "amount": None}],
+                    "counter_attack_effects": [],
+                    "failure_effects": [],
+                }
+            },
+            "events": {"crab": {"id": "crab", "category_id": "prey"}},
+            "interactions": {"charge": {"id": "charge", "name": "Charge"}},
+            "surprise_cards": {
+                "surprise-1": {
+                    "id": "surprise-1",
+                    "name": "Spark",
+                    "costs": [{"type": "play_cards", "interaction_ids": ["charge"]}],
+                    "effects": [{"type": "gain_neurons", "amount": 2}],
+                }
+            },
+        }
+        state["surprise_draw_pile"] = ["surprise-1"]
+        state["tiles"] = {"1A": [{"instance_id": "tile_surprise", "tile_id": "surprise-tile", "face_up": True}]}
+        state["interaction"] = {
+            "tile_instance_id": "tile_surprise",
+            "tile_id": "surprise-tile",
+            "node_id": "1A",
+            "played_cards": [{"card_id": "card_charge_played", "interaction_id": "charge", "capability_id": DEFAULT_ACTIVE_CAPABILITY_ID}],
+        }
+        state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["hand"] = [
+            {"card_id": "card_charge_cost", "interaction_id": "charge", "owner_capability_id": DEFAULT_ACTIVE_CAPABILITY_ID}
+        ]
+
+        resolved_interaction = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_resolve_surprise_tile",
+            expected_version=1,
+            command_type="resolve_interaction",
+        )
+        resolved_surprise = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_resolve_surprise_card",
+            expected_version=2,
+            command_type="resolve_surprise_card",
+            payload={"accept": True, "capability_id": DEFAULT_ACTIVE_CAPABILITY_ID, "card_ids": ["card_charge_cost"]},
+        )
+
+        assert resolved_interaction["ok"] is True
+        assert resolved_interaction["projection"]["pending_surprise"]["card"]["id"] == "surprise-1"
+        assert resolved_surprise["ok"] is True
+        assert resolved_surprise["projection"]["pending_surprise"] is None
+        assert resolved_surprise["projection"]["poulpita"]["neurons"] == 2
+        assert resolved_surprise["projection"]["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["hand"] == []
+
+    run(scenario())
+
+
+def test_free_surprise_tile_refreshes_stale_empty_deck_and_opens_pending_card(monkeypatch):
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        level_with_surprises = {**TEST_LEVEL, "surprise_deck_id": "deck-1"}
+        monkeypatch.setattr("backend.app.game_room_service.get_level_config", lambda level_id=None: level_with_surprises)
+        monkeypatch.setattr("backend.app.game_room_service.random.shuffle", lambda cards: None)
+        monkeypatch.setattr(
+            "backend.app.game_room_service.get_game_content_catalog",
+            lambda: {
+                "tiles": {},
+                "events": {},
+                "interactions": {},
+                "surprise_cards": {
+                    "surprise-1": {
+                        "id": "surprise-1",
+                        "name": "Message in a Shell",
+                        "costs": [],
+                        "effects": [{"type": "gain_neurons", "amount": 1}],
+                    }
+                },
+                "surprise_decks": {"deck-1": {"id": "deck-1", "name": "Deck", "card_ids": ["surprise-1"]}},
+            },
+        )
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = DEFAULT_ACTIVE_CAPABILITY_ID
+        state["level_id"] = "test-level"
+        state["surprise_deck_id"] = "deck-1"
+        state["surprise_draw_pile"] = []
+        state["surprise_deck_initialized"] = True
+        state["surprise_deck_exhausted"] = True
+        state["surprise_deck_card_count"] = 0
+        state["tile_catalog"] = {
+            "tiles": {
+                "surprise-tile": {
+                    "id": "surprise-tile",
+                    "event_id": "crab",
+                    "interaction_ids": [],
+                    "success_effects": [{"type": "draw_surprise_card", "amount": None}],
+                    "counter_attack_effects": [],
+                    "failure_effects": [],
+                }
+            },
+            "events": {"crab": {"id": "crab", "category_id": "prey"}},
+            "interactions": {},
+            "surprise_cards": {},
+            "surprise_decks": {},
+        }
+        state["tiles"] = {"1A": [{"instance_id": "tile_surprise", "tile_id": "surprise-tile", "face_up": True}]}
+        state["interaction"] = {
+            "tile_instance_id": "tile_surprise",
+            "tile_id": "surprise-tile",
+            "node_id": "1A",
+            "played_cards": [],
+        }
+
+        result = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_resolve_free_surprise_tile",
+            expected_version=1,
+            command_type="resolve_interaction",
+        )
+
+        assert result["ok"] is True
+        assert result["projection"]["tiles"]["1A"] == []
+        assert result["projection"]["pending_surprise"]["card"]["id"] == "surprise-1"
+
+    run(scenario())
+
+
+def test_tile_with_no_required_interactions_resolves_successfully():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = DEFAULT_ACTIVE_CAPABILITY_ID
+        state["tile_catalog"] = {
+            "tiles": {
+                "free-tile": {
+                    "id": "free-tile",
+                    "event_id": "crab",
+                    "interaction_ids": [],
+                    "success_effects": [{"type": "gain_neurons", "amount": 1}],
+                    "counter_attack_effects": [],
+                    "failure_effects": [],
+                }
+            },
+            "events": {"crab": {"id": "crab", "category_id": "prey"}},
+            "interactions": {},
+        }
+        state["tiles"] = {"1A": [{"instance_id": "tile_free", "tile_id": "free-tile", "face_up": True}]}
+        state["interaction"] = {
+            "tile_instance_id": "tile_free",
+            "tile_id": "free-tile",
+            "node_id": "1A",
+            "played_cards": [],
+        }
+
+        result = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_resolve_free_tile",
+            expected_version=1,
+            command_type="resolve_interaction",
+        )
+
+        assert result["ok"] is True
+        assert result["events"][0]["type"] == "interaction_resolved"
+        assert result["projection"]["poulpita"]["neurons"] == 1
+        assert result["projection"]["tiles"]["1A"] == []
 
     run(scenario())
 

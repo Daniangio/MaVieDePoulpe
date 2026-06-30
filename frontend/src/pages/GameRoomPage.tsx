@@ -812,6 +812,101 @@ const InteractionPanel = ({
   );
 };
 
+const SurpriseCardPanel = ({
+  onResolve,
+  onSkip,
+  onToggleCard,
+  pending,
+  projection,
+  selectedCapability,
+  selectedCardIds,
+}: {
+  onResolve: () => void;
+  onSkip: () => void;
+  onToggleCard: (cardId: string) => void;
+  pending: boolean;
+  projection: GameProjection;
+  selectedCapability: CapabilityProjection | null;
+  selectedCardIds: string[];
+}) => {
+  const surprise = projection.pending_surprise;
+  const card = surprise?.card;
+  if (!card) return null;
+  const selectedCards = (selectedCapability?.hand || []).filter((handCard) => selectedCardIds.includes(handCard.card_id));
+  const costs = card.costs || [];
+  const hasCost = costs.length > 0;
+  const image = contentImageUrl(card);
+  const interactionNames = projection.tile_catalog?.interactions || {};
+  const categoryNames = projection.tile_catalog?.categories || {};
+  return (
+    <div className="absolute inset-4 z-50 flex items-center justify-center rounded-lg bg-slate-950/55">
+      <div className="grid max-h-full w-[min(50rem,100%)] grid-cols-[14rem_1fr] gap-4 overflow-auto rounded-lg border border-cyan-300 bg-slate-900 p-4 shadow-2xl">
+        <div>
+          <h2 className="text-lg font-semibold text-white">Surprise card</h2>
+          <p className="mt-1 text-sm text-cyan-100">{card.name}</p>
+          {image ? <img alt="" className="mt-3 w-full rounded-md border border-slate-700 object-contain" src={image} /> : null}
+        </div>
+        <div className="space-y-3">
+          <div className="rounded border border-slate-700 bg-slate-950 p-3 text-xs text-slate-200">
+            <h3 className="font-semibold text-white">{hasCost ? "Optional cost" : "Automatic effect"}</h3>
+            <div className="mt-2 space-y-1">
+              {costs.map((cost: any, index: number) => (
+                <p key={index}>
+                  {cost.type === "play_cards"
+                    ? `Play ${cost.interaction_ids?.map((id: string) => interactionNames[id]?.name || id).join(", ")}`
+                    : `Pay ${cost.amount || 1} AP${cost.capability_id ? ` from ${projection.capabilities?.[cost.capability_id]?.name || cost.capability_id}` : ""}`}
+                </p>
+              ))}
+              {!hasCost ? <p>Resolve to apply the effects.</p> : null}
+            </div>
+          </div>
+          <div className="rounded border border-slate-700 bg-slate-950 p-3 text-xs text-slate-200">
+            <h3 className="font-semibold text-white">Effects</h3>
+            <div className="mt-2 space-y-1">
+              {(card.effects || []).map((effect: any, index: number) => (
+                <p key={index}>
+                  {effect.type === "gain_ap" ? `Gain ${effect.amount} AP on ${projection.capabilities?.[effect.capability_id]?.name || effect.capability_id}` : null}
+                  {effect.type === "gain_neurons" ? `Gain ${effect.amount} neurons` : null}
+                  {effect.type === "advance_night" ? `Advance night by ${effect.amount} steps` : null}
+                  {effect.type === "gain_energy" ? `Gain ${effect.amount} energy` : null}
+                  {effect.type === "lose_energy" ? `Lose ${effect.amount} energy` : null}
+                  {effect.type === "remove_tiles_category_here" ? `Remove ${categoryNames[effect.category_id]?.name || effect.category_id} tiles here` : null}
+                  {effect.type === "remove_tiles_category_adjacent" ? `Remove ${categoryNames[effect.category_id]?.name || effect.category_id} tiles from adjacent nodes` : null}
+                </p>
+              ))}
+            </div>
+          </div>
+          {hasCost ? (
+            <div>
+              <h3 className="text-sm font-semibold text-white">Focused hand</h3>
+              <div className="mt-2 flex flex-wrap gap-2 rounded border border-dashed border-slate-700 bg-slate-950 p-2">
+                {(selectedCapability?.hand || []).map((handCard) => (
+                  <CardButton
+                    card={handCard}
+                    disabled={pending}
+                    key={handCard.card_id}
+                    onClick={() => onToggleCard(handCard.card_id)}
+                    projection={projection}
+                    selected={selectedCardIds.includes(handCard.card_id)}
+                  />
+                ))}
+                {(selectedCapability?.hand || []).length === 0 ? <p className="m-auto text-sm text-slate-500">No cards in focused hand.</p> : null}
+              </div>
+              {selectedCards.length ? <p className="mt-1 text-xs text-cyan-100">{selectedCards.length} selected.</p> : null}
+            </div>
+          ) : null}
+          <div className="flex flex-wrap justify-end gap-2">
+            {hasCost ? <button className="rounded border border-slate-600 px-3 py-2 text-sm text-slate-100 hover:bg-slate-800 disabled:opacity-50" disabled={pending} onClick={onSkip} type="button">Do not pay</button> : null}
+            <button className="rounded bg-teal-400 px-3 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-300 disabled:opacity-50" disabled={pending} onClick={onResolve} type="button">
+              {hasCost ? "Pay and resolve" : "Resolve"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const GameRoomPage = () => {
   const { roomId } = useParams();
   const { token, user } = useStore();
@@ -826,6 +921,7 @@ const GameRoomPage = () => {
   const [pending, setPending] = useState(false);
   const [selectedTileInstanceId, setSelectedTileInstanceId] = useState<string | null>(null);
   const [selectedCardIds, setSelectedCardIds] = useState<string[]>([]);
+  const [surpriseSelectedCardIds, setSurpriseSelectedCardIds] = useState<string[]>([]);
   const [discardBeforeDraw, setDiscardBeforeDraw] = useState(false);
   const [failMoveTargetNodeId, setFailMoveTargetNodeId] = useState("");
   const [interactionPanelState, setInteractionPanelState] = useState<"open" | "success" | "failure" | "closing">("open");
@@ -895,6 +991,10 @@ const GameRoomPage = () => {
     setSelectedCardIds(activePlayedCardIds);
     setFailMoveTargetNodeId("");
   }, [projection?.active_capability_id, projection?.interaction?.tile_instance_id, projection?.version]);
+
+  useEffect(() => {
+    if (!projection?.pending_surprise) setSurpriseSelectedCardIds([]);
+  }, [projection?.pending_surprise?.card?.id]);
 
   const latestEvent = useMemo(() => {
     const events = projection?.events || [];
@@ -1137,6 +1237,22 @@ const GameRoomPage = () => {
     setSelectedCardIds((cardIds) => cardIds.includes(cardId) ? cardIds.filter((id) => id !== cardId) : [...cardIds, cardId]);
   };
 
+  const toggleSurpriseCard = (cardId: string) => {
+    setSurpriseSelectedCardIds((current) => (current.includes(cardId) ? current.filter((id) => id !== cardId) : [...current, cardId]));
+  };
+
+  const resolveSurpriseCard = () => {
+    void submitCommand("resolve_surprise_card", {
+      accept: true,
+      capability_id: selectedCapabilityId,
+      card_ids: surpriseSelectedCardIds,
+    });
+  };
+
+  const skipSurpriseCard = () => {
+    void submitCommand("resolve_surprise_card", { accept: false });
+  };
+
   const closeInteractionPanel = () => {
     setInteractionPanelState("closing");
     window.setTimeout(() => {
@@ -1320,6 +1436,15 @@ const GameRoomPage = () => {
                 selectedCapability={selectedCapability}
                 selectedTileInstanceId={selectedTileInstanceId}
                 visualState={interactionPanelState}
+              />
+              <SurpriseCardPanel
+                onResolve={resolveSurpriseCard}
+                onSkip={skipSurpriseCard}
+                onToggleCard={toggleSurpriseCard}
+                pending={pending}
+                projection={projection}
+                selectedCapability={selectedCapability}
+                selectedCardIds={surpriseSelectedCardIds}
               />
             </>
           ) : (

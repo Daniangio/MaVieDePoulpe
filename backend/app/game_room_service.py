@@ -280,6 +280,8 @@ def _build_tile_catalog() -> dict[str, Any]:
         "events": catalog["events"],
         "interactions": catalog["interactions"],
         "cards": cards,
+        "surprise_cards": catalog.get("surprise_cards") or {},
+        "surprise_decks": catalog.get("surprise_decks") or {},
         "card_categories": catalog.get("card_categories") or [],
         "tokens": catalog.get("tokens") or {},
         "poulpita_panel": catalog.get("poulpita_panel") or {},
@@ -339,6 +341,9 @@ def _goldfish_state(room_id: str, *, level_id: str | None = None) -> dict[str, A
     _validate_map_config(map_config)
     tile_catalog = _build_tile_catalog()
     starting_energy = max(0, min(32, int(level_config.get("starting_energy") or 3)))
+    surprise_deck_id = str(level_config.get("surprise_deck_id") or "")
+    surprise_draw_pile = list(((tile_catalog.get("surprise_decks") or {}).get(surprise_deck_id) or {}).get("card_ids") or [])
+    random.shuffle(surprise_draw_pile)
     state = {
         "room_id": room_id,
         "mode": "goldfish",
@@ -365,6 +370,12 @@ def _goldfish_state(room_id: str, *, level_id: str | None = None) -> dict[str, A
         "capabilities": _initial_capabilities(deal_hands=True),
         "tiles": _level_tiles(level_config, tile_catalog),
         "shelters": {},
+        "surprise_deck_id": surprise_deck_id,
+        "surprise_draw_pile": surprise_draw_pile,
+        "surprise_deck_initialized": True,
+        "surprise_deck_card_count": len(surprise_draw_pile),
+        "surprise_deck_exhausted": not bool(surprise_draw_pile),
+        "pending_surprise": None,
         "objectives": deepcopy(level_config.get("objectives") or []),
         "objective_progress": {"size_increases": 0, "found_shelter": False, "secured_shelter": False},
         "tile_catalog": tile_catalog,
@@ -389,9 +400,20 @@ def _project_state(state: dict[str, Any]) -> dict[str, Any]:
     tile_catalog = deepcopy(state.get("tile_catalog") or {})
     try:
         latest_catalog = get_game_content_catalog()
+        latest_tiles = latest_catalog.get("tiles") or {}
+        latest_events = latest_catalog.get("events") or {}
+        tile_catalog["tiles"] = {
+            tile_id: _tile_public(tile, {"events": latest_events})
+            for tile_id, tile in latest_tiles.items()
+        } or tile_catalog.get("tiles") or {}
         tile_catalog["categories"] = latest_catalog.get("categories") or tile_catalog.get("categories") or {}
+        tile_catalog["events"] = latest_events or tile_catalog.get("events") or {}
+        tile_catalog["interactions"] = latest_catalog.get("interactions") or tile_catalog.get("interactions") or {}
+        tile_catalog["cards"] = latest_catalog.get("cards") or tile_catalog.get("cards") or {}
         tile_catalog["tokens"] = latest_catalog.get("tokens") or tile_catalog.get("tokens") or {}
         tile_catalog["poulpita_panel"] = latest_catalog.get("poulpita_panel") or tile_catalog.get("poulpita_panel") or {}
+        tile_catalog["surprise_cards"] = latest_catalog.get("surprise_cards") or tile_catalog.get("surprise_cards") or {}
+        tile_catalog["surprise_decks"] = latest_catalog.get("surprise_decks") or tile_catalog.get("surprise_decks") or {}
     except Exception:
         pass
     projected_tiles = {}
@@ -435,6 +457,7 @@ def _project_state(state: dict[str, Any]) -> dict[str, Any]:
         "poulpita": deepcopy(state["poulpita"]),
         "tiles": projected_tiles,
         "shelters": _projected_shelters(state),
+        "pending_surprise": deepcopy(state.get("pending_surprise")),
         "objectives": _objective_status(state),
         "objective_progress": deepcopy(state.get("objective_progress") or {}),
         "tile_catalog": tile_catalog,
@@ -649,8 +672,7 @@ def _compulsory_tile_choices(state: dict[str, Any], node_id: str) -> list[dict[s
         if not tile_instance.get("face_up"):
             continue
         tile = catalog_tiles.get(tile_instance.get("tile_id")) or {}
-        event = tile.get("event") or catalog_events.get(tile.get("event_id")) or {}
-        category = catalog_categories.get(event.get("category_id")) or {}
+        category = _tile_category(state, tile)
         if not category.get("compulsory_on_same_node"):
             continue
         choices.append(
@@ -664,6 +686,12 @@ def _compulsory_tile_choices(state: dict[str, Any], node_id: str) -> list[dict[s
         return []
     highest_priority = max(choice["priority"] for choice in choices)
     return [choice for choice in choices if choice["priority"] == highest_priority]
+
+
+def _tile_category(state: dict[str, Any], tile: dict[str, Any]) -> dict[str, Any]:
+    catalog = state.get("tile_catalog") or {}
+    event = tile.get("event") or (catalog.get("events") or {}).get(tile.get("event_id")) or {}
+    return (catalog.get("categories") or {}).get(event.get("category_id")) or {}
 
 
 def _played_interactions(state: dict[str, Any]) -> list[str]:
@@ -726,6 +754,8 @@ def _apply_effects(next_state: dict[str, Any], effects: list[dict[str, Any]], *,
                 shelter["count"] = int(shelter.get("count") or 0) + 1
                 shelter["secure"] = int(shelter.get("seashells") or 0) >= 3
                 next_state.setdefault("objective_progress", {})["found_shelter"] = True
+        elif effect_type == "draw_surprise_card":
+            _draw_surprise_card(next_state)
 
 
 def _move_poulpita_without_ap(next_state: dict[str, Any], target_node_id: str) -> None:
@@ -756,6 +786,76 @@ def _remove_tiles_by_category(next_state: dict[str, Any], node_id: str, category
         if event.get("category_id") != category_id:
             kept_tiles.append(tile_instance)
     next_state["tiles"][node_id] = kept_tiles
+
+
+def _draw_surprise_card(next_state: dict[str, Any]) -> dict[str, Any] | None:
+    if next_state.get("pending_surprise"):
+        return None
+
+    def refresh_draw_pile() -> None:
+        try:
+            level_config = get_level_config(str(next_state.get("level_id") or ""))
+            surprise_deck_id = str(level_config.get("surprise_deck_id") or next_state.get("surprise_deck_id") or "")
+            latest_catalog = get_game_content_catalog()
+            draw_pile = list(((latest_catalog.get("surprise_decks") or {}).get(surprise_deck_id) or {}).get("card_ids") or [])
+            random.shuffle(draw_pile)
+            next_state["surprise_deck_id"] = surprise_deck_id
+            next_state["surprise_draw_pile"] = draw_pile
+            next_state["surprise_deck_initialized"] = True
+            next_state["surprise_deck_card_count"] = len(draw_pile)
+            next_state["surprise_deck_exhausted"] = not bool(draw_pile)
+            next_state.setdefault("tile_catalog", {})["surprise_cards"] = latest_catalog.get("surprise_cards") or next_state.get("tile_catalog", {}).get("surprise_cards") or {}
+            next_state.setdefault("tile_catalog", {})["surprise_decks"] = latest_catalog.get("surprise_decks") or next_state.get("tile_catalog", {}).get("surprise_decks") or {}
+        except Exception:
+            next_state["surprise_deck_initialized"] = True
+
+    if not next_state.get("surprise_deck_initialized"):
+        refresh_draw_pile()
+    draw_pile = next_state.setdefault("surprise_draw_pile", [])
+    deck_was_never_populated = int(next_state.get("surprise_deck_card_count") or 0) == 0
+    if not draw_pile and (not next_state.get("surprise_deck_exhausted") or deck_was_never_populated):
+        refresh_draw_pile()
+        draw_pile = next_state.setdefault("surprise_draw_pile", [])
+    if not draw_pile:
+        return None
+    card_id = str(draw_pile.pop(0))
+    if not draw_pile:
+        next_state["surprise_deck_exhausted"] = True
+    card = ((next_state.get("tile_catalog") or {}).get("surprise_cards") or {}).get(card_id)
+    if not card:
+        return None
+    pending = {"card": deepcopy(card), "selected_cards": [], "created_at": _now_iso()}
+    next_state["pending_surprise"] = pending
+    return pending
+
+
+def _apply_surprise_effects(next_state: dict[str, Any], effects: list[dict[str, Any]]) -> None:
+    current_node_id = str((next_state.get("poulpita") or {}).get("node_id") or "")
+    adjacency = (next_state.get("map") or {}).get("adjacency") or {}
+    for effect in effects or []:
+        effect_type = str(effect.get("type") or "")
+        amount = max(0, int(effect.get("amount") or 0))
+        if effect_type == "gain_ap":
+            capability_id = str(effect.get("capability_id") or "")
+            capability = (next_state.get("capabilities") or {}).get(capability_id)
+            if capability is not None:
+                capability["pa"] = int(capability.get("pa") or 0) + amount
+        elif effect_type == "gain_neurons":
+            next_state["poulpita"]["neurons"] = int(next_state["poulpita"].get("neurons") or 0) + amount
+        elif effect_type == "advance_night":
+            _advance_night_clock(next_state, chunks=amount)
+        elif effect_type == "gain_energy":
+            next_state["poulpita"]["energy"] = int(next_state["poulpita"].get("energy") or 0) + amount
+        elif effect_type == "lose_energy":
+            _damage_poulpita(next_state, amount=amount, reason="surprise_card")
+            if int((next_state.get("poulpita") or {}).get("energy") or 0) <= 0:
+                _mark_game_lost_if_needed(next_state, reason="poulpita_no_energy")
+        elif effect_type == "remove_tiles_category_here":
+            _remove_tiles_by_category(next_state, current_node_id, str(effect.get("category_id") or ""))
+        elif effect_type == "remove_tiles_category_adjacent":
+            for node_id in adjacency.get(current_node_id, []) or []:
+                _remove_tiles_by_category(next_state, str(node_id), str(effect.get("category_id") or ""))
+    _apply_tile_visibility(next_state)
 
 
 def _apply_failure_effects(
@@ -1039,9 +1139,20 @@ class GameRoomService:
         next_state = deepcopy(state)
         try:
             latest_catalog = get_game_content_catalog()
+            latest_tiles = latest_catalog.get("tiles") or {}
+            latest_events = latest_catalog.get("events") or {}
+            next_state.setdefault("tile_catalog", {})["tiles"] = {
+                tile_id: _tile_public(tile, {"events": latest_events})
+                for tile_id, tile in latest_tiles.items()
+            } or next_state["tile_catalog"].get("tiles") or {}
             next_state.setdefault("tile_catalog", {})["categories"] = latest_catalog.get("categories") or next_state["tile_catalog"].get("categories") or {}
+            next_state.setdefault("tile_catalog", {})["events"] = latest_events or next_state["tile_catalog"].get("events") or {}
+            next_state.setdefault("tile_catalog", {})["interactions"] = latest_catalog.get("interactions") or next_state["tile_catalog"].get("interactions") or {}
+            next_state.setdefault("tile_catalog", {})["cards"] = latest_catalog.get("cards") or next_state["tile_catalog"].get("cards") or {}
             next_state.setdefault("tile_catalog", {})["tokens"] = latest_catalog.get("tokens") or next_state["tile_catalog"].get("tokens") or {}
             next_state.setdefault("tile_catalog", {})["poulpita_panel"] = latest_catalog.get("poulpita_panel") or next_state["tile_catalog"].get("poulpita_panel") or {}
+            next_state.setdefault("tile_catalog", {})["surprise_cards"] = latest_catalog.get("surprise_cards") or next_state["tile_catalog"].get("surprise_cards") or {}
+            next_state.setdefault("tile_catalog", {})["surprise_decks"] = latest_catalog.get("surprise_decks") or next_state["tile_catalog"].get("surprise_decks") or {}
         except Exception:
             return state
         return next_state
@@ -1380,6 +1491,73 @@ class GameRoomService:
             next_state.setdefault("event_log", []).append(event)
             return next_state, [event]
 
+        if command_type == "resolve_surprise_card":
+            pending_surprise = state.get("pending_surprise")
+            if not pending_surprise:
+                self._reject(state, command_id, "no_pending_surprise", "No surprise card is waiting to be resolved.")
+            payload = command.get("payload") or {}
+            if payload and not isinstance(payload, dict):
+                self._reject(state, command_id, "invalid_payload", "Command payload must be an object.")
+            accept = bool(payload.get("accept"))
+            capability_id = str(payload.get("capability_id") or "")
+            selected_card_ids = [str(card_id) for card_id in (payload.get("card_ids") or [])]
+            card = pending_surprise.get("card") or {}
+            costs = card.get("costs") or []
+            next_state = deepcopy(state)
+            paid = False
+            if not costs:
+                paid = True
+            elif accept:
+                paid = True
+                for cost in costs:
+                    cost_type = str(cost.get("type") or "")
+                    if cost_type == "play_cards":
+                        capability = (next_state.get("capabilities") or {}).get(capability_id)
+                        if capability is None:
+                            self._reject(state, command_id, "unknown_capability", "Choose an ability to play cards.")
+                        remaining = list(cost.get("interaction_ids") or [])
+                        selected = set(selected_card_ids)
+                        next_hand = []
+                        played = []
+                        for hand_card in capability.get("hand") or []:
+                            if hand_card.get("card_id") in selected:
+                                if hand_card.get("interaction_id") in remaining:
+                                    remaining.remove(hand_card.get("interaction_id"))
+                                    played.append(hand_card)
+                                else:
+                                    next_hand.append(hand_card)
+                            else:
+                                next_hand.append(hand_card)
+                        if remaining:
+                            self._reject(state, command_id, "surprise_cost_not_paid", "Selected cards do not satisfy the surprise cost.")
+                        capability["hand"] = next_hand
+                        capability.setdefault("discard", []).extend(played)
+                    elif cost_type == "pay_ap":
+                        payer_id = str(cost.get("capability_id") or capability_id)
+                        capability = (next_state.get("capabilities") or {}).get(payer_id)
+                        amount = max(1, int(cost.get("amount") or 1))
+                        if capability is None:
+                            self._reject(state, command_id, "unknown_capability", "Unknown AP payer.")
+                        if int(capability.get("pa") or 0) < amount:
+                            self._reject(state, command_id, "insufficient_pa", "This surprise cost needs more AP.")
+                        capability["pa"] = int(capability.get("pa") or 0) - amount
+            if paid:
+                _apply_surprise_effects(next_state, card.get("effects") or [])
+            next_state["pending_surprise"] = None
+            next_state["version"] = int(state["version"]) + 1
+            _mark_game_won_if_needed(next_state)
+            event = {
+                "event_id": f"evt_{uuid.uuid4().hex}",
+                "type": "surprise_card_resolved" if paid else "surprise_card_skipped",
+                "command_id": command_id,
+                "surprise_card_id": card.get("id"),
+                "paid": paid,
+                "version": int(next_state["version"]),
+                "created_at": _now_iso(),
+            }
+            next_state.setdefault("event_log", []).append(event)
+            return next_state, [event]
+
         if command_type == "end_day":
             if state["phase"] != PHASE_DAY:
                 self._reject(state, command_id, "phase_not_day", "Day can be ended only during the day.")
@@ -1504,12 +1682,16 @@ class GameRoomService:
             compulsory_choices = _compulsory_tile_choices(state, str(node_id))
             if compulsory_choices and tile_instance_id not in {str(choice.get("instance_id")) for choice in compulsory_choices}:
                 highest_priority = max(int(choice.get("priority") or 0) for choice in compulsory_choices)
-                self._reject(
-                    state,
-                    command_id,
-                    "compulsory_interaction_first",
-                    f"A compulsory interaction with priority {highest_priority} must be resolved first.",
-                )
+                selected_category = _tile_category(state, tile)
+                selected_is_compulsory = bool(selected_category.get("compulsory_on_same_node"))
+                selected_priority = int(tile.get("priority") or 0)
+                if selected_is_compulsory or selected_priority <= highest_priority:
+                    self._reject(
+                        state,
+                        command_id,
+                        "compulsory_interaction_first",
+                        f"A compulsory interaction with priority {highest_priority} must be resolved first.",
+                    )
             capability = (state.get("capabilities") or {}).get(capability_id) or {}
             if tile.get("event_id") not in (capability.get("initiates_event_ids") or []):
                 self._reject(state, command_id, "cannot_initiate_interaction", "This ability cannot initiate interaction with this event.")
