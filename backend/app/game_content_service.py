@@ -66,6 +66,17 @@ TOKEN_TYPES = [
 ]
 POULPITA_PANEL_ZONE_IDS = {"neurons", "seashells"}
 SIZE_UNITS = {"mg", "g", "kg"}
+ADMIN_CONTENT_COLLECTION_KEYS = [
+    "categories",
+    "interactions",
+    "events",
+    "tiles",
+    "levels",
+    "surprise_cards",
+    "surprise_decks",
+    "player_boards",
+    "tokens",
+]
 
 
 def _slug(value: str) -> str:
@@ -472,13 +483,7 @@ def export_admin_content_package(*, maps: list[dict[str, Any]]) -> dict[str, Any
         "maps": maps,
         "content": _strip_image_fields(
             {
-                "categories": content.get("categories", []),
-                "interactions": content.get("interactions", []),
-                "events": content.get("events", []),
-                "tiles": content.get("tiles", []),
-                "levels": content.get("levels", []),
-                "player_boards": content.get("player_boards", []),
-                "tokens": content.get("tokens", []),
+                **{key: content.get(key, []) for key in ADMIN_CONTENT_COLLECTION_KEYS},
                 "poulpita_panel": content.get("poulpita_panel") or _default_poulpita_panel(),
             }
         ),
@@ -490,13 +495,17 @@ def import_admin_content_package(package: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Import file must contain a JSON object.")
     imported_content = package.get("content")
     if imported_content is None:
-        imported_content = {key: package.get(key) for key in ["categories", "interactions", "events", "tiles", "levels", "player_boards", "tokens", "poulpita_panel"] if key in package}
+        imported_content = {
+            key: package.get(key)
+            for key in [*ADMIN_CONTENT_COLLECTION_KEYS, "poulpita_panel"]
+            if key in package
+        }
     if not isinstance(imported_content, dict):
         raise ValueError("content must be a JSON object.")
 
     content = _read_content()
     summary = {"created": {}, "updated": {}}
-    for key in ["categories", "interactions", "events", "tiles", "levels", "player_boards", "tokens"]:
+    for key in ADMIN_CONTENT_COLLECTION_KEYS:
         if key not in imported_content:
             continue
         merged, created, updated = _merge_items_by_id(content.get(key) or [], imported_content.get(key) or [], key)
@@ -520,6 +529,8 @@ def _read_content_from_value(content: dict[str, Any]) -> dict[str, Any]:
     content.setdefault("events", [])
     content.setdefault("tiles", [])
     content.setdefault("levels", [])
+    content.setdefault("surprise_cards", [])
+    content.setdefault("surprise_decks", [])
     content["player_boards"] = _normalize_player_boards(content.get("player_boards") or [])
     content["tokens"] = _normalize_tokens(content.get("tokens") or [])
     content["poulpita_panel"] = _normalize_poulpita_panel(content.get("poulpita_panel") or {})
