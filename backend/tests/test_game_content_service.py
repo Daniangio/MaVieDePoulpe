@@ -253,6 +253,38 @@ def test_tile_can_have_no_required_interactions(tmp_path, monkeypatch):
 
     assert tile["interaction_ids"] == []
 
+
+def test_surprise_card_can_be_created_without_image(tmp_path, monkeypatch):
+    monkeypatch.setattr(service, "CONTENT_ROOT", tmp_path)
+    monkeypatch.setattr(service, "CONTENT_IMAGES_ROOT", tmp_path / "images")
+    monkeypatch.setattr(service, "CONTENT_JSON_PATH", tmp_path / "content.json")
+    service._write_content(
+        {
+            "categories": [{"id": "prey", "name": "Prey"}],
+            "interactions": [{"id": "charge", "name": "Charge", "image_filename": None}],
+            "events": [],
+            "tiles": [],
+            "levels": [],
+            "surprise_cards": [],
+            "surprise_decks": [],
+            "player_boards": [],
+        }
+    )
+
+    card = run(
+        service.save_surprise_card(
+            name="No image surprise",
+            costs=[{"type": "play_cards", "interaction_ids": ["charge"]}],
+            effects=[{"type": "gain_neurons", "amount": 1}],
+            image=None,
+        )
+    )
+
+    assert card["image_filename"] is None
+    assert card["image_url"] is None
+    assert service.get_content_state()["surprise_cards"][0]["name"] == "No image surprise"
+
+
 def test_admin_content_package_exports_without_images_and_imports_by_id(tmp_path, monkeypatch):
     content_root = tmp_path / "content"
     maps_root = tmp_path / "maps"

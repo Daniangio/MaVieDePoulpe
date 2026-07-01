@@ -771,8 +771,6 @@ async def save_surprise_card(
     if next_image:
         _delete_image(image_filename)
         image_filename = next_image
-    if not card_id and not image_filename:
-        raise ValueError("Upload a surprise card image.")
     card = {
         "id": card_id or f"{_slug(name)}-{uuid.uuid4().hex[:8]}",
         "name": _normalize_name(name),

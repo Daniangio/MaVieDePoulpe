@@ -364,7 +364,24 @@ async def admin_import_content_package(
     try:
         maps_summary = import_maps_data(payload.get("maps") or [])
         content_summary = import_admin_content_package(payload)
-        return {"status": "imported", "maps": maps_summary, "content": content_summary}
+        current_content = get_content_state()
+        return {
+            "status": "imported",
+            "maps": maps_summary,
+            "content": content_summary,
+            "counts": {
+                "maps": len(list_maps()),
+                "categories": len(current_content.get("categories") or []),
+                "interactions": len(current_content.get("interactions") or []),
+                "events": len(current_content.get("events") or []),
+                "tiles": len(current_content.get("tiles") or []),
+                "levels": len(current_content.get("levels") or []),
+                "surprise_cards": len(current_content.get("surprise_cards") or []),
+                "surprise_decks": len(current_content.get("surprise_decks") or []),
+                "player_boards": len(current_content.get("player_boards") or []),
+                "tokens": len(current_content.get("tokens") or []),
+            },
+        }
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
