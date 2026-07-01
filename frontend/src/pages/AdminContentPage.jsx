@@ -372,7 +372,6 @@ const AdminContentPage = () => {
     setError("");
     try {
       const file = surpriseCardImageRef.current?.files?.[0] || null;
-      if (!surpriseCardDraft.id && !file) throw new Error("Upload a surprise card image.");
       const form = new FormData();
       form.set("name", surpriseCardDraft.name);
       form.set("costs_json", JSON.stringify(surpriseCardDraft.costs || []));
@@ -1044,7 +1043,11 @@ const SurpriseCardEditor = ({
         {surpriseCards.map((card) => (
           <article className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3" key={card.id}>
             <div className="flex gap-3">
-              {imageUrl(card) ? <img alt="" className="h-20 w-14 rounded object-cover" src={imageUrl(card)} /> : null}
+              {imageUrl(card) ? (
+                <img alt="" className="h-20 w-14 rounded object-cover" src={imageUrl(card)} />
+              ) : (
+                <div className="flex h-20 w-14 shrink-0 items-center justify-center rounded border border-dashed border-cyan-300 bg-white text-[10px] font-semibold uppercase text-cyan-700">No image</div>
+              )}
               <div className="min-w-0 flex-1">
                 <h3 className="truncate text-sm font-semibold text-teal-950">{card.name}</h3>
                 <p className="text-xs text-slate-500">{(card.costs || []).length} costs - {(card.effects || []).length} effects</p>
@@ -1073,7 +1076,11 @@ const SurpriseDeckEditor = ({ busy, deleteItem, draft, onSetCardCount, reset, sa
         <div className="mt-3 space-y-2">
           {surpriseCards.map((card) => (
             <label className="flex items-center gap-2 rounded bg-cyan-50 p-2 text-sm" key={card.id}>
-              {imageUrl(card) ? <img alt="" className="h-10 w-7 rounded object-cover" src={imageUrl(card)} /> : null}
+              {imageUrl(card) ? (
+                <img alt="" className="h-10 w-7 rounded object-cover" src={imageUrl(card)} />
+              ) : (
+                <span className="flex h-10 w-7 shrink-0 items-center justify-center rounded border border-dashed border-cyan-300 bg-white text-[8px] font-semibold uppercase text-cyan-700">No img</span>
+              )}
               <span className="min-w-0 flex-1 truncate">{card.name}</span>
               <input className="w-16 rounded border border-cyan-200 bg-white px-2 py-1 text-xs" min="0" type="number" value={counts[card.id] || 0} onChange={(event) => onSetCardCount(card.id, Number(event.target.value))} />
             </label>
