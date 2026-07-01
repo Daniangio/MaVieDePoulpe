@@ -99,6 +99,34 @@ const input = "w-full rounded-md border border-cyan-200 bg-white px-3 py-2 text-
 const subtleButton = "rounded-md border border-cyan-300 bg-white px-3 py-2 text-sm text-teal-900 hover:bg-cyan-50";
 const primaryButton = "rounded-md bg-teal-500 px-3 py-2 text-sm font-semibold text-white hover:bg-teal-600 disabled:opacity-60";
 const dangerButton = "rounded-md border border-rose-300 bg-white px-3 py-2 text-sm text-rose-700 hover:bg-rose-50";
+const importSummaryLabels = {
+  maps: "Maps",
+  categories: "Categories",
+  interactions: "Interactions",
+  events: "Events/Animals",
+  tiles: "Tiles",
+  levels: "Levels",
+  surprise_cards: "Surprise Cards",
+  surprise_decks: "Surprise Decks",
+  player_boards: "Player Boards",
+  tokens: "Tokens",
+  poulpita_panel: "Poulpita Panel",
+};
+
+const formatImportSummary = (result) => {
+  const created = result?.content?.created || {};
+  const updated = result?.content?.updated || {};
+  const entries = [];
+  if (result?.maps) {
+    entries.push(`${importSummaryLabels.maps}: ${Number(result.maps.created || 0)} created, ${Number(result.maps.updated || 0)} updated`);
+  }
+  Object.entries(importSummaryLabels).forEach(([key, label]) => {
+    if (key === "maps") return;
+    if (created[key] === undefined && updated[key] === undefined) return;
+    entries.push(`${label}: ${Number(created[key] || 0)} created, ${Number(updated[key] || 0)} updated`);
+  });
+  return entries.length ? `Imported content. ${entries.join("; ")}.` : "Imported content.";
+};
 
 const AdminContentPage = () => {
   const { token, user } = useStore();
@@ -115,6 +143,7 @@ const AdminContentPage = () => {
   const [poulpitaPanelPreviewUrl, setPoulpitaPanelPreviewUrl] = useState("");
   const [activeTab, setActiveTab] = useState("map");
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
   const interactionImageRef = useRef(null);
   const eventImageRef = useRef(null);
@@ -142,6 +171,7 @@ const AdminContentPage = () => {
     if (!token) return;
     setBusy(true);
     setError("");
+    setNotice("");
     try {
       const response = await fetch(buildApiUrl("/api/admin/content/package"), {
         headers: { Authorization: `Bearer ${token}` },
@@ -170,14 +200,16 @@ const AdminContentPage = () => {
     if (!file) return;
     setBusy(true);
     setError("");
+    setNotice("");
     try {
       const payload = JSON.parse(await file.text());
-      await request("/api/admin/content/package/import", {
+      const result = await request("/api/admin/content/package/import", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
       await loadContent();
+      setNotice(formatImportSummary(result));
     } catch (importError) {
       setError(importError.message || "Failed to import content.");
     } finally {
@@ -609,6 +641,7 @@ const AdminContentPage = () => {
       </div>
 
       {error ? <p className="mb-4 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</p> : null}
+      {notice ? <p className="mb-4 rounded-md border border-teal-200 bg-teal-50 px-3 py-2 text-sm text-teal-800">{notice}</p> : null}
 
       <nav className="mb-4 flex flex-wrap gap-2">
         {contentTabs.map(([id, label]) => (
