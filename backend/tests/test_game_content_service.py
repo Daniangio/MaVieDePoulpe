@@ -97,6 +97,53 @@ def test_player_board_config_is_fixed_to_five_boards_and_validates_interactions(
     assert state["player_boards"][0]["actions_per_control"] == 2
 
 
+def test_player_board_can_define_deck_exchange_upgrades(tmp_path, monkeypatch):
+    monkeypatch.setattr(service, "CONTENT_ROOT", tmp_path)
+    monkeypatch.setattr(service, "CONTENT_IMAGES_ROOT", tmp_path / "images")
+    monkeypatch.setattr(service, "CONTENT_JSON_PATH", tmp_path / "content.json")
+
+    service._write_content(
+        {
+            "categories": [],
+            "interactions": [
+                {"id": "charge", "name": "Charge", "image_filename": None},
+                {"id": "hide", "name": "Hide", "image_filename": None},
+            ],
+            "events": [],
+            "tiles": [],
+            "player_boards": [],
+        }
+    )
+
+    board = service.save_player_board(
+        board_id="force",
+        name="Force",
+        initiates_event_ids=[],
+        deck=[{"interaction_id": "charge", "count": 3}, {"interaction_id": "hide", "count": 2}],
+        default_max_cards_in_hand=3,
+        hand_size_upgrades=[
+            {
+                "type": "deck_exchange",
+                "cost": 2,
+                "remove_cards": [{"interaction_id": "charge", "count": 1}],
+                "add_cards": [{"interaction_ids": ["charge", "hide"], "count": 1}],
+            }
+        ],
+        actions_per_control=3,
+        control_takes_per_night=3,
+    )
+
+    assert board["hand_size_upgrades"] == [
+        {
+            "type": "deck_exchange",
+            "cost_resource": "neurons",
+            "cost": 2,
+            "remove_cards": [{"interaction_id": "charge", "count": 1}],
+            "add_cards": [{"interaction_ids": ["charge", "hide"], "count": 1}],
+        }
+    ]
+
+
 def test_level_save_validates_group_capacity_and_node_assignment(tmp_path, monkeypatch):
     monkeypatch.setattr(service, "CONTENT_ROOT", tmp_path)
     monkeypatch.setattr(service, "CONTENT_IMAGES_ROOT", tmp_path / "images")
@@ -139,10 +186,12 @@ def test_level_save_validates_group_capacity_and_node_assignment(tmp_path, monke
         ],
         objectives=[{"type": "increase_size", "target": 2}, {"type": "find_shelter"}],
         starting_energy=7,
+        starting_neurons=4,
     )
 
     assert level["node_tile_counts"] == {"N1": 2, "N2": 1}
     assert level["starting_energy"] == 7
+    assert level["starting_neurons"] == 4
     assert level["objectives"] == [
         {"id": "objective-1", "type": "increase_size", "target": 2},
         {"id": "objective-2", "type": "find_shelter"},

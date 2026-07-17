@@ -215,9 +215,19 @@ def _setup_state(room_id: str, *, level_id: str | None = None) -> dict[str, Any]
 def _expand_deck(deck_config: list[dict[str, Any]], capability_id: str) -> list[dict[str, Any]]:
     cards = []
     for entry in deck_config or []:
-        interaction_id = str(entry.get("interaction_id") or "")
+        interaction_ids = [str(interaction_id) for interaction_id in (entry.get("interaction_ids") or []) if interaction_id]
+        interaction_id = str(entry.get("interaction_id") or (interaction_ids[0] if interaction_ids else ""))
+        if not interaction_ids and interaction_id:
+            interaction_ids = [interaction_id]
         for _index in range(max(0, int(entry.get("count") or 0))):
-            cards.append({"card_id": f"card_{uuid.uuid4().hex}", "interaction_id": interaction_id, "owner_capability_id": capability_id})
+            cards.append(
+                {
+                    "card_id": f"card_{uuid.uuid4().hex}",
+                    "interaction_id": interaction_id,
+                    "interaction_ids": interaction_ids,
+                    "owner_capability_id": capability_id,
+                }
+            )
     random.shuffle(cards)
     return cards
 
@@ -230,6 +240,61 @@ def _refill_draw_pile_from_discard(capability: dict[str, Any]) -> bool:
     capability["discard"] = []
     random.shuffle(capability["draw_pile"])
     return True
+
+
+def _remove_cards_from_capability(capability: dict[str, Any], interaction_id: str, count: int) -> list[dict[str, Any]] | None:
+    available = sum(
+        1
+        for zone in ["draw_pile", "discard", "hand"]
+        for card in capability.get(zone) or []
+        if interaction_id in _card_interaction_options(card)
+    )
+    if available < count:
+        return None
+    removed: list[dict[str, Any]] = []
+    zones = ["draw_pile", "discard", "hand"]
+    for zone in zones:
+        kept = []
+        for card in capability.get(zone) or []:
+            if len(removed) < count and interaction_id in _card_interaction_options(card):
+                removed.append(card)
+            else:
+                kept.append(card)
+        capability[zone] = kept
+        if len(removed) >= count:
+            return removed
+    return None
+
+
+def _apply_deck_exchange_upgrade(capability: dict[str, Any], upgrade: dict[str, Any]) -> None:
+    removed_by_interaction: list[tuple[str, list[dict[str, Any]]]] = []
+    for entry in upgrade.get("remove_cards") or []:
+        interaction_id = str(entry.get("interaction_id") or "")
+        count = max(0, int(entry.get("count") or 0))
+        removed = _remove_cards_from_capability(capability, interaction_id, count)
+        if removed is None:
+            for restored_interaction_id, restored_cards in removed_by_interaction:
+                capability.setdefault("draw_pile", []).extend(restored_cards)
+            raise ValueError(f"Not enough {interaction_id} cards remain to exchange.")
+        removed_by_interaction.append((interaction_id, removed))
+    new_cards = []
+    capability_id = str(capability.get("id") or "")
+    for entry in upgrade.get("add_cards") or []:
+        interaction_ids = [str(interaction_id) for interaction_id in (entry.get("interaction_ids") or []) if interaction_id]
+        if not interaction_ids:
+            continue
+        for _index in range(max(0, int(entry.get("count") or 0))):
+            new_cards.append(
+                {
+                    "card_id": f"card_{uuid.uuid4().hex}",
+                    "interaction_id": interaction_ids[0],
+                    "interaction_ids": interaction_ids,
+                    "owner_capability_id": capability_id,
+                    "upgraded": True,
+                }
+            )
+    capability.setdefault("draw_pile", []).extend(new_cards)
+    random.shuffle(capability["draw_pile"])
 
 
 def _initial_capabilities(*, deal_hands: bool = False) -> dict[str, dict[str, Any]]:
@@ -394,6 +459,7 @@ def _goldfish_state(room_id: str, *, level_id: str | None = None) -> dict[str, A
     _validate_map_config(map_config)
     tile_catalog = _build_tile_catalog()
     starting_energy = max(0, min(32, int(level_config.get("starting_energy") or 3)))
+    starting_neurons = max(0, int(level_config.get("starting_neurons") or 0))
     surprise_deck_id = str(level_config.get("surprise_deck_id") or "")
     surprise_draw_pile = list(((tile_catalog.get("surprise_decks") or {}).get(surprise_deck_id) or {}).get("card_ids") or [])
     random.shuffle(surprise_draw_pile)
@@ -415,7 +481,7 @@ def _goldfish_state(room_id: str, *, level_id: str | None = None) -> dict[str, A
             "node_id": str(level_config.get("poulpita_starting_node_id") or map_config["starting_node_id"]),
             "previous_node_id": None,
             "energy": starting_energy,
-            "neurons": 0,
+            "neurons": starting_neurons,
             "seashells": 0,
             "size_index": 0,
             "size_upgraded_today": False,
@@ -770,6 +836,32 @@ def _played_interactions(state: dict[str, Any]) -> list[str]:
     return interactions
 
 
+def _card_interaction_options(card: dict[str, Any]) -> list[str]:
+    options = [str(interaction_id) for interaction_id in (card.get("interaction_ids") or []) if interaction_id]
+    interaction_id = str(card.get("interaction_id") or "")
+    if interaction_id and interaction_id not in options:
+        options.insert(0, interaction_id)
+    return options
+
+
+def _choose_card_interaction(next_state: dict[str, Any], played_cards: list[dict[str, Any]], card: dict[str, Any]) -> str:
+    options = _card_interaction_options(card)
+    if not options:
+        return str(card.get("interaction_id") or "")
+    interaction = next_state.get("interaction") or {}
+    tile = (next_state.get("tile_catalog") or {}).get("tiles", {}).get(interaction.get("tile_id")) or {}
+    played = [str(played_card.get("interaction_id") or "") for played_card in played_cards]
+    for required_ids in [tile.get("interaction_ids") or [], tile.get("counter_attack_interaction_ids") or []]:
+        remaining = list(required_ids)
+        for played_interaction_id in played:
+            if played_interaction_id in remaining:
+                remaining.remove(played_interaction_id)
+        for option in options:
+            if option in remaining:
+                return option
+    return options[0]
+
+
 def _sync_interaction_cards(next_state: dict[str, Any], capability_id: str, selected_card_ids: list[str]) -> None:
     interaction = next_state.get("interaction") or {}
     capability = next_state.get("capabilities", {}).get(capability_id)
@@ -780,7 +872,12 @@ def _sync_interaction_cards(next_state: dict[str, Any], capability_id: str, sele
     for card in interaction.get("played_cards") or []:
         if card.get("capability_id") == capability_id:
             capability.setdefault("hand", []).append(
-                {"card_id": card["card_id"], "interaction_id": card["interaction_id"], "owner_capability_id": capability_id}
+                {
+                    "card_id": card["card_id"],
+                    "interaction_id": card["interaction_id"],
+                    "interaction_ids": _card_interaction_options(card),
+                    "owner_capability_id": capability_id,
+                }
             )
         else:
             kept_played.append(card)
@@ -788,7 +885,8 @@ def _sync_interaction_cards(next_state: dict[str, Any], capability_id: str, sele
     hand = []
     for card in capability.get("hand") or []:
         if str(card.get("card_id")) in selected:
-            next_played.append({**card, "capability_id": capability_id})
+            chosen_interaction_id = _choose_card_interaction(next_state, next_played, card)
+            next_played.append({**card, "interaction_id": chosen_interaction_id, "interaction_ids": _card_interaction_options(card), "capability_id": capability_id})
         else:
             hand.append(card)
     missing = selected - {str(card.get("card_id")) for card in next_played if card.get("capability_id") == capability_id}
@@ -1495,22 +1593,30 @@ class GameRoomService:
             if upgrade_index in purchased:
                 self._reject(state, command_id, "upgrade_already_bought", "This upgrade was already bought.")
             upgrade = upgrades[upgrade_index] or {}
+            upgrade_type = str(upgrade.get("type") or "hand_size")
             if str(upgrade.get("cost_resource") or "neurons") != "neurons":
-                self._reject(state, command_id, "unsupported_upgrade_cost", "Only neuron hand-size upgrades can be bought during the day.")
+                self._reject(state, command_id, "unsupported_upgrade_cost", "Only neuron upgrades can be bought during the day.")
             cost = max(0, int(upgrade.get("cost") or 0))
             if int((state.get("poulpita") or {}).get("neurons") or 0) < cost:
                 self._reject(state, command_id, "insufficient_neurons", "Poulpita does not have enough neurons.")
-            bonus = 1
             next_state = deepcopy(state)
             next_capability = next_state["capabilities"][capability_id]
+            bonus = 0
+            try:
+                if upgrade_type == "deck_exchange":
+                    _apply_deck_exchange_upgrade(next_capability, upgrade)
+                else:
+                    bonus = max(1, int(upgrade.get("hand_size_bonus") or 1))
+                    next_capability["current_max_cards_in_hand"] = int(next_capability.get("current_max_cards_in_hand") or next_capability.get("default_max_cards_in_hand") or 3) + bonus
+            except ValueError as exc:
+                self._reject(state, command_id, "upgrade_requirements_not_met", str(exc))
             next_state["poulpita"]["neurons"] = int(next_state["poulpita"].get("neurons") or 0) - cost
             next_capability.setdefault("purchased_hand_size_upgrade_indices", []).append(upgrade_index)
-            next_capability["current_max_cards_in_hand"] = int(next_capability.get("current_max_cards_in_hand") or next_capability.get("default_max_cards_in_hand") or 3) + bonus
             next_state["focused_capability_id"] = capability_id
             next_state["version"] = int(state["version"]) + 1
             event = {
                 "event_id": f"evt_{uuid.uuid4().hex}",
-                "type": "hand_size_upgrade_bought",
+                "type": "deck_exchange_upgrade_bought" if upgrade_type == "deck_exchange" else "hand_size_upgrade_bought",
                 "command_id": command_id,
                 "capability_id": capability_id,
                 "upgrade_index": upgrade_index,
@@ -1590,9 +1696,10 @@ class GameRoomService:
                         played = []
                         for hand_card in capability.get("hand") or []:
                             if hand_card.get("card_id") in selected:
-                                if hand_card.get("interaction_id") in remaining:
-                                    remaining.remove(hand_card.get("interaction_id"))
-                                    played.append(hand_card)
+                                matching_interaction_id = next((interaction_id for interaction_id in _card_interaction_options(hand_card) if interaction_id in remaining), "")
+                                if matching_interaction_id:
+                                    remaining.remove(matching_interaction_id)
+                                    played.append({**hand_card, "interaction_id": matching_interaction_id, "interaction_ids": _card_interaction_options(hand_card)})
                                 else:
                                     next_hand.append(hand_card)
                             else:
@@ -1811,14 +1918,15 @@ class GameRoomService:
                 if card is None:
                     self._reject(state, command_id, "unknown_card", "Card is not in this ability hand.")
                 capability["hand"] = [entry for entry in capability.get("hand") or [] if entry.get("card_id") != card_id]
-                next_interaction.setdefault("played_cards", []).append({**card, "capability_id": capability_id})
+                chosen_interaction_id = _choose_card_interaction(next_state, next_interaction.get("played_cards") or [], card)
+                next_interaction.setdefault("played_cards", []).append({**card, "interaction_id": chosen_interaction_id, "interaction_ids": _card_interaction_options(card), "capability_id": capability_id})
                 event_type = "interaction_card_played"
             else:
                 card = next((entry for entry in next_interaction.get("played_cards") or [] if entry.get("card_id") == card_id and entry.get("capability_id") == capability_id), None)
                 if card is None:
                     self._reject(state, command_id, "unknown_played_card", "This played card cannot be withdrawn by the active ability.")
                 next_interaction["played_cards"] = [entry for entry in next_interaction.get("played_cards") or [] if entry.get("card_id") != card_id]
-                capability.setdefault("hand", []).append({"card_id": card["card_id"], "interaction_id": card["interaction_id"], "owner_capability_id": capability_id})
+                capability.setdefault("hand", []).append({"card_id": card["card_id"], "interaction_id": card["interaction_id"], "interaction_ids": _card_interaction_options(card), "owner_capability_id": capability_id, "upgraded": bool(card.get("upgraded"))})
                 event_type = "interaction_card_withdrawn"
             next_state["version"] = int(state["version"]) + 1
             event = {
@@ -1908,7 +2016,15 @@ class GameRoomService:
             for card in interaction.get("played_cards") or []:
                 capability = next_state["capabilities"].get(card.get("capability_id"))
                 if capability is not None:
-                    capability.setdefault("discard", []).append({"card_id": card["card_id"], "interaction_id": card["interaction_id"], "owner_capability_id": card.get("capability_id")})
+                    capability.setdefault("discard", []).append(
+                        {
+                            "card_id": card["card_id"],
+                            "interaction_id": card["interaction_id"],
+                            "interaction_ids": _card_interaction_options(card),
+                            "owner_capability_id": card.get("capability_id"),
+                            "upgraded": bool(card.get("upgraded")),
+                        }
+                    )
             next_state["interaction"] = None
             next_state["version"] = int(state["version"]) + 1
             event = {

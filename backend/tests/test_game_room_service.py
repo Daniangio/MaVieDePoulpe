@@ -962,15 +962,57 @@ def test_end_night_is_free_and_day_upgrades_stack_before_next_night():
         assert day_capability["actions_taken_this_control"] == 0
         assert bought["ok"] is True
         assert bought["projection"]["poulpita"]["neurons"] == 1
-        assert bought_capability["current_max_cards_in_hand"] == 4
+        assert bought_capability["current_max_cards_in_hand"] == 8
         assert bought_capability["purchased_hand_size_upgrade_indices"] == [0]
         assert duplicate["ok"] is False
         assert duplicate["reason"] == "upgrade_already_bought"
         assert night["ok"] is True
         assert night["projection"]["phase"] == "night_idle"
         assert night["projection"]["day_index"] == 2
-        assert night_capability["current_max_cards_in_hand"] == 4
+        assert night_capability["current_max_cards_in_hand"] == 8
         assert night_capability["control_takes_this_night"] == 0
+
+    run(scenario())
+
+
+def test_day_can_buy_deck_exchange_upgrade():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "day"
+        state["poulpita"]["neurons"] = 3
+        capability = state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]
+        capability["hand_size_upgrades"] = [
+            {
+                "type": "deck_exchange",
+                "cost_resource": "neurons",
+                "cost": 2,
+                "remove_cards": [{"interaction_id": "charge", "count": 1}],
+                "add_cards": [{"interaction_ids": ["charge", "hide"], "count": 1}],
+            }
+        ]
+        capability["purchased_hand_size_upgrade_indices"] = []
+        capability["draw_pile"] = [{"card_id": "card_old", "interaction_id": "charge", "interaction_ids": ["charge"], "owner_capability_id": DEFAULT_ACTIVE_CAPABILITY_ID}]
+        capability["hand"] = []
+        capability["discard"] = []
+
+        result = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_buy_deck_exchange",
+            expected_version=1,
+            command_type="buy_hand_size_upgrade",
+            payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID, "upgrade_index": 0},
+        )
+
+        next_capability = result["projection"]["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]
+        assert result["ok"] is True
+        assert result["projection"]["poulpita"]["neurons"] == 1
+        assert next_capability["purchased_hand_size_upgrade_indices"] == [0]
+        assert len(next_capability["draw_pile"]) == 1
+        assert next_capability["draw_pile"][0]["interaction_ids"] == ["charge", "hide"]
+        assert next_capability["draw_pile"][0]["upgraded"] is True
 
     run(scenario())
 
@@ -1041,11 +1083,14 @@ def test_poulpita_size_can_increase_once_per_day_without_spending_to_zero():
     run(scenario())
 
 
-def test_goldfish_game_uses_level_starting_energy():
+def test_goldfish_game_uses_level_starting_energy(monkeypatch):
     async def scenario():
+        level = {**TEST_LEVEL, "starting_energy": 3, "starting_neurons": 5}
+        monkeypatch.setattr("backend.app.game_room_service.get_level_config", lambda level_id=None: level)
         service, _user, _room, start = await create_started_room()
 
         assert start["projection"]["poulpita"]["energy"] == 3
+        assert start["projection"]["poulpita"]["neurons"] == 5
         assert service is not None
 
     run(scenario())

@@ -183,6 +183,7 @@ def _read_content() -> dict[str, Any]:
     for level in content["levels"]:
         level["objectives"] = _normalize_level_objectives(level.get("objectives") or [])
         level["starting_energy"] = max(0, min(32, int(level.get("starting_energy") or 3)))
+        level["starting_neurons"] = max(0, int(level.get("starting_neurons") or 0))
         level["surprise_deck_id"] = level.get("surprise_deck_id") or ""
         level["poulpita_starting_node_id"] = str(level.get("poulpita_starting_node_id") or "")
         level["node_tokens"] = level.get("node_tokens") or {}
@@ -312,15 +313,42 @@ def _normalize_player_boards(raw_boards: list[dict[str, Any]]) -> list[dict[str,
             if isinstance(entry, dict) and str(entry.get("interaction_id") or "")
         ]
         current["default_max_cards_in_hand"] = max(1, int(current.get("default_max_cards_in_hand") or 3))
-        current["hand_size_upgrades"] = [
-            {
-                "cost_resource": str(entry.get("cost_resource") or "energy"),
-                "cost": max(1, int(entry.get("cost") or 1)),
-                "hand_size_bonus": max(1, int(entry.get("hand_size_bonus") or 1)),
-            }
-            for entry in current.get("hand_size_upgrades") or []
-            if isinstance(entry, dict)
-        ]
+        upgrades = []
+        for entry in current.get("hand_size_upgrades") or []:
+            if not isinstance(entry, dict):
+                continue
+            upgrade_type = str(entry.get("type") or "hand_size")
+            if upgrade_type == "deck_exchange":
+                upgrades.append(
+                    {
+                        "type": "deck_exchange",
+                        "cost_resource": "neurons",
+                        "cost": max(1, int(entry.get("cost") or 1)),
+                        "remove_cards": [
+                            {"interaction_id": str(card.get("interaction_id") or ""), "count": max(0, int(card.get("count") or 0))}
+                            for card in entry.get("remove_cards") or []
+                            if isinstance(card, dict) and str(card.get("interaction_id") or "")
+                        ],
+                        "add_cards": [
+                            {
+                                "interaction_ids": [str(interaction_id) for interaction_id in (card.get("interaction_ids") or [])][:2],
+                                "count": max(0, int(card.get("count") or 0)),
+                            }
+                            for card in entry.get("add_cards") or []
+                            if isinstance(card, dict)
+                        ],
+                    }
+                )
+            else:
+                upgrades.append(
+                    {
+                        "type": "hand_size",
+                        "cost_resource": str(entry.get("cost_resource") or "energy"),
+                        "cost": max(1, int(entry.get("cost") or 1)),
+                        "hand_size_bonus": max(1, int(entry.get("hand_size_bonus") or 1)),
+                    }
+                )
+        current["hand_size_upgrades"] = upgrades
         current["actions_per_control"] = max(1, int(current.get("actions_per_control") or 3))
         current["control_takes_per_night"] = max(1, int(current.get("control_takes_per_night") or 3))
         boards.append(current)
@@ -1089,6 +1117,7 @@ def save_level(
     groups: list[dict[str, Any]],
     objectives: list[dict[str, Any]] | None = None,
     starting_energy: int | None = None,
+    starting_neurons: int | None = None,
     surprise_deck_id: str | None = None,
     poulpita_starting_node_id: str | None = None,
     node_tokens: dict[str, Any] | None = None,
@@ -1129,6 +1158,7 @@ def save_level(
         "groups": normalized_groups,
         "objectives": _normalize_level_objectives(objectives or []),
         "starting_energy": max(0, min(32, int(starting_energy if starting_energy is not None else 3))),
+        "starting_neurons": max(0, int(starting_neurons if starting_neurons is not None else 0)),
         "surprise_deck_id": normalized_surprise_deck_id,
         "poulpita_starting_node_id": normalized_starting_node_id,
         "node_tokens": _normalize_level_node_tokens(node_tokens or {}, node_ids),
@@ -1177,20 +1207,59 @@ def save_player_board(
             raise ValueError("Deck counts cannot be negative.")
         if count:
             normalized_deck.append({"interaction_id": interaction_id, "count": count})
+    deck_counts = {entry["interaction_id"]: int(entry.get("count") or 0) for entry in normalized_deck}
     normalized_upgrades = []
     for entry in hand_size_upgrades or []:
         if not isinstance(entry, dict):
             raise ValueError("Upgrade entries must be objects.")
-        cost_resource = str(entry.get("cost_resource") or "")
-        if cost_resource not in UPGRADE_COST_RESOURCES:
+        upgrade_type = str(entry.get("type") or "hand_size")
+        cost_resource = str(entry.get("cost_resource") or "neurons")
+        if upgrade_type != "deck_exchange" and cost_resource not in UPGRADE_COST_RESOURCES:
             raise ValueError("Upgrade cost resource must be energy or neurons.")
         cost = int(entry.get("cost") or 0)
-        hand_size_bonus = int(entry.get("hand_size_bonus") or 1)
-        if cost < 1 or hand_size_bonus < 1:
-            raise ValueError("Upgrade cost and hand size bonus must be positive.")
-        normalized_upgrades.append(
-            {"cost_resource": cost_resource, "cost": cost, "hand_size_bonus": hand_size_bonus}
-        )
+        if cost < 1:
+            raise ValueError("Upgrade cost must be positive.")
+        if upgrade_type == "deck_exchange":
+            remove_cards = []
+            add_cards = []
+            for card_entry in entry.get("remove_cards") or []:
+                interaction_id = str(card_entry.get("interaction_id") or "")
+                if interaction_id not in interaction_set:
+                    raise ValueError("Deck exchange upgrade removes an unknown interaction.")
+                count = int(card_entry.get("count") or 0)
+                if count < 0:
+                    raise ValueError("Deck exchange remove counts cannot be negative.")
+                if count > deck_counts.get(interaction_id, 0):
+                    raise ValueError("Deck exchange cannot remove more cards than the board deck contains.")
+                if count:
+                    remove_cards.append({"interaction_id": interaction_id, "count": count})
+            for card_entry in entry.get("add_cards") or []:
+                interaction_ids = [str(interaction_id) for interaction_id in (card_entry.get("interaction_ids") or [])]
+                if len(interaction_ids) != 2 or any(interaction_id not in interaction_set for interaction_id in interaction_ids):
+                    raise ValueError("Powerful cards must reference exactly two known interactions.")
+                count = int(card_entry.get("count") or 0)
+                if count < 0:
+                    raise ValueError("Powerful card counts cannot be negative.")
+                if count:
+                    add_cards.append({"interaction_ids": interaction_ids, "count": count})
+            if not remove_cards or not add_cards:
+                raise ValueError("Deck exchange upgrades need cards to remove and powerful cards to add.")
+            normalized_upgrades.append(
+                {
+                    "type": "deck_exchange",
+                    "cost_resource": "neurons",
+                    "cost": cost,
+                    "remove_cards": remove_cards,
+                    "add_cards": add_cards,
+                }
+            )
+        else:
+            hand_size_bonus = int(entry.get("hand_size_bonus") or 1)
+            if hand_size_bonus < 1:
+                raise ValueError("Hand size bonus must be positive.")
+            normalized_upgrades.append(
+                {"type": "hand_size", "cost_resource": cost_resource, "cost": cost, "hand_size_bonus": hand_size_bonus}
+            )
     next_board = {
         "id": board_id,
         "name": _normalize_name(name),

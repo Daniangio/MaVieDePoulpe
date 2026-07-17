@@ -227,11 +227,12 @@ const CapabilityBoard = ({
           {compact ? (
             <div className="mt-1 flex flex-wrap gap-1">
               {(capability.hand || []).slice(0, 6).map((card) => {
-                const generatedCard = cardsByInteraction[card.interaction_id];
+                const options = cardInteractionOptions(card);
+                const generatedCard = cardsByInteraction[card.interaction_id] || cardsByInteraction[options[0]];
                 const imageUrl = generatedCard?.image_url ? buildApiUrl(generatedCard.image_url) : "";
                 return (
-                  <span className={`${canSeeHand ? "border-cyan-300 bg-cyan-50" : "border-slate-500 bg-[linear-gradient(135deg,#0f766e_0_45%,#164e63_45%_55%,#0f766e_55%)]"} flex h-5 w-3.5 items-center justify-center overflow-hidden rounded-sm border text-[0.45rem] text-teal-900`} key={card.card_id} title={canSeeHand ? generatedCard?.name || card.interaction_id : "Hidden card"}>
-                    {canSeeHand && imageUrl ? <img alt="" className="h-full w-full object-cover" src={imageUrl} /> : canSeeHand ? generatedCard?.name?.slice(0, 1) || "?" : null}
+                  <span className={`${canSeeHand ? "border-cyan-300 bg-cyan-50" : "border-slate-500 bg-[linear-gradient(135deg,#0f766e_0_45%,#164e63_45%_55%,#0f766e_55%)]"} flex h-5 w-3.5 items-center justify-center overflow-hidden rounded-sm border text-[0.45rem] text-teal-900`} key={card.card_id} title={canSeeHand ? options.map((id: string) => projection?.tile_catalog?.interactions?.[id]?.name || id).join(" / ") : "Hidden card"}>
+                    {canSeeHand && imageUrl ? <img alt="" className="h-full w-full object-cover" src={imageUrl} /> : canSeeHand ? (options.length > 1 ? "2" : generatedCard?.name?.slice(0, 1) || "?") : null}
                   </span>
                 );
               })}
@@ -246,6 +247,7 @@ const CapabilityBoard = ({
             (capability.hand_size_upgrades || []).map((upgrade, index) => {
               const bought = purchasedUpgrades.has(index);
               const cost = Number(upgrade.cost || 0);
+              const isDeckExchange = upgrade.type === "deck_exchange";
               return (
                 <button
                   className={[
@@ -257,7 +259,7 @@ const CapabilityBoard = ({
                   onClick={() => onBuyUpgrade?.(index)}
                   type="button"
                 >
-                  +1 hand
+                  {isDeckExchange ? "Improve deck" : `+${Number(upgrade.hand_size_bonus || 1)} hand`}
                   <span className="block text-[0.58rem] text-slate-400">{bought ? "Bought" : `${cost} neurons`}</span>
                 </button>
               );
@@ -422,8 +424,10 @@ const CardButton = ({
   showPreview?: boolean;
   onClick?: () => void;
 }) => {
-  const interaction = projection.tile_catalog?.interactions?.[card.interaction_id];
-  const generatedCard = projection.tile_catalog?.cards?.[card.interaction_id];
+  const options = cardInteractionOptions(card);
+  const interactions = options.map((interactionId) => projection.tile_catalog?.interactions?.[interactionId]).filter(Boolean);
+  const interaction = interactions[0] || projection.tile_catalog?.interactions?.[card.interaction_id];
+  const generatedCard = projection.tile_catalog?.cards?.[card.interaction_id] || projection.tile_catalog?.cards?.[options[0]];
   const cardCategories = projection.tile_catalog?.card_categories || [];
   const imageUrl = interaction?.image_url ? buildApiUrl(interaction.image_url) : "";
   const [previewPosition, setPreviewPosition] = useState<{ left: number; top: number } | null>(null);
@@ -454,7 +458,7 @@ const CardButton = ({
         type="button"
       >
         {imageUrl ? <img alt="" className="h-8 w-8 rounded object-cover" src={imageUrl} /> : <span className="flex h-8 w-8 items-center justify-center rounded bg-slate-700">{interaction?.name?.slice(0, 2) || "?"}</span>}
-        <span className="line-clamp-2 text-center">{interaction?.name || card.interaction_id}</span>
+        <span className="line-clamp-2 text-center">{interactions.length > 1 ? interactions.map((entry: any) => entry.name).join(" / ") : interaction?.name || card.interaction_id}</span>
       </button>
       {showPreview && generatedCard && previewPosition
         ? createPortal(
@@ -472,6 +476,27 @@ const CardButton = ({
 };
 
 const contentImageUrl = (entry: any) => (entry?.image_url ? buildApiUrl(entry.image_url) : "");
+
+const cardInteractionOptions = (card: any) => {
+  const options = Array.isArray(card?.interaction_ids) ? card.interaction_ids.filter(Boolean) : [];
+  if (card?.interaction_id && !options.includes(card.interaction_id)) options.unshift(card.interaction_id);
+  return options;
+};
+
+const chooseCardInteractionForTile = (card: any, tile: any, alreadyPlayed: string[]) => {
+  const options = cardInteractionOptions(card);
+  if (!options.length) return card?.interaction_id || "";
+  for (const requiredIds of [tile?.interaction_ids || [], tile?.counter_attack_interaction_ids || []]) {
+    const remaining = [...requiredIds];
+    alreadyPlayed.forEach((interactionId) => {
+      const index = remaining.indexOf(interactionId);
+      if (index >= 0) remaining.splice(index, 1);
+    });
+    const match = options.find((interactionId) => remaining.includes(interactionId));
+    if (match) return match;
+  }
+  return options[0];
+};
 
 const ResourceToken = ({ token, label }: { token?: any; label: string }) => {
   const url = contentImageUrl(token);
@@ -698,7 +723,10 @@ const InteractionPanel = ({
   const selectedCards = selectedCardIds
     .map((cardId) => selectableCardMap.get(cardId))
     .filter(Boolean) as CardProjection[];
-  const playedInteractions = [...lockedPlayedCards, ...selectedCards].map((card: CardProjection) => card.interaction_id);
+  const playedInteractions = [...lockedPlayedCards, ...selectedCards].reduce((selected: string[], card: CardProjection) => {
+    selected.push(chooseCardInteractionForTile(card, tile, selected));
+    return selected;
+  }, []);
   const missingSuccess = [...(tile.interaction_ids || [])];
   playedInteractions.forEach((interactionId: string) => {
     const index = missingSuccess.indexOf(interactionId);

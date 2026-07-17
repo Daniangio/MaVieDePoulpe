@@ -592,7 +592,7 @@ const AdminContentPage = () => {
   const addUpgrade = () => {
     setPlayerBoardDraft((current) => ({
       ...current,
-      hand_size_upgrades: [...(current.hand_size_upgrades || []), { cost_resource: "energy", cost: 1, hand_size_bonus: 1 }],
+      hand_size_upgrades: [...(current.hand_size_upgrades || []), { type: "hand_size", cost_resource: "neurons", cost: 1, hand_size_bonus: 1 }],
     }));
   };
 
@@ -1134,6 +1134,22 @@ const PlayerBoardEditor = ({
   onRemoveUpgrade,
 }) => {
   const deckByInteraction = Object.fromEntries((draft.deck || []).map((entry) => [entry.interaction_id, Number(entry.count || 0)]));
+  const updateUpgradeCardCount = (index, field, interactionId, count) => {
+    const upgrade = draft.hand_size_upgrades?.[index] || {};
+    const entries = (upgrade[field] || []).filter((entry) => entry.interaction_id !== interactionId);
+    if (count > 0) entries.push({ interaction_id: interactionId, count });
+    onUpdateUpgrade(index, { [field]: entries });
+  };
+  const updatePowerfulCard = (index, cardIndex, patch) => {
+    const upgrade = draft.hand_size_upgrades?.[index] || {};
+    const cards = [...(upgrade.add_cards || [])];
+    cards[cardIndex] = { ...(cards[cardIndex] || { interaction_ids: ["", ""], count: 1 }), ...patch };
+    onUpdateUpgrade(index, { add_cards: cards });
+  };
+  const removePowerfulCard = (index, cardIndex) => {
+    const upgrade = draft.hand_size_upgrades?.[index] || {};
+    onUpdateUpgrade(index, { add_cards: (upgrade.add_cards || []).filter((_, entryIndex) => entryIndex !== cardIndex) });
+  };
   return (
     <section className={panel}>
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1196,22 +1212,80 @@ const PlayerBoardEditor = ({
 
               <div className="rounded-md border border-cyan-100 bg-white p-3">
                 <div className="flex items-center justify-between gap-2">
-                  <h3 className="text-sm font-semibold text-teal-950">Hand upgrades</h3>
+                  <h3 className="text-sm font-semibold text-teal-950">Upgrades</h3>
                   <button className={subtleButton} onClick={onAddUpgrade} type="button">Add</button>
                 </div>
                 <div className="mt-2 space-y-2">
                   {(draft.hand_size_upgrades || []).map((upgrade, index) => (
-                    <div className="grid grid-cols-[1fr_1.5rem_1.5rem_auto] gap-1 rounded bg-cyan-50 p-2" key={index}>
-                      <select className="rounded border border-cyan-200 bg-white px-2 py-1 text-xs" value={upgrade.cost_resource || "energy"} onChange={(event) => onUpdateUpgrade(index, { cost_resource: event.target.value })}>
-                        <option value="energy">Energy</option>
-                        <option value="neurons">Neurons</option>
-                      </select>
-                      <input className="rounded border border-cyan-200 py-1 text-xs" min="1" type="number" value={upgrade.cost || 1} onChange={(event) => onUpdateUpgrade(index, { cost: Number(event.target.value) })} />
-                      <input className="rounded border border-cyan-200 py-1 text-xs" min="1" type="number" value={upgrade.hand_size_bonus || 1} onChange={(event) => onUpdateUpgrade(index, { hand_size_bonus: Number(event.target.value) })} />
-                      <button className="rounded border border-rose-200 bg-white px-2 py-1 text-xs text-rose-700" onClick={() => onRemoveUpgrade(index)} type="button">Remove</button>
+                    <div className="space-y-2 rounded bg-cyan-50 p-2" key={index}>
+                      <div className="grid grid-cols-[1fr_4rem_auto] gap-1">
+                        <select
+                          className="rounded border border-cyan-200 bg-white px-2 py-1 text-xs"
+                          value={upgrade.type || "hand_size"}
+                          onChange={(event) => onUpdateUpgrade(index, event.target.value === "deck_exchange"
+                            ? { type: "deck_exchange", cost_resource: "neurons", cost: 1, remove_cards: [], add_cards: [{ interaction_ids: [interactions[0]?.id || "", interactions[1]?.id || interactions[0]?.id || ""], count: 1 }] }
+                            : { type: "hand_size", cost_resource: "neurons", cost: 1, hand_size_bonus: 1 })}
+                        >
+                          <option value="hand_size">Hand size</option>
+                          <option value="deck_exchange">Deck exchange</option>
+                        </select>
+                        <input className="rounded border border-cyan-200 py-1 text-xs" min="1" type="number" value={upgrade.cost || 1} onChange={(event) => onUpdateUpgrade(index, { cost: Number(event.target.value) })} />
+                        <button className="rounded border border-rose-200 bg-white px-2 py-1 text-xs text-rose-700" onClick={() => onRemoveUpgrade(index)} type="button">Remove</button>
+                      </div>
+                      {(upgrade.type || "hand_size") === "hand_size" ? (
+                        <div className="grid grid-cols-[1fr_4rem] gap-1">
+                          <select className="rounded border border-cyan-200 bg-white px-2 py-1 text-xs" value={upgrade.cost_resource || "neurons"} onChange={(event) => onUpdateUpgrade(index, { cost_resource: event.target.value })}>
+                            <option value="neurons">Neurons</option>
+                            <option value="energy">Energy</option>
+                          </select>
+                          <input className="rounded border border-cyan-200 py-1 text-xs" min="1" type="number" value={upgrade.hand_size_bonus || 1} onChange={(event) => onUpdateUpgrade(index, { hand_size_bonus: Number(event.target.value) })} title="Hand size bonus" />
+                        </div>
+                      ) : (
+                        <div className="space-y-2">
+                          <div>
+                            <p className="text-[0.65rem] font-semibold uppercase text-slate-500">Remove from deck</p>
+                            <div className="mt-1 grid grid-cols-2 gap-1">
+                              {interactions.map((interaction) => {
+                                const removeCount = Number((upgrade.remove_cards || []).find((entry) => entry.interaction_id === interaction.id)?.count || 0);
+                                const maxCount = Number(deckByInteraction[interaction.id] || 0);
+                                return (
+                                  <label className="flex items-center justify-between gap-1 text-[0.65rem] text-slate-700" key={interaction.id}>
+                                    <span className="truncate">{interaction.name}</span>
+                                    <input className="w-12 rounded border border-cyan-200 px-1 py-0.5" max={maxCount} min="0" type="number" value={removeCount} onChange={(event) => updateUpgradeCardCount(index, "remove_cards", interaction.id, Number(event.target.value))} />
+                                  </label>
+                                );
+                              })}
+                            </div>
+                          </div>
+                          <div>
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="text-[0.65rem] font-semibold uppercase text-slate-500">Add powerful cards</p>
+                              <button className="rounded border border-cyan-200 bg-white px-2 py-1 text-[0.65rem] text-teal-800" onClick={() => onUpdateUpgrade(index, { add_cards: [...(upgrade.add_cards || []), { interaction_ids: [interactions[0]?.id || "", interactions[1]?.id || interactions[0]?.id || ""], count: 1 }] })} type="button">Add card</button>
+                            </div>
+                            <div className="mt-1 space-y-1">
+                              {(upgrade.add_cards || []).map((card, cardIndex) => (
+                                <div className="grid grid-cols-[1fr_1fr_3rem_auto] gap-1" key={cardIndex}>
+                                  {[0, 1].map((slot) => (
+                                    <select className="rounded border border-cyan-200 bg-white px-1 py-1 text-[0.65rem]" key={slot} value={card.interaction_ids?.[slot] || ""} onChange={(event) => {
+                                      const ids = [...(card.interaction_ids || ["", ""])];
+                                      ids[slot] = event.target.value;
+                                      updatePowerfulCard(index, cardIndex, { interaction_ids: ids });
+                                    }}>
+                                      <option value="">Action</option>
+                                      {interactions.map((interaction) => <option key={interaction.id} value={interaction.id}>{interaction.name}</option>)}
+                                    </select>
+                                  ))}
+                                  <input className="rounded border border-cyan-200 px-1 py-1 text-[0.65rem]" min="1" type="number" value={card.count || 1} onChange={(event) => updatePowerfulCard(index, cardIndex, { count: Number(event.target.value) })} />
+                                  <button className="rounded border border-rose-200 bg-white px-2 py-1 text-[0.65rem] text-rose-700" onClick={() => removePowerfulCard(index, cardIndex)} type="button">X</button>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   ))}
-                  {(draft.hand_size_upgrades || []).length === 0 ? <p className="text-xs text-slate-500">No hand-size upgrades.</p> : null}
+                  {(draft.hand_size_upgrades || []).length === 0 ? <p className="text-xs text-slate-500">No upgrades.</p> : null}
                 </div>
               </div>
           </div>

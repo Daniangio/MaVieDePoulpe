@@ -30,8 +30,10 @@ export type PoulpitaProjection = {
 export type CardProjection = {
   card_id: string;
   interaction_id: string;
+  interaction_ids?: string[];
   owner_capability_id?: string;
   capability_id?: string;
+  upgraded?: boolean;
 };
 
 export type CapabilityProjection = {
@@ -44,7 +46,14 @@ export type CapabilityProjection = {
   max_control_takes_per_night: number;
   current_max_cards_in_hand?: number;
   default_max_cards_in_hand?: number;
-  hand_size_upgrades?: Array<{ cost_resource?: string; cost?: number; hand_size_bonus?: number }>;
+  hand_size_upgrades?: Array<{
+    type?: "hand_size" | "deck_exchange";
+    cost_resource?: string;
+    cost?: number;
+    hand_size_bonus?: number;
+    remove_cards?: Array<{ interaction_id: string; count: number }>;
+    add_cards?: Array<{ interaction_ids: string[]; count: number }>;
+  }>;
   purchased_hand_size_upgrade_indices?: number[];
   initiates_event_ids?: string[];
   draw_pile?: CardProjection[];

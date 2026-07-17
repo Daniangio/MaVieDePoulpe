@@ -11,6 +11,7 @@ const emptyLevelDraft = () => ({
   groups: [{ id: "group-1", name: "Group 1", tile_counts: {} }],
   objectives: [],
   starting_energy: 3,
+  starting_neurons: 0,
   surprise_deck_id: "",
   poulpita_starting_node_id: "",
   node_tokens: {},
@@ -153,6 +154,7 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
       form.set("groups_json", JSON.stringify(draft.groups || []));
       form.set("objectives_json", JSON.stringify(draft.objectives || []));
       form.set("starting_energy", String(Math.max(0, Math.min(32, Number(draft.starting_energy ?? 3)))));
+      form.set("starting_neurons", String(Math.max(0, Number(draft.starting_neurons ?? 0))));
       form.set("surprise_deck_id", draft.surprise_deck_id || "");
       form.set("poulpita_starting_node_id", draft.poulpita_starting_node_id || "");
       form.set("node_tokens_json", JSON.stringify(draft.node_tokens || {}));
@@ -248,7 +250,7 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
         </aside>
 
         <div className="grid gap-4">
-          <div className="grid gap-3 lg:grid-cols-[1fr_16rem_10rem_14rem]">
+          <div className="grid gap-3 lg:grid-cols-[1fr_14rem_8rem_8rem_14rem]">
             <label className="block text-sm">
               <span className="text-slate-600">Level name</span>
               <input className="mt-1 w-full rounded-md border border-cyan-200 bg-white px-3 py-2 text-slate-800" value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} />
@@ -268,6 +270,16 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
                 type="number"
                 value={Number(draft.starting_energy ?? 3)}
                 onChange={(event) => setDraft((current) => ({ ...current, starting_energy: Math.max(0, Math.min(32, Number(event.target.value || 0))) }))}
+              />
+            </label>
+            <label className="block text-sm">
+              <span className="text-slate-600">Starting neurons</span>
+              <input
+                className="mt-1 w-full rounded-md border border-cyan-200 bg-white px-3 py-2 text-slate-800"
+                min="0"
+                type="number"
+                value={Number(draft.starting_neurons ?? 0)}
+                onChange={(event) => setDraft((current) => ({ ...current, starting_neurons: Math.max(0, Number(event.target.value || 0)) }))}
               />
             </label>
             <label className="block text-sm">
