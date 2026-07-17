@@ -12,6 +12,8 @@ const emptyLevelDraft = () => ({
   objectives: [],
   starting_energy: 3,
   surprise_deck_id: "",
+  poulpita_starting_node_id: "",
+  node_tokens: {},
 });
 
 const groupColors = ["#0d9488", "#2563eb", "#c026d3", "#ea580c", "#16a34a", "#be123c", "#7c3aed", "#0891b2"];
@@ -47,6 +49,8 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
       node_tile_counts: Object.fromEntries(mapNodes.map((nodeId) => [nodeId, Number(base.node_tile_counts?.[nodeId] ?? 3)])),
       node_group_ids: Object.fromEntries(mapNodes.map((nodeId) => [nodeId, base.node_group_ids?.[nodeId] || groupId])),
       groups: base.groups?.length ? base.groups : [{ id: groupId, name: "Group 1", tile_counts: {} }],
+      poulpita_starting_node_id: base.poulpita_starting_node_id || map?.starting_node_id || mapNodes[0] || "",
+      node_tokens: Object.fromEntries(Object.entries(base.node_tokens || {}).filter(([nodeId]) => mapNodes.includes(nodeId))),
     };
   };
 
@@ -150,6 +154,8 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
       form.set("objectives_json", JSON.stringify(draft.objectives || []));
       form.set("starting_energy", String(Math.max(0, Math.min(32, Number(draft.starting_energy ?? 3)))));
       form.set("surprise_deck_id", draft.surprise_deck_id || "");
+      form.set("poulpita_starting_node_id", draft.poulpita_starting_node_id || "");
+      form.set("node_tokens_json", JSON.stringify(draft.node_tokens || {}));
       const saved = await request(draft.id ? `/api/admin/content/levels/${draft.id}` : "/api/admin/content/levels", { method: draft.id ? "PUT" : "POST", body: form });
       setDraft(saved);
       await onReload();
@@ -186,6 +192,20 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
       ...current,
       objectives: (current.objectives || []).filter((objective) => objective.id !== objectiveId),
     }));
+  };
+
+  const toggleNodeToken = (nodeId, tokenType) => {
+    setDraft((current) => {
+      const currentTokens = current.node_tokens?.[nodeId] || [];
+      const hasToken = currentTokens.some((token) => (typeof token === "string" ? token : token.type) === tokenType);
+      const nextTokens = hasToken
+        ? currentTokens.filter((token) => (typeof token === "string" ? token : token.type) !== tokenType)
+        : [...currentTokens, { type: tokenType }];
+      const nodeTokens = { ...(current.node_tokens || {}) };
+      if (nextTokens.length) nodeTokens[nodeId] = nextTokens;
+      else delete nodeTokens[nodeId];
+      return { ...current, node_tokens: nodeTokens };
+    });
   };
 
   const deleteLevel = async (level) => {
@@ -268,6 +288,10 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
               nodeTileCounts={draft.node_tile_counts}
               onSelectGroup={(nodeId, groupId) => updateNode(nodeId, { group_id: groupId })}
               onSetNodeTileCount={(nodeId, tileCount) => updateNode(nodeId, { tile_count: tileCount })}
+              onSetStartingNode={(nodeId) => setDraft((current) => ({ ...current, poulpita_starting_node_id: nodeId }))}
+              onToggleNodeToken={toggleNodeToken}
+              nodeTokens={draft.node_tokens || {}}
+              startingNodeId={draft.poulpita_starting_node_id}
               selectedNodeId={selectedNodeId}
               setSelectedNodeId={setSelectedNodeId}
             />
@@ -348,7 +372,7 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
   );
 };
 
-const LevelMap = ({ map, groups, groupsById, nodeGroupIds, nodeTileCounts, selectedNodeId, setSelectedNodeId, onSelectGroup, onSetNodeTileCount }) => {
+const LevelMap = ({ map, groups, groupsById, nodeGroupIds, nodeTileCounts, nodeTokens, startingNodeId, selectedNodeId, setSelectedNodeId, onSelectGroup, onSetNodeTileCount, onSetStartingNode, onToggleNodeToken }) => {
   const boardImageUrl = map?.image_url ? buildApiUrl(map.image_url) : "";
   const selectedNode = selectedNodeId ? map?.nodes?.[selectedNodeId] : null;
   const opensUp = Number(selectedNode?.y || 0) > 0.62;
@@ -358,18 +382,32 @@ const LevelMap = ({ map, groups, groupsById, nodeGroupIds, nodeTileCounts, selec
         {boardImageUrl ? <img alt="Level map" className="absolute inset-0 h-full w-full object-contain" src={boardImageUrl} /> : <div className="flex h-full min-h-[20rem] items-center justify-center text-sm text-slate-500">{map ? "Map has no image." : "Select a map."}</div>}
         {Object.values(map?.nodes || {}).map((node) => {
           const group = groupsById[nodeGroupIds[node.id]];
+          const tokens = nodeTokens?.[node.id] || [];
+          const tokenTypes = tokens.map((token) => (typeof token === "string" ? token : token.type));
           return (
-            <button
-              className={`absolute flex min-h-11 min-w-11 -translate-x-1/2 -translate-y-1/2 flex-col items-center justify-center rounded-full border-2 px-2 text-center text-[0.62rem] font-semibold leading-tight text-white shadow ${selectedNodeId === node.id ? "border-teal-950 ring-2 ring-white" : "border-white"}`}
+            <div
+              className="absolute -translate-x-1/2 -translate-y-1/2"
               key={node.id}
-              onClick={() => setSelectedNodeId(selectedNodeId === node.id ? "" : node.id)}
-              style={{ left: `${node.x * 100}%`, top: `${node.y * 100}%`, backgroundColor: group?.color || "#94a3b8" }}
-              title={group?.name || "No group"}
-              type="button"
+              style={{ left: `${node.x * 100}%`, top: `${node.y * 100}%` }}
             >
-              <span>{node.id}</span>
-              <span className="max-w-[4.5rem] truncate">{group?.name || "No group"}</span>
-            </button>
+              <button
+                className={`flex min-h-11 min-w-11 flex-col items-center justify-center rounded-full border-2 px-2 text-center text-[0.62rem] font-semibold leading-tight text-white shadow ${selectedNodeId === node.id ? "border-teal-950 ring-2 ring-white" : "border-white"}`}
+                onClick={() => setSelectedNodeId(selectedNodeId === node.id ? "" : node.id)}
+                style={{ backgroundColor: group?.color || "#94a3b8" }}
+                title={group?.name || "No group"}
+                type="button"
+              >
+                <span>{startingNodeId === node.id ? "P - " : ""}{node.id}</span>
+                <span className="max-w-[4.5rem] truncate">{group?.name || "No group"}</span>
+              </button>
+              {tokenTypes.length ? (
+                <div className="pointer-events-none absolute left-1/2 top-full mt-0.5 flex -translate-x-1/2 gap-1">
+                  {tokenTypes.map((type) => (
+                    <span className="rounded-full border border-white bg-teal-950/90 px-1.5 py-0.5 text-[0.55rem] font-bold uppercase text-cyan-50 shadow" key={type}>{type === "shelter" ? "Shelter" : "Octopus"}</span>
+                  ))}
+                </div>
+              ) : null}
+            </div>
           );
         })}
       </div>
@@ -383,6 +421,28 @@ const LevelMap = ({ map, groups, groupsById, nodeGroupIds, nodeTileCounts, selec
             Tile spaces
             <input className="mt-1 w-full rounded border border-cyan-200 bg-white px-2 py-1 text-sm text-slate-800" min="0" type="number" value={nodeTileCounts[selectedNode.id] ?? 3} onChange={(event) => onSetNodeTileCount(selectedNode.id, Number(event.target.value))} />
           </label>
+          <button
+            className={`mb-2 w-full rounded border px-2 py-1 text-xs ${startingNodeId === selectedNode.id ? "border-teal-400 bg-teal-100 text-teal-900" : "border-cyan-200 bg-white text-slate-700 hover:bg-cyan-50"}`}
+            onClick={() => onSetStartingNode(selectedNode.id)}
+            type="button"
+          >
+            {startingNodeId === selectedNode.id ? "Poulpita starts here" : "Set Poulpita start"}
+          </button>
+          <div className="mb-2 grid grid-cols-2 gap-1">
+            {["shelter", "octopus"].map((tokenType) => {
+              const checked = (nodeTokens?.[selectedNode.id] || []).some((token) => (typeof token === "string" ? token : token.type) === tokenType);
+              return (
+                <button
+                  className={`rounded border px-2 py-1 text-xs ${checked ? "border-teal-400 bg-teal-100 text-teal-900" : "border-cyan-200 bg-white text-slate-700 hover:bg-cyan-50"}`}
+                  key={tokenType}
+                  onClick={() => onToggleNodeToken(selectedNode.id, tokenType)}
+                  type="button"
+                >
+                  {checked ? "Remove" : "Add"} {tokenType === "shelter" ? "Shelter" : "Octopus"}
+                </button>
+              );
+            })}
+          </div>
           <div className="space-y-1">
             {groups.map((group) => {
               const decoratedGroup = groupsById[group.id];

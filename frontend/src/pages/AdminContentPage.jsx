@@ -432,14 +432,21 @@ const AdminContentPage = () => {
     }
   };
 
-  const saveToken = async (tokenId) => {
+  const saveToken = async (tokenId, tokenConfig = {}) => {
     setBusy(true);
     setError("");
     try {
       const file = tokenImageRefs.current[tokenId]?.files?.[0] || null;
-      if (!file) throw new Error("Choose a token image to upload.");
       const form = new FormData();
-      form.set("image", file);
+      if (file) form.set("image", file);
+      if (tokenId === "octopus") {
+        form.set("priority", String(Number(tokenConfig.priority || 0)));
+        form.set("interaction_ids_json", JSON.stringify(tokenConfig.interaction_ids || []));
+        form.set("counter_attack_interaction_ids_json", JSON.stringify(tokenConfig.counter_attack_interaction_ids || []));
+        form.set("success_effects_json", JSON.stringify(tokenConfig.success_effects || []));
+        form.set("counter_attack_effects_json", JSON.stringify(tokenConfig.counter_attack_effects || []));
+        form.set("failure_effects_json", JSON.stringify(tokenConfig.failure_effects || []));
+      }
       await request(`/api/admin/content/tokens/${tokenId}`, { method: "PUT", body: form });
       if (tokenImageRefs.current[tokenId]) tokenImageRefs.current[tokenId].value = "";
       await loadContent();
@@ -759,6 +766,7 @@ const AdminContentPage = () => {
       {activeTab === "tokens" ? (
         <TokenEditor
           busy={busy}
+          content={content}
           tokenImageRefs={tokenImageRefs}
           tokens={content.tokens || []}
           onSave={saveToken}
@@ -1285,23 +1293,98 @@ const TokenMark = ({ token, label, className = "" }) => {
   );
 };
 
-const TokenEditor = ({ tokens, tokenImageRefs, onSave, busy }) => (
-  <section className="grid gap-4 md:grid-cols-3">
-    {tokens.map((token) => (
-      <article className={panel} key={token.id}>
-        <div className="flex items-center gap-3">
-          <TokenMark token={token} />
-          <div>
-            <h2 className="font-semibold text-teal-950">{token.name}</h2>
-            <p className="text-xs text-slate-500">{token.id}</p>
-          </div>
-        </div>
-        <input ref={(node) => { tokenImageRefs.current[token.id] = node; }} className={`${input} mt-4 text-sm`} type="file" accept="image/png,image/jpeg,image/webp" />
-        <button className={`${primaryButton} mt-3`} disabled={busy} onClick={() => onSave(token.id)} type="button">Save token image</button>
-      </article>
-    ))}
-  </section>
-);
+const TokenEditor = ({ tokens, content, tokenImageRefs, onSave, busy }) => {
+  const [drafts, setDrafts] = useState({});
+
+  useEffect(() => {
+    setDrafts(Object.fromEntries((tokens || []).map((token) => [token.id, {
+      priority: Number(token.priority || 0),
+      interaction_ids: token.interaction_ids || [],
+      counter_attack_interaction_ids: token.counter_attack_interaction_ids || [],
+      success_effects: token.success_effects || [],
+      counter_attack_effects: token.counter_attack_effects || [],
+      failure_effects: token.failure_effects || [],
+    }])));
+  }, [tokens]);
+
+  const setTokenDraft = (tokenId, updater) => {
+    setDrafts((current) => {
+      const previous = current[tokenId] || {};
+      return { ...current, [tokenId]: typeof updater === "function" ? updater(previous) : { ...previous, ...updater } };
+    });
+  };
+
+  const toggleInteraction = (tokenId, field, interactionId) => {
+    setTokenDraft(tokenId, (current) => {
+      const selected = new Set(current[field] || []);
+      if (selected.has(interactionId)) selected.delete(interactionId);
+      else selected.add(interactionId);
+      return { ...current, [field]: Array.from(selected) };
+    });
+  };
+
+  const addEffect = (tokenId, field, type) => {
+    setTokenDraft(tokenId, (current) => ({
+      ...current,
+      [field]: [
+        ...(current[field] || []),
+        {
+          type,
+          amount: noAmountEffectTypes.has(type) ? null : 1,
+          category_id: type === "remove_preys" ? content.categories?.[0]?.id || "" : undefined,
+        },
+      ],
+    }));
+  };
+
+  const updateEffect = (tokenId, field, index, patch) => {
+    setTokenDraft(tokenId, (current) => ({
+      ...current,
+      [field]: (current[field] || []).map((effect, effectIndex) => (effectIndex === index ? { ...effect, ...patch } : effect)),
+    }));
+  };
+
+  const removeEffect = (tokenId, field, index) => {
+    setTokenDraft(tokenId, (current) => ({
+      ...current,
+      [field]: (current[field] || []).filter((_, effectIndex) => effectIndex !== index),
+    }));
+  };
+
+  return (
+    <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+      {tokens.map((token) => {
+        const draft = drafts[token.id] || {};
+        return (
+          <article className={panel} key={token.id}>
+            <div className="flex items-center gap-3">
+              <TokenMark token={token} />
+              <div>
+                <h2 className="font-semibold text-teal-950">{token.name}</h2>
+                <p className="text-xs text-slate-500">{token.id}</p>
+              </div>
+            </div>
+            <input ref={(node) => { tokenImageRefs.current[token.id] = node; }} className={`${input} mt-4 text-sm`} type="file" accept="image/png,image/jpeg,image/webp" />
+            {token.id === "octopus" ? (
+              <div className="mt-4 space-y-3">
+                <label className="block text-sm">
+                  <span className="text-slate-600">Priority</span>
+                  <input className={`${input} mt-1`} min="0" step="1" type="number" value={draft.priority ?? 0} onChange={(event) => setTokenDraft(token.id, { priority: Number(event.target.value || 0) })} />
+                </label>
+                <InteractionChecklist title="Required to succeed" field="interaction_ids" interactions={content.interactions || []} selected={draft.interaction_ids || []} onToggle={(field, interactionId) => toggleInteraction(token.id, field, interactionId)} />
+                <InteractionChecklist title="Optional counter-attack" field="counter_attack_interaction_ids" interactions={content.interactions || []} selected={draft.counter_attack_interaction_ids || []} onToggle={(field, interactionId) => toggleInteraction(token.id, field, interactionId)} />
+                <EffectEditor title="Success effects" field="success_effects" effects={draft.success_effects || []} options={successEffectOptions} onAdd={(field, type) => addEffect(token.id, field, type)} onUpdate={(field, index, patch) => updateEffect(token.id, field, index, patch)} onRemove={(field, index) => removeEffect(token.id, field, index)} />
+                <EffectEditor title="Counter-attack effects" field="counter_attack_effects" effects={draft.counter_attack_effects || []} options={successEffectOptions} onAdd={(field, type) => addEffect(token.id, field, type)} onUpdate={(field, index, patch) => updateEffect(token.id, field, index, patch)} onRemove={(field, index) => removeEffect(token.id, field, index)} />
+                <EffectEditor categories={content.categories || []} title="Failure effects" field="failure_effects" effects={draft.failure_effects || []} options={failureEffectOptions} onAdd={(field, type) => addEffect(token.id, field, type)} onUpdate={(field, index, patch) => updateEffect(token.id, field, index, patch)} onRemove={(field, index) => removeEffect(token.id, field, index)} />
+              </div>
+            ) : null}
+            <button className={`${primaryButton} mt-3`} disabled={busy} onClick={() => onSave(token.id, draft)} type="button">Save token</button>
+          </article>
+        );
+      })}
+    </section>
+  );
+};
 
 const panelZoneLabels = { neurons: "Neurons", seashells: "Shells" };
 

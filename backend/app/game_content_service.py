@@ -63,7 +63,10 @@ TOKEN_TYPES = [
     {"id": "neuron", "name": "Neuron token"},
     {"id": "seashell", "name": "Seashell token"},
     {"id": "shelter", "name": "Shelter token"},
+    {"id": "octopus", "name": "Octopus token"},
 ]
+OCTOPUS_TOKEN_ID = "octopus"
+PLACEABLE_LEVEL_TOKEN_IDS = {"shelter", OCTOPUS_TOKEN_ID}
 POULPITA_PANEL_ZONE_IDS = {"neurons", "seashells"}
 SIZE_UNITS = {"mg", "g", "kg"}
 ADMIN_CONTENT_COLLECTION_KEYS = [
@@ -181,11 +184,28 @@ def _read_content() -> dict[str, Any]:
         level["objectives"] = _normalize_level_objectives(level.get("objectives") or [])
         level["starting_energy"] = max(0, min(32, int(level.get("starting_energy") or 3)))
         level["surprise_deck_id"] = level.get("surprise_deck_id") or ""
+        level["poulpita_starting_node_id"] = str(level.get("poulpita_starting_node_id") or "")
+        level["node_tokens"] = level.get("node_tokens") or {}
     return content
 
 
 def _default_tokens() -> list[dict[str, Any]]:
-    return [{**token, "image_filename": None} for token in TOKEN_TYPES]
+    tokens = []
+    for token in TOKEN_TYPES:
+        entry = {**token, "image_filename": None}
+        if token["id"] == OCTOPUS_TOKEN_ID:
+            entry.update(
+                {
+                    "priority": 0,
+                    "interaction_ids": [],
+                    "counter_attack_interaction_ids": [],
+                    "success_effects": [],
+                    "counter_attack_effects": [],
+                    "failure_effects": [],
+                }
+            )
+        tokens.append(entry)
+    return tokens
 
 
 def _normalize_tokens(raw_tokens: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -196,6 +216,13 @@ def _normalize_tokens(raw_tokens: list[dict[str, Any]]) -> list[dict[str, Any]]:
         current["id"] = default["id"]
         current["name"] = default["name"]
         current["image_filename"] = current.get("image_filename") or None
+        if current["id"] == OCTOPUS_TOKEN_ID:
+            current["priority"] = int(current.get("priority") or 0)
+            current["interaction_ids"] = list(current.get("interaction_ids") or [])
+            current["counter_attack_interaction_ids"] = list(current.get("counter_attack_interaction_ids") or [])
+            current["success_effects"] = list(current.get("success_effects") or [])
+            current["counter_attack_effects"] = list(current.get("counter_attack_effects") or [])
+            current["failure_effects"] = list(current.get("failure_effects") or [])
         tokens.append(current)
     return tokens
 
@@ -569,7 +596,17 @@ def get_level_config(level_id: str | None = None) -> dict[str, Any]:
     raise LookupError("Level not found.")
 
 
-async def update_token(*, token_id: str, image: UploadFile | None) -> dict[str, Any]:
+async def update_token(
+    *,
+    token_id: str,
+    image: UploadFile | None,
+    priority: int | None = None,
+    interaction_ids: list[str] | None = None,
+    counter_attack_interaction_ids: list[str] | None = None,
+    success_effects: list[dict[str, Any]] | None = None,
+    counter_attack_effects: list[dict[str, Any]] | None = None,
+    failure_effects: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     content = _read_content()
     index = _find_index(content["tokens"], token_id)
     current = content["tokens"][index]
@@ -579,6 +616,36 @@ async def update_token(*, token_id: str, image: UploadFile | None) -> dict[str, 
         _delete_image(image_filename)
         image_filename = next_image
     current["image_filename"] = image_filename
+    if token_id == OCTOPUS_TOKEN_ID:
+        interaction_set = {interaction.get("id") for interaction in content["interactions"]}
+        category_ids = {category.get("id") for category in content["categories"]}
+        current["priority"] = int(priority if priority is not None else current.get("priority") or 0)
+        current["interaction_ids"] = _normalize_interaction_ids(
+            interaction_ids if interaction_ids is not None else current.get("interaction_ids") or [],
+            interaction_set,
+        )
+        current["counter_attack_interaction_ids"] = _normalize_interaction_ids(
+            counter_attack_interaction_ids
+            if counter_attack_interaction_ids is not None
+            else current.get("counter_attack_interaction_ids") or [],
+            interaction_set,
+        )
+        current["success_effects"] = _normalize_effects(
+            success_effects if success_effects is not None else current.get("success_effects") or [],
+            SUCCESS_EFFECT_TYPES,
+            "octopus success",
+        )
+        current["counter_attack_effects"] = _normalize_effects(
+            counter_attack_effects if counter_attack_effects is not None else current.get("counter_attack_effects") or [],
+            SUCCESS_EFFECT_TYPES,
+            "octopus counter-attack",
+        )
+        current["failure_effects"] = _normalize_effects(
+            failure_effects if failure_effects is not None else current.get("failure_effects") or [],
+            FAILURE_EFFECT_TYPES,
+            "octopus failure",
+            category_ids=category_ids,
+        )
     content["tokens"][index] = current
     _write_content(content)
     return _with_urls(current)
@@ -945,6 +1012,29 @@ def _normalize_node_tile_counts(node_tile_counts: dict[str, Any], node_ids: set[
     return normalized
 
 
+def _normalize_level_node_tokens(node_tokens: dict[str, Any], node_ids: set[str]) -> dict[str, list[dict[str, str]]]:
+    normalized: dict[str, list[dict[str, str]]] = {}
+    for node_id, raw_tokens in (node_tokens or {}).items():
+        node_id = str(node_id)
+        if node_id not in node_ids:
+            raise ValueError("Level token placement references an unknown node.")
+        tokens = []
+        seen_types = set()
+        if not isinstance(raw_tokens, list):
+            raise ValueError("Level node tokens must be JSON arrays.")
+        for raw_token in raw_tokens:
+            token_type = str(raw_token.get("type") if isinstance(raw_token, dict) else raw_token or "")
+            if token_type not in PLACEABLE_LEVEL_TOKEN_IDS:
+                raise ValueError("Level token placement references an unknown token type.")
+            if token_type in seen_types:
+                continue
+            seen_types.add(token_type)
+            tokens.append({"type": token_type})
+        if tokens:
+            normalized[node_id] = tokens
+    return normalized
+
+
 def _normalize_level_groups(groups: list[dict[str, Any]], tile_set: set[str]) -> list[dict[str, Any]]:
     normalized = []
     seen_ids = set()
@@ -1000,6 +1090,8 @@ def save_level(
     objectives: list[dict[str, Any]] | None = None,
     starting_energy: int | None = None,
     surprise_deck_id: str | None = None,
+    poulpita_starting_node_id: str | None = None,
+    node_tokens: dict[str, Any] | None = None,
     level_id: str | None = None,
 ) -> dict[str, Any]:
     content = _read_content()
@@ -1020,6 +1112,9 @@ def save_level(
         if group_id not in group_ids:
             raise ValueError("Every map node must belong to a level group.")
         normalized_node_groups[node_id] = group_id
+    normalized_starting_node_id = str(poulpita_starting_node_id or map_config.get("starting_node_id") or sorted(node_ids)[0])
+    if normalized_starting_node_id not in node_ids:
+        raise ValueError("Poulpita starting node must be one of the map nodes.")
     for group in normalized_groups:
         capacity = sum(count for node_id, count in normalized_counts.items() if normalized_node_groups[node_id] == group["id"])
         assigned = sum(int(count or 0) for count in (group.get("tile_counts") or {}).values())
@@ -1035,6 +1130,8 @@ def save_level(
         "objectives": _normalize_level_objectives(objectives or []),
         "starting_energy": max(0, min(32, int(starting_energy if starting_energy is not None else 3))),
         "surprise_deck_id": normalized_surprise_deck_id,
+        "poulpita_starting_node_id": normalized_starting_node_id,
+        "node_tokens": _normalize_level_node_tokens(node_tokens or {}, node_ids),
     }
     if level_id:
         content["levels"][_find_index(content["levels"], level_id)] = level

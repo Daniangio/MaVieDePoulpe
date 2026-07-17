@@ -170,7 +170,7 @@ def test_tokens_and_poulpita_panel_are_configurable(tmp_path, monkeypatch):
 
     state = service.get_content_state()
 
-    assert [token["id"] for token in state["tokens"]] == ["neuron", "seashell", "shelter"]
+    assert [token["id"] for token in state["tokens"]] == ["neuron", "seashell", "shelter", "octopus"]
     assert set(state["poulpita_panel"]["zones"]) == {"neurons", "seashells"}
 
     saved = run(
@@ -199,6 +199,62 @@ def test_tokens_and_poulpita_panel_are_configurable(tmp_path, monkeypatch):
     )
     assert resized["sizes"] == [{"amount": 500.0, "unit": "mg", "energy_cost": 0}, {"amount": 1.2, "unit": "g", "energy_cost": 2}]
     assert service.get_game_content_catalog()["poulpita_panel"]["zones"]["seashells"]["x"] == 0.5
+
+
+def test_octopus_token_rules_and_level_node_tokens_are_configurable(tmp_path, monkeypatch):
+    monkeypatch.setattr(service, "CONTENT_ROOT", tmp_path)
+    monkeypatch.setattr(service, "CONTENT_IMAGES_ROOT", tmp_path / "images")
+    monkeypatch.setattr(service, "CONTENT_JSON_PATH", tmp_path / "content.json")
+    monkeypatch.setattr(
+        service,
+        "get_map",
+        lambda _map_id: {
+            "id": "reef",
+            "name": "Reef",
+            "starting_node_id": "N1",
+            "nodes": {
+                "N1": {"id": "N1", "x": 0.1, "y": 0.1, "tier": 1},
+                "N2": {"id": "N2", "x": 0.5, "y": 0.5, "tier": 1},
+            },
+        },
+    )
+    service._write_content(
+        {
+            "categories": [{"id": "threat", "name": "Threat", "compulsory_on_same_node": True}],
+            "interactions": [{"id": "charge", "name": "Charge", "image_filename": None}],
+            "events": [],
+            "tiles": [],
+            "player_boards": [],
+            "levels": [],
+        }
+    )
+
+    octopus = run(
+        service.update_token(
+            token_id="octopus",
+            image=None,
+            priority=9,
+            interaction_ids=["charge"],
+            counter_attack_interaction_ids=[],
+            success_effects=[{"type": "gain_neurons", "amount": 1}],
+            counter_attack_effects=[],
+            failure_effects=[{"type": "lose_energy", "amount": 1}],
+        )
+    )
+    level = service.save_level(
+        name="Octopus night",
+        map_id="reef",
+        node_tile_counts={"N1": 0, "N2": 0},
+        node_group_ids={"N1": "main", "N2": "main"},
+        groups=[{"id": "main", "name": "Main", "tile_counts": {}}],
+        poulpita_starting_node_id="N2",
+        node_tokens={"N1": [{"type": "shelter"}], "N2": [{"type": "octopus"}]},
+    )
+
+    assert octopus["priority"] == 9
+    assert octopus["interaction_ids"] == ["charge"]
+    assert level["poulpita_starting_node_id"] == "N2"
+    assert level["node_tokens"] == {"N1": [{"type": "shelter"}], "N2": [{"type": "octopus"}]}
 
 
 def test_categories_can_be_compulsory_and_tiles_have_priority(tmp_path, monkeypatch):

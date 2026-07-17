@@ -39,6 +39,10 @@ CAPABILITY_NAMES = {
     "propulsion": "Propulsion",
     "intelligence": "Intelligence",
 }
+OCTOPUS_TOKEN_ID = "octopus"
+OCTOPUS_TILE_ID = "__octopus_token__"
+OCTOPUS_EVENT_ID = "__octopus_token_event__"
+OCTOPUS_CATEGORY_ID = "__octopus_token_threat__"
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -271,6 +275,35 @@ def _build_tile_catalog() -> dict[str, Any]:
     public_tiles = {}
     for tile_id, tile in catalog["tiles"].items():
         public_tiles[tile_id] = _tile_public(tile, catalog)
+    token_catalog = catalog.get("tokens") or {}
+    octopus_token = token_catalog.get(OCTOPUS_TOKEN_ID) or {}
+    if octopus_token:
+        octopus_event = {
+            "id": OCTOPUS_EVENT_ID,
+            "name": octopus_token.get("name") or "Octopus token",
+            "category_id": OCTOPUS_CATEGORY_ID,
+            "image_url": octopus_token.get("image_url"),
+        }
+        catalog.setdefault("events", {})[OCTOPUS_EVENT_ID] = octopus_event
+        catalog.setdefault("categories", {})[OCTOPUS_CATEGORY_ID] = {
+            "id": OCTOPUS_CATEGORY_ID,
+            "name": "Threat",
+            "compulsory_on_same_node": True,
+        }
+        public_tiles[OCTOPUS_TILE_ID] = {
+            "id": OCTOPUS_TILE_ID,
+            "name": octopus_token.get("name") or "Octopus token",
+            "event_id": OCTOPUS_EVENT_ID,
+            "event": octopus_event,
+            "image_url": octopus_token.get("image_url"),
+            "priority": int(octopus_token.get("priority") or 0),
+            "interaction_ids": list(octopus_token.get("interaction_ids") or []),
+            "counter_attack_interaction_ids": list(octopus_token.get("counter_attack_interaction_ids") or []),
+            "success_effects": deepcopy(octopus_token.get("success_effects") or []),
+            "counter_attack_effects": deepcopy(octopus_token.get("counter_attack_effects") or []),
+            "failure_effects": deepcopy(octopus_token.get("failure_effects") or []),
+            "token_type": OCTOPUS_TOKEN_ID,
+        }
     cards = catalog.get("cards") or {}
     if isinstance(cards, list):
         cards = {card["id"]: card for card in cards if card.get("id")}
@@ -283,7 +316,7 @@ def _build_tile_catalog() -> dict[str, Any]:
         "surprise_cards": catalog.get("surprise_cards") or {},
         "surprise_decks": catalog.get("surprise_decks") or {},
         "card_categories": catalog.get("card_categories") or [],
-        "tokens": catalog.get("tokens") or {},
+        "tokens": token_catalog,
         "poulpita_panel": catalog.get("poulpita_panel") or {},
     }
 
@@ -303,7 +336,27 @@ def _level_tiles(level_config: dict[str, Any], catalog: dict[str, Any]) -> dict[
             count = int((level_config.get("node_tile_counts") or {}).get(node_id) or 0)
             node_tiles.setdefault(node_id, []).extend(expanded[:count])
             expanded = expanded[count:]
+    for node_id, tokens in (level_config.get("node_tokens") or {}).items():
+        for token in tokens or []:
+            if str(token.get("type") if isinstance(token, dict) else token) == OCTOPUS_TOKEN_ID and OCTOPUS_TILE_ID in (catalog.get("tiles") or {}):
+                node_tiles.setdefault(str(node_id), []).append(
+                    {
+                        "instance_id": f"octopus_{node_id}_{uuid.uuid4().hex}",
+                        "tile_id": OCTOPUS_TILE_ID,
+                        "face_up": True,
+                        "token_type": OCTOPUS_TOKEN_ID,
+                    }
+                )
     return node_tiles
+
+
+def _level_shelters(level_config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    shelters: dict[str, dict[str, Any]] = {}
+    for node_id, tokens in (level_config.get("node_tokens") or {}).items():
+        count = sum(1 for token in tokens or [] if str(token.get("type") if isinstance(token, dict) else token) == "shelter")
+        if count:
+            shelters[str(node_id)] = {"count": count, "seashells": 0, "secure": False}
+    return shelters
 
 
 def _apply_tile_visibility(state: dict[str, Any]) -> None:
@@ -359,7 +412,7 @@ def _goldfish_state(room_id: str, *, level_id: str | None = None) -> dict[str, A
         "focused_capability_id": DEFAULT_FOCUSED_CAPABILITY_ID,
         "map": _map_projection(map_config),
         "poulpita": {
-            "node_id": str(map_config["starting_node_id"]),
+            "node_id": str(level_config.get("poulpita_starting_node_id") or map_config["starting_node_id"]),
             "previous_node_id": None,
             "energy": starting_energy,
             "neurons": 0,
@@ -369,7 +422,7 @@ def _goldfish_state(room_id: str, *, level_id: str | None = None) -> dict[str, A
         },
         "capabilities": _initial_capabilities(deal_hands=True),
         "tiles": _level_tiles(level_config, tile_catalog),
-        "shelters": {},
+        "shelters": _level_shelters(level_config),
         "surprise_deck_id": surprise_deck_id,
         "surprise_draw_pile": surprise_draw_pile,
         "surprise_deck_initialized": True,
@@ -402,12 +455,28 @@ def _project_state(state: dict[str, Any]) -> dict[str, Any]:
         latest_catalog = get_game_content_catalog()
         latest_tiles = latest_catalog.get("tiles") or {}
         latest_events = latest_catalog.get("events") or {}
+        preserved_special_tiles = {
+            tile_id: tile
+            for tile_id, tile in (tile_catalog.get("tiles") or {}).items()
+            if str(tile_id).startswith("__")
+        }
+        preserved_special_events = {
+            event_id: event
+            for event_id, event in (tile_catalog.get("events") or {}).items()
+            if str(event_id).startswith("__")
+        }
+        preserved_special_categories = {
+            category_id: category
+            for category_id, category in (tile_catalog.get("categories") or {}).items()
+            if str(category_id).startswith("__")
+        }
         tile_catalog["tiles"] = {
             tile_id: _tile_public(tile, {"events": latest_events})
             for tile_id, tile in latest_tiles.items()
-        } or tile_catalog.get("tiles") or {}
-        tile_catalog["categories"] = latest_catalog.get("categories") or tile_catalog.get("categories") or {}
-        tile_catalog["events"] = latest_events or tile_catalog.get("events") or {}
+        } or {}
+        tile_catalog["tiles"].update(preserved_special_tiles)
+        tile_catalog["categories"] = {**(latest_catalog.get("categories") or {}), **preserved_special_categories}
+        tile_catalog["events"] = {**(latest_events or {}), **preserved_special_events}
         tile_catalog["interactions"] = latest_catalog.get("interactions") or tile_catalog.get("interactions") or {}
         tile_catalog["cards"] = latest_catalog.get("cards") or tile_catalog.get("cards") or {}
         tile_catalog["tokens"] = latest_catalog.get("tokens") or tile_catalog.get("tokens") or {}
@@ -1693,7 +1762,7 @@ class GameRoomService:
                         f"A compulsory interaction with priority {highest_priority} must be resolved first.",
                     )
             capability = (state.get("capabilities") or {}).get(capability_id) or {}
-            if tile.get("event_id") not in (capability.get("initiates_event_ids") or []):
+            if tile.get("token_type") != OCTOPUS_TOKEN_ID and tile.get("event_id") not in (capability.get("initiates_event_ids") or []):
                 self._reject(state, command_id, "cannot_initiate_interaction", "This ability cannot initiate interaction with this event.")
             next_state = deepcopy(state)
             next_state["interaction"] = {

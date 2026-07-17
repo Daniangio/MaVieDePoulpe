@@ -8,6 +8,7 @@ from backend.app.game_room_service import (
     ROOM_STATE_IN_GAME,
     ROOM_STATE_SETUP,
     _apply_tile_visibility,
+    _goldfish_state,
 )
 from backend.app.server_models import User
 
@@ -1048,6 +1049,49 @@ def test_goldfish_game_uses_level_starting_energy():
         assert service is not None
 
     run(scenario())
+
+
+def test_goldfish_game_uses_level_starting_node_and_node_tokens(monkeypatch):
+    level = {
+        **TEST_LEVEL,
+        "poulpita_starting_node_id": "1B",
+        "node_tokens": {"1A": [{"type": "shelter"}], "1B": [{"type": "octopus"}]},
+    }
+    monkeypatch.setattr("backend.app.game_room_service.get_level_config", lambda level_id=None: level)
+    monkeypatch.setattr(
+        "backend.app.game_room_service.get_game_content_catalog",
+        lambda: {
+            "tiles": {},
+            "events": {},
+            "categories": {},
+            "interactions": {"charge": {"id": "charge", "name": "Charge", "image_url": None}},
+            "tokens": {
+                "octopus": {
+                    "id": "octopus",
+                    "name": "Octopus token",
+                    "image_url": "/api/content/images/octopus.png",
+                    "priority": 12,
+                    "interaction_ids": ["charge"],
+                    "counter_attack_interaction_ids": [],
+                    "success_effects": [{"type": "gain_neurons", "amount": 1}],
+                    "counter_attack_effects": [],
+                    "failure_effects": [{"type": "lose_energy", "amount": 1}],
+                },
+                "shelter": {"id": "shelter", "name": "Shelter token", "image_url": None},
+            },
+        },
+    )
+
+    state = _goldfish_state("room_tokens", level_id="test-level")
+    octopus_instance = state["tiles"]["1B"][0]
+    octopus_tile = state["tile_catalog"]["tiles"][octopus_instance["tile_id"]]
+
+    assert state["poulpita"]["node_id"] == "1B"
+    assert state["shelters"]["1A"]["count"] == 1
+    assert octopus_instance["face_up"] is True
+    assert octopus_tile["priority"] == 12
+    assert octopus_tile["interaction_ids"] == ["charge"]
+    assert state["tile_catalog"]["categories"]["__octopus_token_threat__"]["compulsory_on_same_node"] is True
 
 
 def test_day_shell_transfer_secures_shelter_and_completes_objective():

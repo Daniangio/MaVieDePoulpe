@@ -678,6 +678,8 @@ async def admin_create_level(
     objectives_json: str = Form(default="[]"),
     starting_energy: int = Form(default=3),
     surprise_deck_id: str = Form(default=""),
+    poulpita_starting_node_id: str = Form(default=""),
+    node_tokens_json: str = Form(default="{}"),
     _admin: User = Depends(require_admin),
 ):
     try:
@@ -690,6 +692,8 @@ async def admin_create_level(
             objectives=_json_form_list(objectives_json, "objectives_json"),
             starting_energy=starting_energy,
             surprise_deck_id=surprise_deck_id,
+            poulpita_starting_node_id=poulpita_starting_node_id,
+            node_tokens=_json_form_object(node_tokens_json, "node_tokens_json"),
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -708,6 +712,8 @@ async def admin_update_level(
     objectives_json: str = Form(default="[]"),
     starting_energy: int = Form(default=3),
     surprise_deck_id: str = Form(default=""),
+    poulpita_starting_node_id: str = Form(default=""),
+    node_tokens_json: str = Form(default="{}"),
     _admin: User = Depends(require_admin),
 ):
     try:
@@ -721,6 +727,8 @@ async def admin_update_level(
             objectives=_json_form_list(objectives_json, "objectives_json"),
             starting_energy=starting_energy,
             surprise_deck_id=surprise_deck_id,
+            poulpita_starting_node_id=poulpita_starting_node_id,
+            node_tokens=_json_form_object(node_tokens_json, "node_tokens_json"),
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -741,10 +749,25 @@ async def admin_delete_level(level_id: str, _admin: User = Depends(require_admin
 async def admin_update_token(
     token_id: str,
     image: UploadFile | None = File(default=None),
+    priority: int | None = Form(default=None),
+    interaction_ids_json: str | None = Form(default=None),
+    counter_attack_interaction_ids_json: str | None = Form(default=None),
+    success_effects_json: str | None = Form(default=None),
+    counter_attack_effects_json: str | None = Form(default=None),
+    failure_effects_json: str | None = Form(default=None),
     _admin: User = Depends(require_admin),
 ):
     try:
-        return await update_token(token_id=token_id, image=image)
+        return await update_token(
+            token_id=token_id,
+            image=image,
+            priority=priority,
+            interaction_ids=_json_form_list(interaction_ids_json, "interaction_ids_json") if interaction_ids_json is not None else None,
+            counter_attack_interaction_ids=_json_form_list(counter_attack_interaction_ids_json, "counter_attack_interaction_ids_json") if counter_attack_interaction_ids_json is not None else None,
+            success_effects=_json_form_list(success_effects_json, "success_effects_json") if success_effects_json is not None else None,
+            counter_attack_effects=_json_form_list(counter_attack_effects_json, "counter_attack_effects_json") if counter_attack_effects_json is not None else None,
+            failure_effects=_json_form_list(failure_effects_json, "failure_effects_json") if failure_effects_json is not None else None,
+        )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

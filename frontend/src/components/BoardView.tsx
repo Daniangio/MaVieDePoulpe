@@ -214,7 +214,7 @@ const BoardView = ({ projection, focusedCapabilityId, moveMode, pending, onMove,
                       const canFocusedCapabilityInitiate =
                         canInspect &&
                         !projection.interaction &&
-                        Boolean(tile?.event_id && (focusedCapability?.initiates_event_ids || []).includes(tile.event_id));
+                        Boolean(tile?.token_type === "octopus" || (tile?.event_id && (focusedCapability?.initiates_event_ids || []).includes(tile.event_id)));
                       const title = isFaceDown ? "Hidden tile" : tile?.name || event?.name || tileInstance.tile_id;
                       const position = tileOrbitPosition(tileIndex);
                       return (
