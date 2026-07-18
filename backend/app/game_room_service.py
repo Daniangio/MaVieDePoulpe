@@ -195,6 +195,7 @@ def _setup_state(room_id: str, *, level_id: str | None = None) -> dict[str, Any]
         "selected_level_id": level_config["id"],
         "day_index": 1,
         "night_time_spent": 0,
+        "night_time_total": max(1, int(level_config.get("night_duration_steps") or NIGHT_OVERRUN_CHUNKS)),
         "selected_map_id": map_config["id"],
         "active_capability_id": None,
         "last_active_capability_id": None,
@@ -473,6 +474,7 @@ def _goldfish_state(room_id: str, *, level_id: str | None = None) -> dict[str, A
         "selected_level_id": level_config["id"],
         "day_index": 1,
         "night_time_spent": 0,
+        "night_time_total": max(1, int(level_config.get("night_duration_steps") or NIGHT_OVERRUN_CHUNKS)),
         "selected_map_id": map_config["id"],
         "active_capability_id": None,
         "last_active_capability_id": None,
@@ -572,7 +574,7 @@ def _project_state(state: dict[str, Any]) -> dict[str, Any]:
         "selected_level_id": state.get("selected_level_id") or state.get("level_id"),
         "day_index": int(state.get("day_index") or 1),
         "night_time_spent": int(state.get("night_time_spent") or 0),
-        "night_time_total": NIGHT_OVERRUN_CHUNKS,
+        "night_time_total": max(1, int(state.get("night_time_total") or NIGHT_OVERRUN_CHUNKS)),
         "night_shelter_available_at": NIGHT_SHELTER_AVAILABLE_CHUNKS,
         "selected_map_id": state.get("selected_map_id") or "",
         "active_capability_id": state.get("active_capability_id"),
@@ -662,7 +664,8 @@ def _advance_night_clock(next_state: dict[str, Any], *, chunks: int = 1) -> None
     previous_time = int(next_state.get("night_time_spent") or 0)
     next_time = previous_time + max(0, int(chunks or 0))
     next_state["night_time_spent"] = next_time
-    if previous_time <= NIGHT_OVERRUN_CHUNKS < next_time:
+    night_time_total = max(1, int(next_state.get("night_time_total") or NIGHT_OVERRUN_CHUNKS))
+    if previous_time <= night_time_total < next_time:
         _damage_poulpita(next_state, amount=1, reason="night_overrun")
         if int((next_state.get("poulpita") or {}).get("energy") or 0) <= 0:
             _mark_game_lost_if_needed(next_state, reason="poulpita_no_energy")
@@ -1452,6 +1455,7 @@ class GameRoomService:
             next_state["level_id"] = level_config["id"]
             next_state["selected_level_id"] = level_config["id"]
             next_state["selected_map_id"] = map_config["id"]
+            next_state["night_time_total"] = max(1, int(level_config.get("night_duration_steps") or NIGHT_OVERRUN_CHUNKS))
             next_state["map"] = _map_projection(map_config)
             room["map_id"] = map_config["id"]
             room["level_id"] = level_config["id"]
@@ -1528,7 +1532,7 @@ class GameRoomService:
             next_capability = next_state["capabilities"][capability_id]
             next_capability["control_takes_this_night"] = int(next_capability.get("control_takes_this_night") or 0) + 1
             next_capability["actions_taken_this_control"] = 0
-            if int(next_state.get("night_time_spent") or 0) >= NIGHT_OVERRUN_CHUNKS:
+            if int(next_state.get("night_time_spent") or 0) >= max(1, int(next_state.get("night_time_total") or NIGHT_OVERRUN_CHUNKS)):
                 _damage_poulpita(next_state, amount=1, reason="late_control_taken")
                 if int((next_state.get("poulpita") or {}).get("energy") or 0) <= 0:
                     _mark_game_lost_if_needed(next_state, reason="poulpita_no_energy")

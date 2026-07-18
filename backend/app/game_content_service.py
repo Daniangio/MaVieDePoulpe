@@ -192,6 +192,7 @@ def _read_content() -> dict[str, Any]:
         level["objectives"] = _normalize_level_objectives(level.get("objectives") or [])
         level["starting_energy"] = max(0, min(32, int(level.get("starting_energy") or 3)))
         level["starting_neurons"] = max(0, int(level.get("starting_neurons") or 0))
+        level["night_duration_steps"] = max(1, int(level.get("night_duration_steps") or 24))
         level["surprise_deck_id"] = level.get("surprise_deck_id") or ""
         level["poulpita_starting_node_id"] = str(level.get("poulpita_starting_node_id") or "")
         level["node_tokens"] = level.get("node_tokens") or {}
@@ -619,6 +620,11 @@ def _read_content_from_value(content: dict[str, Any]) -> dict[str, Any]:
     for level in content["levels"]:
         level["objectives"] = _normalize_level_objectives(level.get("objectives") or [])
         level["starting_energy"] = max(0, min(32, int(level.get("starting_energy") or 3)))
+        level["starting_neurons"] = max(0, int(level.get("starting_neurons") or 0))
+        level["night_duration_steps"] = max(1, int(level.get("night_duration_steps") or 24))
+        level["surprise_deck_id"] = level.get("surprise_deck_id") or ""
+        level["poulpita_starting_node_id"] = str(level.get("poulpita_starting_node_id") or "")
+        level["node_tokens"] = level.get("node_tokens") or {}
     return content
 
 
@@ -1161,6 +1167,7 @@ def save_level(
     objectives: list[dict[str, Any]] | None = None,
     starting_energy: int | None = None,
     starting_neurons: int | None = None,
+    night_duration_steps: int | None = None,
     surprise_deck_id: str | None = None,
     poulpita_starting_node_id: str | None = None,
     node_tokens: dict[str, Any] | None = None,
@@ -1202,6 +1209,7 @@ def save_level(
         "objectives": _normalize_level_objectives(objectives or []),
         "starting_energy": max(0, min(32, int(starting_energy if starting_energy is not None else 3))),
         "starting_neurons": max(0, int(starting_neurons if starting_neurons is not None else 0)),
+        "night_duration_steps": max(1, int(night_duration_steps if night_duration_steps is not None else 24)),
         "surprise_deck_id": normalized_surprise_deck_id,
         "poulpita_starting_node_id": normalized_starting_node_id,
         "node_tokens": _normalize_level_node_tokens(node_tokens or {}, node_ids),

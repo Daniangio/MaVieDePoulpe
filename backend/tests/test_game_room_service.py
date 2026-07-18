@@ -1153,12 +1153,13 @@ def test_poulpita_size_can_increase_once_per_day_without_spending_to_zero():
 
 def test_goldfish_game_uses_level_starting_energy(monkeypatch):
     async def scenario():
-        level = {**TEST_LEVEL, "starting_energy": 3, "starting_neurons": 5}
+        level = {**TEST_LEVEL, "starting_energy": 3, "starting_neurons": 5, "night_duration_steps": 18}
         monkeypatch.setattr("backend.app.game_room_service.get_level_config", lambda level_id=None: level)
         service, _user, _room, start = await create_started_room()
 
         assert start["projection"]["poulpita"]["energy"] == 3
         assert start["projection"]["poulpita"]["neurons"] == 5
+        assert start["projection"]["night_time_total"] == 18
         assert service is not None
 
     run(scenario())
@@ -1441,13 +1442,14 @@ def test_tile_with_no_required_interactions_resolves_successfully():
     run(scenario())
 
 
-def test_twenty_fifth_ap_spend_can_lose_game_when_energy_reaches_zero():
+def test_action_after_configured_night_duration_can_lose_game_when_energy_reaches_zero():
     async def scenario():
         service, user, room, _start = await create_started_room()
         state = service._memory_states[room["id"]]
         state["phase"] = "night_action"
         state["active_capability_id"] = DEFAULT_ACTIVE_CAPABILITY_ID
-        state["night_time_spent"] = 24
+        state["night_time_total"] = 10
+        state["night_time_spent"] = 10
         state["poulpita"]["energy"] = 1
         capability = state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]
         capability["pa"] = 1
@@ -1465,7 +1467,7 @@ def test_twenty_fifth_ap_spend_can_lose_game_when_energy_reaches_zero():
         game_result = await service.get_result(room_id=room["id"], user_id=user.id)
 
         assert result["ok"] is True
-        assert result["projection"]["night_time_spent"] == 25
+        assert result["projection"]["night_time_spent"] == 11
         assert result["projection"]["poulpita"]["energy"] == 0
         assert result["projection"]["phase"] == "game_over"
         assert game_result["outcome"] == "lost"

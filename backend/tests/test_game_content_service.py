@@ -217,11 +217,13 @@ def test_level_save_validates_group_capacity_and_node_assignment(tmp_path, monke
         objectives=[{"type": "increase_size", "target": 2}, {"type": "find_shelter"}],
         starting_energy=7,
         starting_neurons=4,
+        night_duration_steps=18,
     )
 
     assert level["node_tile_counts"] == {"N1": 2, "N2": 1}
     assert level["starting_energy"] == 7
     assert level["starting_neurons"] == 4
+    assert level["night_duration_steps"] == 18
     assert level["objectives"] == [
         {"id": "objective-1", "type": "increase_size", "target": 2},
         {"id": "objective-2", "type": "find_shelter"},

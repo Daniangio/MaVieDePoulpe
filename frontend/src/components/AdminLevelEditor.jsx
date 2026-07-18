@@ -12,6 +12,7 @@ const emptyLevelDraft = () => ({
   objectives: [],
   starting_energy: 3,
   starting_neurons: 0,
+  night_duration_steps: 24,
   surprise_deck_id: "",
   poulpita_starting_node_id: "",
   node_tokens: {},
@@ -155,6 +156,7 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
       form.set("objectives_json", JSON.stringify(draft.objectives || []));
       form.set("starting_energy", String(Math.max(0, Math.min(32, Number(draft.starting_energy ?? 3)))));
       form.set("starting_neurons", String(Math.max(0, Number(draft.starting_neurons ?? 0))));
+      form.set("night_duration_steps", String(Math.max(1, Number(draft.night_duration_steps ?? 24))));
       form.set("surprise_deck_id", draft.surprise_deck_id || "");
       form.set("poulpita_starting_node_id", draft.poulpita_starting_node_id || "");
       form.set("node_tokens_json", JSON.stringify(draft.node_tokens || {}));
@@ -250,7 +252,7 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
         </aside>
 
         <div className="grid gap-4">
-          <div className="grid gap-3 lg:grid-cols-[1fr_14rem_8rem_8rem_14rem]">
+          <div className="grid gap-3 lg:grid-cols-[1fr_13rem_7rem_7rem_8rem_13rem]">
             <label className="block text-sm">
               <span className="text-slate-600">Level name</span>
               <input className="mt-1 w-full rounded-md border border-cyan-200 bg-white px-3 py-2 text-slate-800" value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} />
@@ -280,6 +282,16 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
                 type="number"
                 value={Number(draft.starting_neurons ?? 0)}
                 onChange={(event) => setDraft((current) => ({ ...current, starting_neurons: Math.max(0, Number(event.target.value || 0)) }))}
+              />
+            </label>
+            <label className="block text-sm">
+              <span className="text-slate-600">Night steps</span>
+              <input
+                className="mt-1 w-full rounded-md border border-cyan-200 bg-white px-3 py-2 text-slate-800"
+                min="1"
+                type="number"
+                value={Number(draft.night_duration_steps ?? 24)}
+                onChange={(event) => setDraft((current) => ({ ...current, night_duration_steps: Math.max(1, Number(event.target.value || 1)) }))}
               />
             </label>
             <label className="block text-sm">

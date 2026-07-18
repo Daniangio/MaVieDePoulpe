@@ -21,7 +21,7 @@ const phaseLabel = (projection: GameProjection | null) => {
 
 const TimeTracker = ({ projection }: { projection: GameProjection | null }) => {
   const spent = Math.max(0, Number(projection?.night_time_spent || 0));
-  const total = Math.max(24, Number(projection?.night_time_total || 24));
+  const total = Math.max(1, Number(projection?.night_time_total || 24));
   const visibleTotal = Math.max(total, spent);
   const visibleHours = Math.ceil(visibleTotal / 4);
   const shelterAt = Math.max(0, Number(projection?.night_shelter_available_at || 16));
