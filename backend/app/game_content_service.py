@@ -63,7 +63,10 @@ TOKEN_TYPES = [
     {"id": "neuron", "name": "Neuron token"},
     {"id": "seashell", "name": "Seashell token"},
     {"id": "shelter", "name": "Shelter token"},
+    {"id": "octopus", "name": "Octopus token"},
 ]
+OCTOPUS_TOKEN_ID = "octopus"
+PLACEABLE_LEVEL_TOKEN_IDS = {"shelter", OCTOPUS_TOKEN_ID}
 POULPITA_PANEL_ZONE_IDS = {"neurons", "seashells"}
 SIZE_UNITS = {"mg", "g", "kg"}
 ADMIN_CONTENT_COLLECTION_KEYS = [
@@ -77,6 +80,39 @@ ADMIN_CONTENT_COLLECTION_KEYS = [
     "player_boards",
     "tokens",
 ]
+ACTION_COST_KEYS = ["gain_ap", "move", "interact", "special_power"]
+DEFAULT_ACTION_COSTS = {
+    "gain_ap": {"ap_cost": 0, "time_cost": 0},
+    "move": {"ap_cost": 1, "time_cost": 1},
+    "interact": {"ap_cost": 1, "time_cost": 2},
+    "special_power": {"ap_cost": 1, "time_cost": 0},
+}
+DEFAULT_BOT_SETTINGS = {
+    "expected_ap_roll": 3,
+    "planning_depth_take_controls": 3,
+    "max_plans": 3,
+    "weights": {
+        "efficiency": 35,
+        "confidence": 35,
+        "expected_gain": 30,
+    },
+    "resource_weights": {
+        "energy": 8,
+        "neurons": 5,
+        "seashells": 4,
+        "ap": 1,
+        "shelters": 18,
+        "surprise_cards": 6,
+        "removed_tiles": 3,
+    },
+    "ability_colors": {
+        "agility": "#0ea5e9",
+        "camouflage": "#16a34a",
+        "force": "#dc2626",
+        "propulsion": "#7c3aed",
+        "intelligence": "#f59e0b",
+    },
+}
 
 
 def _slug(value: str) -> str:
@@ -96,6 +132,8 @@ def _empty_content() -> dict[str, Any]:
         "player_boards": _default_player_boards(),
         "tokens": _default_tokens(),
         "poulpita_panel": _default_poulpita_panel(),
+        "action_costs": deepcopy(DEFAULT_ACTION_COSTS),
+        "bot_settings": deepcopy(DEFAULT_BOT_SETTINGS),
     }
 
 
@@ -170,6 +208,7 @@ def _read_content() -> dict[str, Any]:
     content["player_boards"] = _normalize_player_boards(content.get("player_boards") or [])
     content["tokens"] = _normalize_tokens(content.get("tokens") or [])
     content["poulpita_panel"] = _normalize_poulpita_panel(content.get("poulpita_panel") or {})
+    content["bot_settings"] = _normalize_bot_settings(content.get("bot_settings") or {})
     for tile in content["tiles"]:
         tile["priority"] = int(tile.get("priority") or 0)
         tile.setdefault("interaction_ids", [])
@@ -180,12 +219,32 @@ def _read_content() -> dict[str, Any]:
     for level in content["levels"]:
         level["objectives"] = _normalize_level_objectives(level.get("objectives") or [])
         level["starting_energy"] = max(0, min(32, int(level.get("starting_energy") or 3)))
+        level["starting_neurons"] = max(0, int(level.get("starting_neurons") or 0))
+        level["night_duration_steps"] = max(1, int(level.get("night_duration_steps") or 24))
         level["surprise_deck_id"] = level.get("surprise_deck_id") or ""
+        level["poulpita_starting_node_id"] = str(level.get("poulpita_starting_node_id") or "")
+        level["node_tokens"] = level.get("node_tokens") or {}
     return content
 
 
 def _default_tokens() -> list[dict[str, Any]]:
-    return [{**token, "image_filename": None} for token in TOKEN_TYPES]
+    tokens = []
+    for token in TOKEN_TYPES:
+        entry = {**token, "image_filename": None}
+        if token["id"] == OCTOPUS_TOKEN_ID:
+            entry.update(
+                {
+                    "priority": 0,
+                    "initiator_capability_ids": list(PLAYER_BOARD_ORDER),
+                    "interaction_ids": [],
+                    "counter_attack_interaction_ids": [],
+                    "success_effects": [],
+                    "counter_attack_effects": [],
+                    "failure_effects": [],
+                }
+            )
+        tokens.append(entry)
+    return tokens
 
 
 def _normalize_tokens(raw_tokens: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -196,6 +255,20 @@ def _normalize_tokens(raw_tokens: list[dict[str, Any]]) -> list[dict[str, Any]]:
         current["id"] = default["id"]
         current["name"] = default["name"]
         current["image_filename"] = current.get("image_filename") or None
+        if current["id"] == OCTOPUS_TOKEN_ID:
+            current["priority"] = int(current.get("priority") or 0)
+            configured_initiators = current.get("initiator_capability_ids")
+            if configured_initiators is None:
+                configured_initiators = list(PLAYER_BOARD_ORDER)
+            selected_initiators = {str(capability_id) for capability_id in configured_initiators or []}
+            current["initiator_capability_ids"] = [
+                capability_id for capability_id in PLAYER_BOARD_ORDER if capability_id in selected_initiators
+            ]
+            current["interaction_ids"] = list(current.get("interaction_ids") or [])
+            current["counter_attack_interaction_ids"] = list(current.get("counter_attack_interaction_ids") or [])
+            current["success_effects"] = list(current.get("success_effects") or [])
+            current["counter_attack_effects"] = list(current.get("counter_attack_effects") or [])
+            current["failure_effects"] = list(current.get("failure_effects") or [])
         tokens.append(current)
     return tokens
 
@@ -285,15 +358,42 @@ def _normalize_player_boards(raw_boards: list[dict[str, Any]]) -> list[dict[str,
             if isinstance(entry, dict) and str(entry.get("interaction_id") or "")
         ]
         current["default_max_cards_in_hand"] = max(1, int(current.get("default_max_cards_in_hand") or 3))
-        current["hand_size_upgrades"] = [
-            {
-                "cost_resource": str(entry.get("cost_resource") or "energy"),
-                "cost": max(1, int(entry.get("cost") or 1)),
-                "hand_size_bonus": max(1, int(entry.get("hand_size_bonus") or 1)),
-            }
-            for entry in current.get("hand_size_upgrades") or []
-            if isinstance(entry, dict)
-        ]
+        upgrades = []
+        for entry in current.get("hand_size_upgrades") or []:
+            if not isinstance(entry, dict):
+                continue
+            upgrade_type = str(entry.get("type") or "hand_size")
+            if upgrade_type == "deck_exchange":
+                upgrades.append(
+                    {
+                        "type": "deck_exchange",
+                        "cost_resource": "neurons",
+                        "cost": max(1, int(entry.get("cost") or 1)),
+                        "remove_cards": [
+                            {"interaction_id": str(card.get("interaction_id") or ""), "count": max(0, int(card.get("count") or 0))}
+                            for card in entry.get("remove_cards") or []
+                            if isinstance(card, dict) and str(card.get("interaction_id") or "")
+                        ],
+                        "add_cards": [
+                            {
+                                "interaction_ids": [str(interaction_id) for interaction_id in (card.get("interaction_ids") or [])][:2],
+                                "count": max(0, int(card.get("count") or 0)),
+                            }
+                            for card in entry.get("add_cards") or []
+                            if isinstance(card, dict)
+                        ],
+                    }
+                )
+            else:
+                upgrades.append(
+                    {
+                        "type": "hand_size",
+                        "cost_resource": str(entry.get("cost_resource") or "energy"),
+                        "cost": max(1, int(entry.get("cost") or 1)),
+                        "hand_size_bonus": max(1, int(entry.get("hand_size_bonus") or 1)),
+                    }
+                )
+        current["hand_size_upgrades"] = upgrades
         current["actions_per_control"] = max(1, int(current.get("actions_per_control") or 3))
         current["control_takes_per_night"] = max(1, int(current.get("control_takes_per_night") or 3))
         boards.append(current)
@@ -472,6 +572,8 @@ def get_content_state() -> dict[str, Any]:
         "player_boards": [dict(board) for board in content.get("player_boards", [])],
         "tokens": [_with_urls(token) for token in content.get("tokens", [])],
         "poulpita_panel": _poulpita_panel_with_urls(content.get("poulpita_panel") or _default_poulpita_panel()),
+        "action_costs": deepcopy(content.get("action_costs") or DEFAULT_ACTION_COSTS),
+        "bot_settings": deepcopy(content.get("bot_settings") or DEFAULT_BOT_SETTINGS),
         "cards": _generated_cards(content),
     }
 
@@ -485,6 +587,8 @@ def export_admin_content_package(*, maps: list[dict[str, Any]]) -> dict[str, Any
             {
                 **{key: content.get(key, []) for key in ADMIN_CONTENT_COLLECTION_KEYS},
                 "poulpita_panel": content.get("poulpita_panel") or _default_poulpita_panel(),
+                "action_costs": content.get("action_costs") or DEFAULT_ACTION_COSTS,
+                "bot_settings": content.get("bot_settings") or DEFAULT_BOT_SETTINGS,
             }
         ),
     }
@@ -497,7 +601,7 @@ def import_admin_content_package(package: dict[str, Any]) -> dict[str, Any]:
     if imported_content is None:
         imported_content = {
             key: package.get(key)
-            for key in [*ADMIN_CONTENT_COLLECTION_KEYS, "poulpita_panel"]
+            for key in [*ADMIN_CONTENT_COLLECTION_KEYS, "poulpita_panel", "action_costs", "bot_settings"]
             if key in package
         }
     if not isinstance(imported_content, dict):
@@ -518,6 +622,18 @@ def import_admin_content_package(package: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("poulpita_panel must be a JSON object.")
         content["poulpita_panel"] = _normalize_poulpita_panel(panel)
         summary["updated"]["poulpita_panel"] = 1
+    if "action_costs" in imported_content:
+        action_costs = imported_content.get("action_costs") or {}
+        if not isinstance(action_costs, dict):
+            raise ValueError("action_costs must be a JSON object.")
+        content["action_costs"] = _normalize_action_costs(action_costs)
+        summary["updated"]["action_costs"] = 1
+    if "bot_settings" in imported_content:
+        bot_settings = imported_content.get("bot_settings") or {}
+        if not isinstance(bot_settings, dict):
+            raise ValueError("bot_settings must be a JSON object.")
+        content["bot_settings"] = _normalize_bot_settings(bot_settings)
+        summary["updated"]["bot_settings"] = 1
     _write_content(_read_content_from_value(content))
     return summary
 
@@ -531,6 +647,8 @@ def _read_content_from_value(content: dict[str, Any]) -> dict[str, Any]:
     content.setdefault("levels", [])
     content.setdefault("surprise_cards", [])
     content.setdefault("surprise_decks", [])
+    content["action_costs"] = _normalize_action_costs(content.get("action_costs") or {})
+    content["bot_settings"] = _normalize_bot_settings(content.get("bot_settings") or {})
     content["player_boards"] = _normalize_player_boards(content.get("player_boards") or [])
     content["tokens"] = _normalize_tokens(content.get("tokens") or [])
     content["poulpita_panel"] = _normalize_poulpita_panel(content.get("poulpita_panel") or {})
@@ -539,6 +657,7 @@ def _read_content_from_value(content: dict[str, Any]) -> dict[str, Any]:
     for tile in content["tiles"]:
         tile["priority"] = int(tile.get("priority") or 0)
         tile.setdefault("interaction_ids", [])
+        tile["shell_requirement_count"] = max(0, int(tile.get("shell_requirement_count") or 0))
         tile.setdefault("counter_attack_interaction_ids", [])
         tile.setdefault("success_effects", [])
         tile.setdefault("counter_attack_effects", [])
@@ -546,7 +665,49 @@ def _read_content_from_value(content: dict[str, Any]) -> dict[str, Any]:
     for level in content["levels"]:
         level["objectives"] = _normalize_level_objectives(level.get("objectives") or [])
         level["starting_energy"] = max(0, min(32, int(level.get("starting_energy") or 3)))
+        level["starting_neurons"] = max(0, int(level.get("starting_neurons") or 0))
+        level["night_duration_steps"] = max(1, int(level.get("night_duration_steps") or 24))
+        level["surprise_deck_id"] = level.get("surprise_deck_id") or ""
+        level["poulpita_starting_node_id"] = str(level.get("poulpita_starting_node_id") or "")
+        level["node_tokens"] = level.get("node_tokens") or {}
     return content
+
+
+def _normalize_action_costs(raw_costs: dict[str, Any]) -> dict[str, dict[str, int]]:
+    normalized = deepcopy(DEFAULT_ACTION_COSTS)
+    if not isinstance(raw_costs, dict):
+        return normalized
+    for action_id in ACTION_COST_KEYS:
+        raw = raw_costs.get(action_id) or {}
+        if not isinstance(raw, dict):
+            continue
+        normalized[action_id] = {
+            "ap_cost": max(0, int(raw.get("ap_cost") if raw.get("ap_cost") is not None else normalized[action_id]["ap_cost"])),
+            "time_cost": max(0, int(raw.get("time_cost") if raw.get("time_cost") is not None else normalized[action_id]["time_cost"])),
+        }
+    return normalized
+
+
+def _normalize_bot_settings(raw_settings: dict[str, Any]) -> dict[str, Any]:
+    normalized = deepcopy(DEFAULT_BOT_SETTINGS)
+    if not isinstance(raw_settings, dict):
+        return normalized
+    normalized["expected_ap_roll"] = max(1, min(6, int(raw_settings.get("expected_ap_roll") if raw_settings.get("expected_ap_roll") is not None else normalized["expected_ap_roll"])))
+    normalized["planning_depth_take_controls"] = max(1, min(8, int(raw_settings.get("planning_depth_take_controls") if raw_settings.get("planning_depth_take_controls") is not None else normalized["planning_depth_take_controls"])))
+    normalized["max_plans"] = max(1, min(16, int(raw_settings.get("max_plans") if raw_settings.get("max_plans") is not None else normalized["max_plans"])))
+    raw_weights = raw_settings.get("weights") if isinstance(raw_settings.get("weights"), dict) else {}
+    for key, fallback in DEFAULT_BOT_SETTINGS["weights"].items():
+        normalized["weights"][key] = max(0.0, float(raw_weights.get(key) if raw_weights.get(key) is not None else fallback))
+    raw_resource_weights = raw_settings.get("resource_weights") if isinstance(raw_settings.get("resource_weights"), dict) else {}
+    for key, fallback in DEFAULT_BOT_SETTINGS["resource_weights"].items():
+        normalized["resource_weights"][key] = float(raw_resource_weights.get(key) if raw_resource_weights.get(key) is not None else fallback)
+    raw_colors = raw_settings.get("ability_colors") if isinstance(raw_settings.get("ability_colors"), dict) else {}
+    for ability_id, fallback in DEFAULT_BOT_SETTINGS["ability_colors"].items():
+        color = str(raw_colors.get(ability_id) or fallback).strip()
+        if not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+            color = fallback
+        normalized["ability_colors"][ability_id] = color
+    return normalized
 
 
 def get_player_board_configs() -> list[dict[str, Any]]:
@@ -569,7 +730,18 @@ def get_level_config(level_id: str | None = None) -> dict[str, Any]:
     raise LookupError("Level not found.")
 
 
-async def update_token(*, token_id: str, image: UploadFile | None) -> dict[str, Any]:
+async def update_token(
+    *,
+    token_id: str,
+    image: UploadFile | None,
+    priority: int | None = None,
+    initiator_capability_ids: list[str] | None = None,
+    interaction_ids: list[str] | None = None,
+    counter_attack_interaction_ids: list[str] | None = None,
+    success_effects: list[dict[str, Any]] | None = None,
+    counter_attack_effects: list[dict[str, Any]] | None = None,
+    failure_effects: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     content = _read_content()
     index = _find_index(content["tokens"], token_id)
     current = content["tokens"][index]
@@ -579,6 +751,47 @@ async def update_token(*, token_id: str, image: UploadFile | None) -> dict[str, 
         _delete_image(image_filename)
         image_filename = next_image
     current["image_filename"] = image_filename
+    if token_id == OCTOPUS_TOKEN_ID:
+        interaction_set = {interaction.get("id") for interaction in content["interactions"]}
+        category_ids = {category.get("id") for category in content["categories"]}
+        capability_set = set(PLAYER_BOARD_ORDER)
+        current["priority"] = int(priority if priority is not None else current.get("priority") or 0)
+        if initiator_capability_ids is not None:
+            unknown_capabilities = [capability_id for capability_id in initiator_capability_ids if capability_id not in capability_set]
+            if unknown_capabilities:
+                raise ValueError("Octopus token initiators must be known player boards.")
+            selected_initiators = {str(capability_id) for capability_id in initiator_capability_ids}
+            current["initiator_capability_ids"] = [
+                capability_id for capability_id in PLAYER_BOARD_ORDER if capability_id in selected_initiators
+            ]
+        elif current.get("initiator_capability_ids") is None:
+            current["initiator_capability_ids"] = list(PLAYER_BOARD_ORDER)
+        current["interaction_ids"] = _normalize_interaction_ids(
+            interaction_ids if interaction_ids is not None else current.get("interaction_ids") or [],
+            interaction_set,
+        )
+        current["counter_attack_interaction_ids"] = _normalize_interaction_ids(
+            counter_attack_interaction_ids
+            if counter_attack_interaction_ids is not None
+            else current.get("counter_attack_interaction_ids") or [],
+            interaction_set,
+        )
+        current["success_effects"] = _normalize_effects(
+            success_effects if success_effects is not None else current.get("success_effects") or [],
+            SUCCESS_EFFECT_TYPES,
+            "octopus success",
+        )
+        current["counter_attack_effects"] = _normalize_effects(
+            counter_attack_effects if counter_attack_effects is not None else current.get("counter_attack_effects") or [],
+            SUCCESS_EFFECT_TYPES,
+            "octopus counter-attack",
+        )
+        current["failure_effects"] = _normalize_effects(
+            failure_effects if failure_effects is not None else current.get("failure_effects") or [],
+            FAILURE_EFFECT_TYPES,
+            "octopus failure",
+            category_ids=category_ids,
+        )
     content["tokens"][index] = current
     _write_content(content)
     return _with_urls(current)
@@ -626,7 +839,23 @@ def get_game_content_catalog() -> dict[str, dict[str, Any]]:
         "card_categories": [dict(category) for category in content.get("categories", [])] + [dict(COUNTER_ATTACK_CATEGORY)],
         "tokens": {token["id"]: _with_urls(token) for token in content.get("tokens", [])},
         "poulpita_panel": _poulpita_panel_with_urls(content.get("poulpita_panel") or _default_poulpita_panel()),
+        "action_costs": deepcopy(content.get("action_costs") or DEFAULT_ACTION_COSTS),
+        "bot_settings": deepcopy(content.get("bot_settings") or DEFAULT_BOT_SETTINGS),
     }
+
+
+def update_action_costs(action_costs: dict[str, Any]) -> dict[str, dict[str, int]]:
+    content = _read_content()
+    content["action_costs"] = _normalize_action_costs(action_costs)
+    _write_content(content)
+    return deepcopy(content["action_costs"])
+
+
+def update_bot_settings(bot_settings: dict[str, Any]) -> dict[str, Any]:
+    content = _read_content()
+    content["bot_settings"] = _normalize_bot_settings(bot_settings)
+    _write_content(content)
+    return deepcopy(content["bot_settings"])
 
 
 def create_category(*, name: str, compulsory_on_same_node: bool = False) -> dict[str, Any]:
@@ -890,6 +1119,7 @@ def save_tile(
     name: str,
     event_id: str,
     priority: int = 0,
+    shell_requirement_count: int = 0,
     interaction_ids: list[str],
     counter_attack_interaction_ids: list[str] | None = None,
     success_effects: list[dict[str, Any]] | None = None,
@@ -908,6 +1138,7 @@ def save_tile(
         "name": _normalize_name(name),
         "event_id": event_id,
         "priority": int(priority or 0),
+        "shell_requirement_count": max(0, int(shell_requirement_count or 0)),
         "interaction_ids": normalized_interactions,
         "counter_attack_interaction_ids": _normalize_interaction_ids(counter_attack_interaction_ids or [], interaction_set),
         "success_effects": _normalize_effects(success_effects or [], SUCCESS_EFFECT_TYPES, "success"),
@@ -942,6 +1173,29 @@ def _normalize_node_tile_counts(node_tile_counts: dict[str, Any], node_ids: set[
         if count < 0:
             raise ValueError("Node tile counts cannot be negative.")
         normalized[node_id] = count
+    return normalized
+
+
+def _normalize_level_node_tokens(node_tokens: dict[str, Any], node_ids: set[str]) -> dict[str, list[dict[str, str]]]:
+    normalized: dict[str, list[dict[str, str]]] = {}
+    for node_id, raw_tokens in (node_tokens or {}).items():
+        node_id = str(node_id)
+        if node_id not in node_ids:
+            raise ValueError("Level token placement references an unknown node.")
+        tokens = []
+        seen_types = set()
+        if not isinstance(raw_tokens, list):
+            raise ValueError("Level node tokens must be JSON arrays.")
+        for raw_token in raw_tokens:
+            token_type = str(raw_token.get("type") if isinstance(raw_token, dict) else raw_token or "")
+            if token_type not in PLACEABLE_LEVEL_TOKEN_IDS:
+                raise ValueError("Level token placement references an unknown token type.")
+            if token_type in seen_types:
+                continue
+            seen_types.add(token_type)
+            tokens.append({"type": token_type})
+        if tokens:
+            normalized[node_id] = tokens
     return normalized
 
 
@@ -999,7 +1253,11 @@ def save_level(
     groups: list[dict[str, Any]],
     objectives: list[dict[str, Any]] | None = None,
     starting_energy: int | None = None,
+    starting_neurons: int | None = None,
+    night_duration_steps: int | None = None,
     surprise_deck_id: str | None = None,
+    poulpita_starting_node_id: str | None = None,
+    node_tokens: dict[str, Any] | None = None,
     level_id: str | None = None,
 ) -> dict[str, Any]:
     content = _read_content()
@@ -1020,6 +1278,9 @@ def save_level(
         if group_id not in group_ids:
             raise ValueError("Every map node must belong to a level group.")
         normalized_node_groups[node_id] = group_id
+    normalized_starting_node_id = str(poulpita_starting_node_id or map_config.get("starting_node_id") or sorted(node_ids)[0])
+    if normalized_starting_node_id not in node_ids:
+        raise ValueError("Poulpita starting node must be one of the map nodes.")
     for group in normalized_groups:
         capacity = sum(count for node_id, count in normalized_counts.items() if normalized_node_groups[node_id] == group["id"])
         assigned = sum(int(count or 0) for count in (group.get("tile_counts") or {}).values())
@@ -1034,7 +1295,11 @@ def save_level(
         "groups": normalized_groups,
         "objectives": _normalize_level_objectives(objectives or []),
         "starting_energy": max(0, min(32, int(starting_energy if starting_energy is not None else 3))),
+        "starting_neurons": max(0, int(starting_neurons if starting_neurons is not None else 0)),
+        "night_duration_steps": max(1, int(night_duration_steps if night_duration_steps is not None else 24)),
         "surprise_deck_id": normalized_surprise_deck_id,
+        "poulpita_starting_node_id": normalized_starting_node_id,
+        "node_tokens": _normalize_level_node_tokens(node_tokens or {}, node_ids),
     }
     if level_id:
         content["levels"][_find_index(content["levels"], level_id)] = level
@@ -1080,20 +1345,59 @@ def save_player_board(
             raise ValueError("Deck counts cannot be negative.")
         if count:
             normalized_deck.append({"interaction_id": interaction_id, "count": count})
+    deck_counts = {entry["interaction_id"]: int(entry.get("count") or 0) for entry in normalized_deck}
     normalized_upgrades = []
     for entry in hand_size_upgrades or []:
         if not isinstance(entry, dict):
             raise ValueError("Upgrade entries must be objects.")
-        cost_resource = str(entry.get("cost_resource") or "")
-        if cost_resource not in UPGRADE_COST_RESOURCES:
+        upgrade_type = str(entry.get("type") or "hand_size")
+        cost_resource = str(entry.get("cost_resource") or "neurons")
+        if upgrade_type != "deck_exchange" and cost_resource not in UPGRADE_COST_RESOURCES:
             raise ValueError("Upgrade cost resource must be energy or neurons.")
         cost = int(entry.get("cost") or 0)
-        hand_size_bonus = int(entry.get("hand_size_bonus") or 1)
-        if cost < 1 or hand_size_bonus < 1:
-            raise ValueError("Upgrade cost and hand size bonus must be positive.")
-        normalized_upgrades.append(
-            {"cost_resource": cost_resource, "cost": cost, "hand_size_bonus": hand_size_bonus}
-        )
+        if cost < 1:
+            raise ValueError("Upgrade cost must be positive.")
+        if upgrade_type == "deck_exchange":
+            remove_cards = []
+            add_cards = []
+            for card_entry in entry.get("remove_cards") or []:
+                interaction_id = str(card_entry.get("interaction_id") or "")
+                if interaction_id not in interaction_set:
+                    raise ValueError("Deck exchange upgrade removes an unknown interaction.")
+                count = int(card_entry.get("count") or 0)
+                if count < 0:
+                    raise ValueError("Deck exchange remove counts cannot be negative.")
+                if count > deck_counts.get(interaction_id, 0):
+                    raise ValueError("Deck exchange cannot remove more cards than the board deck contains.")
+                if count:
+                    remove_cards.append({"interaction_id": interaction_id, "count": count})
+            for card_entry in entry.get("add_cards") or []:
+                interaction_ids = [str(interaction_id) for interaction_id in (card_entry.get("interaction_ids") or [])]
+                if len(interaction_ids) != 2 or any(interaction_id not in interaction_set for interaction_id in interaction_ids):
+                    raise ValueError("Powerful cards must reference exactly two known interactions.")
+                count = int(card_entry.get("count") or 0)
+                if count < 0:
+                    raise ValueError("Powerful card counts cannot be negative.")
+                if count:
+                    add_cards.append({"interaction_ids": interaction_ids, "count": count})
+            if not remove_cards or not add_cards:
+                raise ValueError("Deck exchange upgrades need cards to remove and powerful cards to add.")
+            normalized_upgrades.append(
+                {
+                    "type": "deck_exchange",
+                    "cost_resource": "neurons",
+                    "cost": cost,
+                    "remove_cards": remove_cards,
+                    "add_cards": add_cards,
+                }
+            )
+        else:
+            hand_size_bonus = int(entry.get("hand_size_bonus") or 1)
+            if hand_size_bonus < 1:
+                raise ValueError("Hand size bonus must be positive.")
+            normalized_upgrades.append(
+                {"type": "hand_size", "cost_resource": cost_resource, "cost": cost, "hand_size_bonus": hand_size_bonus}
+            )
     next_board = {
         "id": board_id,
         "name": _normalize_name(name),

@@ -97,6 +97,119 @@ def test_player_board_config_is_fixed_to_five_boards_and_validates_interactions(
     assert state["player_boards"][0]["actions_per_control"] == 2
 
 
+def test_player_board_can_define_deck_exchange_upgrades(tmp_path, monkeypatch):
+    monkeypatch.setattr(service, "CONTENT_ROOT", tmp_path)
+    monkeypatch.setattr(service, "CONTENT_IMAGES_ROOT", tmp_path / "images")
+    monkeypatch.setattr(service, "CONTENT_JSON_PATH", tmp_path / "content.json")
+
+    service._write_content(
+        {
+            "categories": [],
+            "interactions": [
+                {"id": "charge", "name": "Charge", "image_filename": None},
+                {"id": "hide", "name": "Hide", "image_filename": None},
+            ],
+            "events": [],
+            "tiles": [],
+            "player_boards": [],
+        }
+    )
+
+    board = service.save_player_board(
+        board_id="force",
+        name="Force",
+        initiates_event_ids=[],
+        deck=[{"interaction_id": "charge", "count": 3}, {"interaction_id": "hide", "count": 2}],
+        default_max_cards_in_hand=3,
+        hand_size_upgrades=[
+            {
+                "type": "deck_exchange",
+                "cost": 2,
+                "remove_cards": [{"interaction_id": "charge", "count": 1}],
+                "add_cards": [{"interaction_ids": ["charge", "hide"], "count": 1}],
+            }
+        ],
+        actions_per_control=3,
+        control_takes_per_night=3,
+    )
+
+    assert board["hand_size_upgrades"] == [
+        {
+            "type": "deck_exchange",
+            "cost_resource": "neurons",
+            "cost": 2,
+            "remove_cards": [{"interaction_id": "charge", "count": 1}],
+            "add_cards": [{"interaction_ids": ["charge", "hide"], "count": 1}],
+        }
+    ]
+
+
+def test_action_costs_and_shell_tile_requirement_are_configurable(tmp_path, monkeypatch):
+    monkeypatch.setattr(service, "CONTENT_ROOT", tmp_path)
+    monkeypatch.setattr(service, "CONTENT_IMAGES_ROOT", tmp_path / "images")
+    monkeypatch.setattr(service, "CONTENT_JSON_PATH", tmp_path / "content.json")
+
+    service._write_content(
+        {
+            "categories": [],
+            "interactions": [{"id": "charge", "name": "Charge", "image_filename": None}],
+            "events": [{"id": "crab", "name": "Crab", "category_id": "", "image_filename": None}],
+            "tiles": [],
+        }
+    )
+
+    costs = service.update_action_costs({"interact": {"ap_cost": 2, "time_cost": 3}})
+    tile = service.save_tile(
+        name="Shell threat",
+        event_id="crab",
+        priority=0,
+        shell_requirement_count=2,
+        interaction_ids=["charge"],
+    )
+
+    state = service.get_content_state()
+    assert costs["interact"] == {"ap_cost": 2, "time_cost": 3}
+    assert costs["move"] == {"ap_cost": 1, "time_cost": 1}
+    assert tile["shell_requirement_count"] == 2
+    assert state["action_costs"]["interact"]["time_cost"] == 3
+
+
+def test_bot_settings_include_efficiency_weights_and_ability_colors(tmp_path, monkeypatch):
+    monkeypatch.setattr(service, "CONTENT_ROOT", tmp_path)
+    monkeypatch.setattr(service, "CONTENT_IMAGES_ROOT", tmp_path / "images")
+    monkeypatch.setattr(service, "CONTENT_JSON_PATH", tmp_path / "content.json")
+
+    service._write_content(
+        {
+            "categories": [],
+            "interactions": [],
+            "events": [],
+            "tiles": [],
+            "player_boards": [],
+        }
+    )
+
+    settings = service.update_bot_settings(
+        {
+            "expected_ap_roll": 4,
+            "planning_depth_take_controls": 5,
+            "max_plans": 12,
+            "weights": {"efficiency": 50, "confidence": 25, "expected_gain": 25},
+            "resource_weights": {"energy": 10, "neurons": 7},
+            "ability_colors": {"force": "#aa0000", "agility": "not-a-color"},
+        }
+    )
+
+    assert settings["expected_ap_roll"] == 4
+    assert settings["planning_depth_take_controls"] == 5
+    assert settings["max_plans"] == 12
+    assert settings["weights"]["efficiency"] == 50
+    assert settings["resource_weights"]["energy"] == 10
+    assert settings["resource_weights"]["neurons"] == 7
+    assert settings["ability_colors"]["force"] == "#aa0000"
+    assert settings["ability_colors"]["agility"] == service.DEFAULT_BOT_SETTINGS["ability_colors"]["agility"]
+
+
 def test_level_save_validates_group_capacity_and_node_assignment(tmp_path, monkeypatch):
     monkeypatch.setattr(service, "CONTENT_ROOT", tmp_path)
     monkeypatch.setattr(service, "CONTENT_IMAGES_ROOT", tmp_path / "images")
@@ -139,10 +252,14 @@ def test_level_save_validates_group_capacity_and_node_assignment(tmp_path, monke
         ],
         objectives=[{"type": "increase_size", "target": 2}, {"type": "find_shelter"}],
         starting_energy=7,
+        starting_neurons=4,
+        night_duration_steps=18,
     )
 
     assert level["node_tile_counts"] == {"N1": 2, "N2": 1}
     assert level["starting_energy"] == 7
+    assert level["starting_neurons"] == 4
+    assert level["night_duration_steps"] == 18
     assert level["objectives"] == [
         {"id": "objective-1", "type": "increase_size", "target": 2},
         {"id": "objective-2", "type": "find_shelter"},
@@ -170,7 +287,7 @@ def test_tokens_and_poulpita_panel_are_configurable(tmp_path, monkeypatch):
 
     state = service.get_content_state()
 
-    assert [token["id"] for token in state["tokens"]] == ["neuron", "seashell", "shelter"]
+    assert [token["id"] for token in state["tokens"]] == ["neuron", "seashell", "shelter", "octopus"]
     assert set(state["poulpita_panel"]["zones"]) == {"neurons", "seashells"}
 
     saved = run(
@@ -199,6 +316,62 @@ def test_tokens_and_poulpita_panel_are_configurable(tmp_path, monkeypatch):
     )
     assert resized["sizes"] == [{"amount": 500.0, "unit": "mg", "energy_cost": 0}, {"amount": 1.2, "unit": "g", "energy_cost": 2}]
     assert service.get_game_content_catalog()["poulpita_panel"]["zones"]["seashells"]["x"] == 0.5
+
+
+def test_octopus_token_rules_and_level_node_tokens_are_configurable(tmp_path, monkeypatch):
+    monkeypatch.setattr(service, "CONTENT_ROOT", tmp_path)
+    monkeypatch.setattr(service, "CONTENT_IMAGES_ROOT", tmp_path / "images")
+    monkeypatch.setattr(service, "CONTENT_JSON_PATH", tmp_path / "content.json")
+    monkeypatch.setattr(
+        service,
+        "get_map",
+        lambda _map_id: {
+            "id": "reef",
+            "name": "Reef",
+            "starting_node_id": "N1",
+            "nodes": {
+                "N1": {"id": "N1", "x": 0.1, "y": 0.1, "tier": 1},
+                "N2": {"id": "N2", "x": 0.5, "y": 0.5, "tier": 1},
+            },
+        },
+    )
+    service._write_content(
+        {
+            "categories": [{"id": "threat", "name": "Threat", "compulsory_on_same_node": True}],
+            "interactions": [{"id": "charge", "name": "Charge", "image_filename": None}],
+            "events": [],
+            "tiles": [],
+            "player_boards": [],
+            "levels": [],
+        }
+    )
+
+    octopus = run(
+        service.update_token(
+            token_id="octopus",
+            image=None,
+            priority=9,
+            interaction_ids=["charge"],
+            counter_attack_interaction_ids=[],
+            success_effects=[{"type": "gain_neurons", "amount": 1}],
+            counter_attack_effects=[],
+            failure_effects=[{"type": "lose_energy", "amount": 1}],
+        )
+    )
+    level = service.save_level(
+        name="Octopus night",
+        map_id="reef",
+        node_tile_counts={"N1": 0, "N2": 0},
+        node_group_ids={"N1": "main", "N2": "main"},
+        groups=[{"id": "main", "name": "Main", "tile_counts": {}}],
+        poulpita_starting_node_id="N2",
+        node_tokens={"N1": [{"type": "shelter"}], "N2": [{"type": "octopus"}]},
+    )
+
+    assert octopus["priority"] == 9
+    assert octopus["interaction_ids"] == ["charge"]
+    assert level["poulpita_starting_node_id"] == "N2"
+    assert level["node_tokens"] == {"N1": [{"type": "shelter"}], "N2": [{"type": "octopus"}]}
 
 
 def test_categories_can_be_compulsory_and_tiles_have_priority(tmp_path, monkeypatch):

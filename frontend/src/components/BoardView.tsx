@@ -39,6 +39,88 @@ const BoardTileToken = ({ event, faceDown, highlighted, title }: { event: any; f
   );
 };
 
+const InteractionRequirementBadge = ({ interaction, counter = false }: { interaction: any; counter?: boolean }) => {
+  const iconUrl = interaction?.image_url ? buildApiUrl(interaction.image_url) : "";
+  return (
+    <span
+      className={[
+        "flex h-4 w-4 items-center justify-center overflow-hidden border bg-white text-[0.45rem] font-bold shadow-sm",
+        counter ? "rounded-sm border-fuchsia-500 text-fuchsia-900" : "rounded-full border-teal-500 text-teal-900",
+      ].join(" ")}
+      title={interaction?.name || "Requirement"}
+    >
+      {iconUrl ? <img alt="" className="h-full w-full object-cover" draggable={false} src={iconUrl} /> : interaction?.name?.slice(0, 2) || "?"}
+    </span>
+  );
+};
+
+const RequirementStrip = ({
+  tile,
+  interactionsById,
+  large = false,
+}: {
+  tile: any;
+  interactionsById: Record<string, any>;
+  large?: boolean;
+}) => {
+  const interactionIds = tile?.interaction_ids || [];
+  const counterAttackIds = tile?.counter_attack_interaction_ids || [];
+  const shellCount = Math.max(0, Number(tile?.shell_requirement_count || 0));
+  if (!interactionIds.length && !counterAttackIds.length && !shellCount) return null;
+  return (
+    <span className={["flex flex-wrap items-center justify-center gap-0.5", large ? "max-w-32" : "max-w-20"].join(" ")}>
+      {interactionIds.map((id: string) => (
+        <InteractionRequirementBadge interaction={interactionsById[id]} key={`i:${id}`} />
+      ))}
+      {Array.from({ length: shellCount }).map((_, index) => (
+        <span className="flex h-4 w-4 items-center justify-center rounded-full border border-amber-300 bg-amber-50 text-[0.45rem] font-bold text-amber-900 shadow-sm" key={`s:${index}`} title="Poulpita shell required">
+          S
+        </span>
+      ))}
+      {counterAttackIds.map((id: string) => (
+        <InteractionRequirementBadge counter interaction={interactionsById[id]} key={`c:${id}`} />
+      ))}
+    </span>
+  );
+};
+
+const OctopusBoardToken = ({
+  tile,
+  token,
+  interactionsById,
+  highlighted,
+  title,
+  large = false,
+}: {
+  tile: any;
+  token: any;
+  interactionsById: Record<string, any>;
+  highlighted?: boolean;
+  title: string;
+  large?: boolean;
+}) => {
+  const imagePath = token?.image_url || tile?.image_url || tile?.event?.image_url || "";
+  const imageUrl = imagePath ? buildApiUrl(imagePath) : "";
+  const sizeClass = large ? "h-28 w-28" : "h-10 w-10";
+  return (
+    <span className="relative flex items-center justify-center bg-transparent">
+      <span className={["absolute z-10", large ? "-top-4" : "-top-2"].join(" ")}>
+        <RequirementStrip interactionsById={interactionsById} large={large} tile={tile} />
+      </span>
+      <span
+        className={[
+          "flex items-center justify-center overflow-hidden rounded-full border bg-cyan-100 font-bold text-teal-950 shadow",
+          sizeClass,
+          highlighted ? "border-emerald-300 ring-2 ring-emerald-300 ring-offset-1 ring-offset-transparent" : "border-cyan-100",
+        ].join(" ")}
+        title={title}
+      >
+        {imageUrl ? <img alt={title} className="h-full w-full object-cover" draggable={false} src={imageUrl} /> : <span className={large ? "text-base" : "text-[0.55rem]"}>O</span>}
+      </span>
+    </span>
+  );
+};
+
 const tileOrbitPosition = (index: number) => {
   const radius = 34;
   const anglePattern = [90, 25, 155, -25, -155, -90, 0, 180];
@@ -76,17 +158,19 @@ const BoardView = ({ projection, focusedCapabilityId, moveMode, pending, onMove,
     tile: any;
     event: any;
     interactionsById: Record<string, any>;
+    token: any;
+    isOctopusToken: boolean;
     left: number;
     top: number;
   } | null>(null);
   const dragRef = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
 
-  const showTilePreview = (target: HTMLElement, tile: any, event: any, interactionsById: Record<string, any>) => {
+  const showTilePreview = (target: HTMLElement, tile: any, event: any, interactionsById: Record<string, any>, token: any, isOctopusToken: boolean) => {
     const boardRect = boardRef.current?.getBoundingClientRect();
     const targetRect = target.getBoundingClientRect();
     if (!boardRect) return;
-    const previewWidth = 160;
-    const previewHeight = 156;
+    const previewWidth = isOctopusToken ? 128 : 160;
+    const previewHeight = isOctopusToken ? 144 : 156;
     const gap = 8;
     const centerX = targetRect.left + targetRect.width / 2 - boardRect.left;
     const topY = targetRect.top - boardRect.top - previewHeight - gap;
@@ -97,6 +181,8 @@ const BoardView = ({ projection, focusedCapabilityId, moveMode, pending, onMove,
       tile,
       event,
       interactionsById,
+      token,
+      isOctopusToken,
       left,
       top: clamp(top, gap, Math.max(gap, boardRect.height - previewHeight - gap)),
     });
@@ -208,13 +294,18 @@ const BoardView = ({ projection, focusedCapabilityId, moveMode, pending, onMove,
                     {nodeTiles.slice(0, 8).map((tileInstance, tileIndex) => {
                       const isFaceDown = tileInstance.face_up === false || !tileInstance.tile_id;
                       const tile = projection.tile_catalog?.tiles?.[tileInstance.tile_id];
-                      const event = tile?.event || projection.tile_catalog?.events?.[tile?.event_id];
+                      const octopusToken = projection.tile_catalog?.tokens?.octopus;
+                      const isOctopusToken = Boolean(tileInstance.token_type === "octopus" || tile?.token_type === "octopus");
+                      const rawEvent = tile?.event || projection.tile_catalog?.events?.[tile?.event_id];
+                      const event = isOctopusToken && rawEvent
+                        ? { ...rawEvent, image_url: rawEvent.image_url || tile?.image_url || octopusToken?.image_url }
+                        : rawEvent;
                       const interactionsById = projection.tile_catalog?.interactions || {};
                       const canInspect = !isFaceDown && isCurrent && projection.phase === "night_action" && !pending;
                       const canFocusedCapabilityInitiate =
                         canInspect &&
                         !projection.interaction &&
-                        Boolean(tile?.event_id && (focusedCapability?.initiates_event_ids || []).includes(tile.event_id));
+                        Boolean(isOctopusToken || (tile?.event_id && (focusedCapability?.initiates_event_ids || []).includes(tile.event_id)));
                       const title = isFaceDown ? "Hidden tile" : tile?.name || event?.name || tileInstance.tile_id;
                       const position = tileOrbitPosition(tileIndex);
                       return (
@@ -230,7 +321,7 @@ const BoardView = ({ projection, focusedCapabilityId, moveMode, pending, onMove,
                             if (canInspect) onInspectTile?.(tileInstance.instance_id);
                           }}
                           onMouseEnter={(mouseEvent) => {
-                            if (!isFaceDown) showTilePreview(mouseEvent.currentTarget, tile, event, interactionsById);
+                            if (!isFaceDown) showTilePreview(mouseEvent.currentTarget, tile, event, interactionsById, octopusToken, isOctopusToken);
                           }}
                           onMouseLeave={() => setHoveredTile(null)}
                           onPointerDown={(event) => event.stopPropagation()}
@@ -238,7 +329,11 @@ const BoardView = ({ projection, focusedCapabilityId, moveMode, pending, onMove,
                           title={title}
                           type="button"
                         >
-                          <BoardTileToken event={event} faceDown={isFaceDown} highlighted={canFocusedCapabilityInitiate} title={title} />
+                          {isOctopusToken && !isFaceDown ? (
+                            <OctopusBoardToken highlighted={canFocusedCapabilityInitiate} interactionsById={interactionsById} tile={tile} title={title} token={octopusToken} />
+                          ) : (
+                            <BoardTileToken event={event} faceDown={isFaceDown} highlighted={canFocusedCapabilityInitiate} title={title} />
+                          )}
                         </button>
                       );
                     })}
@@ -252,15 +347,19 @@ const BoardView = ({ projection, focusedCapabilityId, moveMode, pending, onMove,
       </div>
       {hoveredTile ? (
         <div
-          className="pointer-events-none absolute z-[80] w-40 shadow-2xl"
+          className={["pointer-events-none absolute z-[80]", hoveredTile.isOctopusToken ? "w-32" : "w-40 shadow-2xl"].join(" ")}
           style={{ left: hoveredTile.left, top: hoveredTile.top }}
         >
-          <HexTilePreview
-            className="max-w-none"
-            event={hoveredTile.event}
-            interactionsById={hoveredTile.interactionsById}
-            tile={hoveredTile.tile}
-          />
+          {hoveredTile.isOctopusToken ? (
+            <OctopusBoardToken interactionsById={hoveredTile.interactionsById} large tile={hoveredTile.tile} title={hoveredTile.tile?.name || hoveredTile.event?.name || "Octopus token"} token={hoveredTile.token} />
+          ) : (
+            <HexTilePreview
+              className="max-w-none"
+              event={hoveredTile.event}
+              interactionsById={hoveredTile.interactionsById}
+              tile={hoveredTile.tile}
+            />
+          )}
         </div>
       ) : null}
     </section>

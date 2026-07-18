@@ -8,6 +8,13 @@ const playSubnavItems = [
   { label: "Solo Play", to: "/play/solo" },
 ];
 
+const playableAbilities = [
+  { id: "agility", label: "Agility" },
+  { id: "camouflage", label: "Camouflage" },
+  { id: "force", label: "Force" },
+  { id: "propulsion", label: "Propulsion" },
+];
+
 const SoloPlayPage = () => {
   const { token } = useStore();
   const navigate = useNavigate();
@@ -15,6 +22,8 @@ const SoloPlayPage = () => {
   const [creating, setCreating] = useState(false);
   const [levels, setLevels] = useState([]);
   const [selectedLevelId, setSelectedLevelId] = useState("");
+  const [selectedMode, setSelectedMode] = useState("goldfish");
+  const [humanAbilityId, setHumanAbilityId] = useState("agility");
 
   useEffect(() => {
     const loadLevels = async () => {
@@ -48,7 +57,12 @@ const SoloPlayPage = () => {
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ mode: "solo", game_type: "goldfish", level_id: selectedLevelId }),
+        body: JSON.stringify({
+          mode: selectedMode,
+          game_type: "goldfish",
+          level_id: selectedLevelId,
+          human_ability_id: selectedMode === "solo_with_bots" ? humanAbilityId : undefined,
+        }),
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.detail || "Failed to create game room.");
@@ -74,7 +88,8 @@ const SoloPlayPage = () => {
       {error ? <p className="mb-4 rounded-md bg-rose-950/70 px-3 py-2 text-sm text-rose-200">{error}</p> : null}
 
       <section className="mb-4 rounded-lg border border-slate-800 bg-slate-900 p-4">
-        <label className="block max-w-lg text-sm">
+        <div className="grid gap-4 lg:grid-cols-3">
+        <label className="block text-sm">
           <span className="font-medium text-slate-300">Level</span>
           <select
             className="mt-2 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-white"
@@ -89,6 +104,34 @@ const SoloPlayPage = () => {
           </select>
           {!levels.length ? <span className="mt-2 block text-xs text-amber-300">Create a level in the admin console before starting.</span> : null}
         </label>
+        <label className="block text-sm">
+          <span className="font-medium text-slate-300">Mode</span>
+          <select
+            className="mt-2 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-white"
+            value={selectedMode}
+            onChange={(event) => setSelectedMode(event.target.value)}
+          >
+            <option value="goldfish">Manual goldfish</option>
+            <option value="solo_with_bots">Solo with bots</option>
+          </select>
+        </label>
+        <label className="block text-sm">
+          <span className="font-medium text-slate-300">Your ability</span>
+          <select
+            className="mt-2 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-white disabled:opacity-50"
+            disabled={selectedMode !== "solo_with_bots"}
+            value={humanAbilityId}
+            onChange={(event) => setHumanAbilityId(event.target.value)}
+          >
+            {playableAbilities.map((ability) => (
+              <option key={ability.id} value={ability.id}>
+                {ability.label}
+              </option>
+            ))}
+          </select>
+          <span className="mt-2 block text-xs text-slate-400">Intelligence remains shared.</span>
+        </label>
+        </div>
       </section>
 
       <section className="grid gap-4 md:grid-cols-3">
@@ -104,7 +147,7 @@ const SoloPlayPage = () => {
         />
         <ModeCard
           title="Goldfish"
-          description="Create a solo room with the movement-only Phase 1 prototype."
+          description={selectedMode === "solo_with_bots" ? "Create a solo room with three bot-controlled abilities." : "Create a manual solo room with the current prototype rules."}
           actionLabel={creating ? "Creating..." : "Start"}
           onClick={createQuickMatch}
           disabled={creating || !selectedLevelId}

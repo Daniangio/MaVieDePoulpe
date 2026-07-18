@@ -6,7 +6,6 @@ const emptyMapDraft = () => ({
   name: "Untitled map",
   nodes: {},
   adjacency: {},
-  starting_node_id: "",
   image_url: "",
   image_width: null,
   image_height: null,
@@ -86,7 +85,6 @@ const AdminMapEditor = ({ request, busy, setBusy, setError }) => {
     const id = nextNodeId();
     setDraftMap((current) => ({
       ...current,
-      starting_node_id: current.starting_node_id || id,
       nodes: { ...current.nodes, [id]: { id, tier: 1, x, y } },
       adjacency: { ...current.adjacency, [id]: [] },
     }));
@@ -114,7 +112,6 @@ const AdminMapEditor = ({ request, busy, setBusy, setError }) => {
         ...current,
         nodes,
         adjacency,
-        starting_node_id: current.starting_node_id === selectedNodeId ? Object.keys(nodes)[0] || "" : current.starting_node_id,
       };
     });
     setSelectedNodeId("");
@@ -161,7 +158,6 @@ const AdminMapEditor = ({ request, busy, setBusy, setError }) => {
       form.set("name", draftMap.name || "Untitled map");
       form.set("nodes_json", JSON.stringify(draftMap.nodes || {}));
       form.set("adjacency_json", JSON.stringify(draftMap.adjacency || {}));
-      form.set("starting_node_id", draftMap.starting_node_id || Object.keys(draftMap.nodes || {})[0] || "");
       if (draftMap.image_width) form.set("image_width", String(draftMap.image_width));
       if (draftMap.image_height) form.set("image_height", String(draftMap.image_height));
       if (imageFile) form.set("image", imageFile);
@@ -254,12 +250,6 @@ const AdminMapEditor = ({ request, busy, setBusy, setError }) => {
           <label className="block text-sm">
             <span className="text-slate-600">Board image</span>
             <input ref={imageInputRef} className="mt-1 w-full rounded-md border border-cyan-200 bg-white px-3 py-2 text-sm text-slate-700" type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => setImage(event.target.files?.[0] || null)} />
-          </label>
-          <label className="block text-sm">
-            <span className="text-slate-600">Starting node</span>
-            <select className="mt-1 w-full rounded-md border border-cyan-200 bg-white px-3 py-2 text-slate-800" value={draftMap.starting_node_id || ""} onChange={(event) => setDraftMap((current) => ({ ...current, starting_node_id: event.target.value }))}>
-              {Object.keys(draftMap.nodes || {}).map((nodeId) => <option value={nodeId} key={nodeId}>{nodeId}</option>)}
-            </select>
           </label>
           {selectedNode ? (
             <div className="rounded-md border border-cyan-100 bg-cyan-50 p-3">

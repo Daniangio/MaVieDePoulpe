@@ -14,7 +14,6 @@ const emptyMapDraft = () => ({
   name: "Untitled map",
   nodes: {},
   adjacency: {},
-  starting_node_id: "",
   image_url: "",
   image_width: null,
   image_height: null,
@@ -169,7 +168,6 @@ const AdminPage = () => {
     const id = nextNodeId();
     setDraftMap((current) => ({
       ...current,
-      starting_node_id: current.starting_node_id || id,
       nodes: {
         ...current.nodes,
         [id]: { id, tier: 1, x, y },
@@ -209,7 +207,6 @@ const AdminPage = () => {
         ...current,
         nodes,
         adjacency,
-        starting_node_id: current.starting_node_id === selectedNodeId ? Object.keys(nodes)[0] || "" : current.starting_node_id,
       };
     });
     setSelectedNodeId("");
@@ -260,7 +257,6 @@ const AdminPage = () => {
       form.set("name", draftMap.name || "Untitled map");
       form.set("nodes_json", JSON.stringify(draftMap.nodes || {}));
       form.set("adjacency_json", JSON.stringify(draftMap.adjacency || {}));
-      form.set("starting_node_id", draftMap.starting_node_id || Object.keys(draftMap.nodes || {})[0] || "");
       if (draftMap.image_width) form.set("image_width", String(draftMap.image_width));
       if (draftMap.image_height) form.set("image_height", String(draftMap.image_height));
       if (imageFile) form.set("image", imageFile);

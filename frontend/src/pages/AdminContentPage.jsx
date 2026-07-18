@@ -21,6 +21,7 @@ const emptyTile = {
   name: "",
   event_id: "",
   priority: 0,
+  shell_requirement_count: 0,
   interaction_ids: [],
   counter_attack_interaction_ids: [],
   success_effects: [],
@@ -86,6 +87,8 @@ const contentTabs = [
   ["events", "Events/Animals"],
   ["tiles", "Tiles"],
   ["cards", "Cards"],
+  ["action_costs", "Action Costs"],
+  ["bot_settings", "Bot"],
   ["surprise_cards", "Surprise Cards"],
   ["surprise_decks", "Surprise Decks"],
   ["player_boards", "Player Boards"],
@@ -110,7 +113,74 @@ const importSummaryLabels = {
   surprise_decks: "Surprise Decks",
   player_boards: "Player Boards",
   tokens: "Tokens",
+  action_costs: "Action Costs",
+  bot_settings: "Bot Settings",
   poulpita_panel: "Poulpita Panel",
+};
+
+const actionCostLabels = {
+  gain_ap: "Gain AP",
+  move: "Move",
+  interact: "Interact",
+  special_power: "Use special power",
+};
+
+const defaultActionCosts = {
+  gain_ap: { ap_cost: 0, time_cost: 0 },
+  move: { ap_cost: 1, time_cost: 1 },
+  interact: { ap_cost: 1, time_cost: 2 },
+  special_power: { ap_cost: 1, time_cost: 0 },
+};
+
+const botAbilityOptions = [
+  ["agility", "Agility"],
+  ["camouflage", "Camouflage"],
+  ["force", "Force"],
+  ["propulsion", "Propulsion"],
+  ["intelligence", "Intelligence"],
+];
+
+const defaultBotSettings = {
+  expected_ap_roll: 3,
+  planning_depth_take_controls: 3,
+  max_plans: 3,
+  weights: {
+    efficiency: 35,
+    confidence: 35,
+    expected_gain: 30,
+  },
+  resource_weights: {
+    energy: 8,
+    neurons: 5,
+    seashells: 4,
+    ap: 1,
+    shelters: 18,
+    surprise_cards: 6,
+    removed_tiles: 3,
+  },
+  ability_colors: {
+    agility: "#0ea5e9",
+    camouflage: "#16a34a",
+    force: "#dc2626",
+    propulsion: "#7c3aed",
+    intelligence: "#f59e0b",
+  },
+};
+
+const botPlannerWeightLabels = {
+  efficiency: "Efficiency",
+  confidence: "Confidence",
+  expected_gain: "Expected gain",
+};
+
+const botResourceWeightLabels = {
+  energy: "Energy",
+  neurons: "Neurons",
+  seashells: "Seashells",
+  ap: "Action points",
+  shelters: "Shelters",
+  surprise_cards: "Surprise cards",
+  removed_tiles: "Removed tiles",
 };
 
 const formatImportSummary = (result) => {
@@ -130,7 +200,7 @@ const formatImportSummary = (result) => {
 
 const AdminContentPage = () => {
   const { token, user } = useStore();
-  const [content, setContent] = useState({ categories: [], card_categories: [], interactions: [], events: [], tiles: [], levels: [], surprise_cards: [], surprise_decks: [], player_boards: [], tokens: [], poulpita_panel: null, cards: [] });
+  const [content, setContent] = useState({ categories: [], card_categories: [], interactions: [], events: [], tiles: [], levels: [], surprise_cards: [], surprise_decks: [], player_boards: [], tokens: [], poulpita_panel: null, action_costs: defaultActionCosts, bot_settings: defaultBotSettings, cards: [] });
   const [categoryName, setCategoryName] = useState("");
   const [categoryCompulsory, setCategoryCompulsory] = useState(false);
   const [interactionDraft, setInteractionDraft] = useState(emptyInteraction);
@@ -349,6 +419,7 @@ const AdminContentPage = () => {
       form.set("name", tileDraft.name);
       form.set("event_id", tileDraft.event_id);
       form.set("priority", String(Number(tileDraft.priority || 0)));
+      form.set("shell_requirement_count", String(Math.max(0, Number(tileDraft.shell_requirement_count || 0))));
       form.set("interaction_ids_json", JSON.stringify(tileDraft.interaction_ids || []));
       form.set("counter_attack_interaction_ids_json", JSON.stringify(tileDraft.counter_attack_interaction_ids || []));
       form.set("success_effects_json", JSON.stringify(tileDraft.success_effects || []));
@@ -432,14 +503,54 @@ const AdminContentPage = () => {
     }
   };
 
-  const saveToken = async (tokenId) => {
+  const saveActionCosts = async (actionCosts) => {
+    setBusy(true);
+    setError("");
+    try {
+      const form = new FormData();
+      form.set("action_costs_json", JSON.stringify(actionCosts || {}));
+      await request("/api/admin/content/action-costs", { method: "PUT", body: form });
+      await loadContent();
+    } catch (saveError) {
+      setError(saveError.message || "Failed to save action costs.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveBotSettings = async (botSettings) => {
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const form = new FormData();
+      form.set("bot_settings_json", JSON.stringify(botSettings || {}));
+      await request("/api/admin/content/bot-settings", { method: "PUT", body: form });
+      setNotice("Bot settings saved.");
+      await loadContent();
+    } catch (saveError) {
+      setError(saveError.message || "Failed to save bot settings.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveToken = async (tokenId, tokenConfig = {}) => {
     setBusy(true);
     setError("");
     try {
       const file = tokenImageRefs.current[tokenId]?.files?.[0] || null;
-      if (!file) throw new Error("Choose a token image to upload.");
       const form = new FormData();
-      form.set("image", file);
+      if (file) form.set("image", file);
+      if (tokenId === "octopus") {
+        form.set("priority", String(Number(tokenConfig.priority || 0)));
+        form.set("initiator_capability_ids_json", JSON.stringify(tokenConfig.initiator_capability_ids || []));
+        form.set("interaction_ids_json", JSON.stringify(tokenConfig.interaction_ids || []));
+        form.set("counter_attack_interaction_ids_json", JSON.stringify(tokenConfig.counter_attack_interaction_ids || []));
+        form.set("success_effects_json", JSON.stringify(tokenConfig.success_effects || []));
+        form.set("counter_attack_effects_json", JSON.stringify(tokenConfig.counter_attack_effects || []));
+        form.set("failure_effects_json", JSON.stringify(tokenConfig.failure_effects || []));
+      }
       await request(`/api/admin/content/tokens/${tokenId}`, { method: "PUT", body: form });
       if (tokenImageRefs.current[tokenId]) tokenImageRefs.current[tokenId].value = "";
       await loadContent();
@@ -585,7 +696,7 @@ const AdminContentPage = () => {
   const addUpgrade = () => {
     setPlayerBoardDraft((current) => ({
       ...current,
-      hand_size_upgrades: [...(current.hand_size_upgrades || []), { cost_resource: "energy", cost: 1, hand_size_bonus: 1 }],
+      hand_size_upgrades: [...(current.hand_size_upgrades || []), { type: "hand_size", cost_resource: "neurons", cost: 1, hand_size_bonus: 1 }],
     }));
   };
 
@@ -702,6 +813,22 @@ const AdminContentPage = () => {
 
       {activeTab === "cards" ? <CardsView cardCategories={cardCategories} content={content} /> : null}
 
+      {activeTab === "action_costs" ? (
+        <ActionCostEditor
+          actionCosts={content.action_costs || defaultActionCosts}
+          busy={busy}
+          onSave={saveActionCosts}
+        />
+      ) : null}
+
+      {activeTab === "bot_settings" ? (
+        <BotSettingsEditor
+          botSettings={content.bot_settings || defaultBotSettings}
+          busy={busy}
+          onSave={saveBotSettings}
+        />
+      ) : null}
+
       {activeTab === "surprise_cards" ? (
         <SurpriseCardEditor
           busy={busy}
@@ -759,6 +886,7 @@ const AdminContentPage = () => {
       {activeTab === "tokens" ? (
         <TokenEditor
           busy={busy}
+          content={content}
           tokenImageRefs={tokenImageRefs}
           tokens={content.tokens || []}
           onSave={saveToken}
@@ -881,6 +1009,17 @@ const TileEditor = ({ addEffect, busy, categoriesById, content, deleteItem, even
             onChange={(event) => setTileDraft((current) => ({ ...current, priority: Number(event.target.value || 0) }))}
           />
         </label>
+        <label className="block text-sm">
+          <span className="text-slate-600">Poulpita shells required</span>
+          <input
+            className={`${input} mt-1`}
+            min="0"
+            step="1"
+            type="number"
+            value={tileDraft.shell_requirement_count ?? 0}
+            onChange={(event) => setTileDraft((current) => ({ ...current, shell_requirement_count: Math.max(0, Number(event.target.value || 0)) }))}
+          />
+        </label>
         <InteractionChecklist title="Required to succeed" field="interaction_ids" interactions={content.interactions} selected={tileDraft.interaction_ids} onToggle={toggleTileInteraction} />
         <InteractionChecklist title="Optional counter-attack" field="counter_attack_interaction_ids" interactions={content.interactions} selected={tileDraft.counter_attack_interaction_ids} onToggle={toggleTileInteraction} />
         <EffectEditor title="Success effects" field="success_effects" effects={tileDraft.success_effects} options={successEffectOptions} onAdd={addEffect} onUpdate={updateEffect} onRemove={removeEffect} />
@@ -908,6 +1047,186 @@ const CardsView = ({ cardCategories, content }) => (
     </div>
   </section>
 );
+
+const ActionCostEditor = ({ actionCosts, onSave, busy }) => {
+  const [draft, setDraft] = useState({ ...defaultActionCosts, ...(actionCosts || {}) });
+
+  useEffect(() => {
+    setDraft({ ...defaultActionCosts, ...(actionCosts || {}) });
+  }, [actionCosts]);
+
+  const updateCost = (actionId, field, value) => {
+    setDraft((current) => ({
+      ...current,
+      [actionId]: {
+        ...(current[actionId] || defaultActionCosts[actionId]),
+        [field]: Math.max(0, Number(value || 0)),
+      },
+    }));
+  };
+
+  return (
+    <section className={panel}>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="font-semibold text-teal-950">Action Costs</h2>
+          <p className="mt-1 text-xs text-slate-500">Time cost is measured in 15-minute night-track steps.</p>
+        </div>
+        <button className={primaryButton} disabled={busy} onClick={() => onSave(draft)} type="button">Save action costs</button>
+      </div>
+      <div className="mt-4 grid gap-3 md:grid-cols-2">
+        {Object.entries(actionCostLabels).map(([actionId, label]) => (
+          <article className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3" key={actionId}>
+            <h3 className="text-sm font-semibold text-teal-950">{label}</h3>
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <label className="text-xs text-slate-600">
+                AP cost
+                <input className={`${input} mt-1`} min="0" type="number" value={Number(draft[actionId]?.ap_cost || 0)} onChange={(event) => updateCost(actionId, "ap_cost", event.target.value)} />
+              </label>
+              <label className="text-xs text-slate-600">
+                Time steps
+                <input className={`${input} mt-1`} min="0" type="number" value={Number(draft[actionId]?.time_cost || 0)} onChange={(event) => updateCost(actionId, "time_cost", event.target.value)} />
+              </label>
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+};
+
+const mergeBotSettings = (settings = {}) => ({
+  ...defaultBotSettings,
+  ...(settings || {}),
+  weights: { ...defaultBotSettings.weights, ...((settings || {}).weights || {}) },
+  resource_weights: { ...defaultBotSettings.resource_weights, ...((settings || {}).resource_weights || {}) },
+  ability_colors: { ...defaultBotSettings.ability_colors, ...((settings || {}).ability_colors || {}) },
+});
+
+const BotSettingsEditor = ({ botSettings, onSave, busy }) => {
+  const [draft, setDraft] = useState(mergeBotSettings(botSettings));
+
+  useEffect(() => {
+    setDraft(mergeBotSettings(botSettings));
+  }, [botSettings]);
+
+  const updateNested = (section, key, value) => {
+    setDraft((current) => ({
+      ...current,
+      [section]: {
+        ...(current[section] || {}),
+        [key]: value,
+      },
+    }));
+  };
+
+  return (
+    <section className={panel}>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="font-semibold text-teal-950">Bot Planning</h2>
+          <p className="mt-1 text-xs text-slate-500">These values affect bot plan evaluation only. They do not change the real dice roll.</p>
+        </div>
+        <button className={primaryButton} disabled={busy} onClick={() => onSave(draft)} type="button">Save bot settings</button>
+      </div>
+      <div className="mt-4 grid gap-3 lg:grid-cols-3">
+        <label className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3 text-sm">
+          <span className="font-semibold text-teal-950">Expected AP roll</span>
+          <span className="mt-1 block text-xs text-slate-500">Used by optimistic plans after Collect AP. Default is 3.</span>
+          <input
+            className={`${input} mt-3`}
+            max="6"
+            min="1"
+            step="1"
+            type="number"
+            value={Number(draft.expected_ap_roll || 3)}
+            onChange={(event) => setDraft((current) => ({ ...current, expected_ap_roll: Math.max(1, Math.min(6, Number(event.target.value || 3))) }))}
+          />
+        </label>
+        <label className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3 text-sm">
+          <span className="font-semibold text-teal-950">Planning depth</span>
+          <span className="mt-1 block text-xs text-slate-500">How many take-control windows bots estimate. Default is 3.</span>
+          <input
+            className={`${input} mt-3`}
+            max="8"
+            min="1"
+            step="1"
+            type="number"
+            value={Number(draft.planning_depth_take_controls || 3)}
+            onChange={(event) => setDraft((current) => ({ ...current, planning_depth_take_controls: Math.max(1, Math.min(8, Number(event.target.value || 3))) }))}
+          />
+        </label>
+        <label className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3 text-sm">
+          <span className="font-semibold text-teal-950">Max plans per bot</span>
+          <span className="mt-1 block text-xs text-slate-500">Upper bound per proposer after Pareto pruning. Default is 3.</span>
+          <input
+            className={`${input} mt-3`}
+            max="16"
+            min="3"
+            step="1"
+            type="number"
+            value={Number(draft.max_plans || 3)}
+            onChange={(event) => setDraft((current) => ({ ...current, max_plans: Math.max(1, Math.min(16, Number(event.target.value || 3))) }))}
+          />
+        </label>
+      </div>
+      <div className="mt-4 grid gap-4 xl:grid-cols-3">
+        <div className="rounded-md border border-cyan-100 bg-white p-3">
+          <h3 className="text-sm font-semibold text-teal-950">Pareto scoring weights</h3>
+          <div className="mt-3 space-y-2">
+            {Object.entries(botPlannerWeightLabels).map(([key, label]) => (
+              <label className="grid grid-cols-[1fr_5rem] items-center gap-2 text-xs" key={key}>
+                <span className="text-slate-600">{label}</span>
+                <input
+                  className={input}
+                  min="0"
+                  step="1"
+                  type="number"
+                  value={Number(draft.weights?.[key] ?? defaultBotSettings.weights[key])}
+                  onChange={(event) => updateNested("weights", key, Math.max(0, Number(event.target.value || 0)))}
+                />
+              </label>
+            ))}
+          </div>
+        </div>
+        <div className="rounded-md border border-cyan-100 bg-white p-3">
+          <h3 className="text-sm font-semibold text-teal-950">Expected-gain resource weights</h3>
+          <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-1">
+            {Object.entries(botResourceWeightLabels).map(([key, label]) => (
+              <label className="grid grid-cols-[1fr_5rem] items-center gap-2 text-xs" key={key}>
+                <span className="text-slate-600">{label}</span>
+                <input
+                  className={input}
+                  step="0.5"
+                  type="number"
+                  value={Number(draft.resource_weights?.[key] ?? defaultBotSettings.resource_weights[key])}
+                  onChange={(event) => updateNested("resource_weights", key, Number(event.target.value || 0))}
+                />
+              </label>
+            ))}
+          </div>
+        </div>
+        <div className="rounded-md border border-cyan-100 bg-white p-3">
+          <h3 className="text-sm font-semibold text-teal-950">Ability colors</h3>
+          <div className="mt-3 space-y-2">
+            {botAbilityOptions.map(([abilityId, label]) => (
+              <label className="grid grid-cols-[1fr_5rem_2.5rem] items-center gap-2 text-xs" key={abilityId}>
+                <span className="text-slate-600">{label}</span>
+                <input
+                  className="h-9 w-full rounded border border-cyan-200 bg-white p-1"
+                  type="color"
+                  value={draft.ability_colors?.[abilityId] || defaultBotSettings.ability_colors[abilityId]}
+                  onChange={(event) => updateNested("ability_colors", abilityId, event.target.value)}
+                />
+                <span className="h-7 w-7 rounded-full border border-cyan-200" style={{ backgroundColor: draft.ability_colors?.[abilityId] || defaultBotSettings.ability_colors[abilityId] }} />
+              </label>
+            ))}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+};
 
 const abilityOptions = [
   ["", "Any focused ability"],
@@ -1126,6 +1445,22 @@ const PlayerBoardEditor = ({
   onRemoveUpgrade,
 }) => {
   const deckByInteraction = Object.fromEntries((draft.deck || []).map((entry) => [entry.interaction_id, Number(entry.count || 0)]));
+  const updateUpgradeCardCount = (index, field, interactionId, count) => {
+    const upgrade = draft.hand_size_upgrades?.[index] || {};
+    const entries = (upgrade[field] || []).filter((entry) => entry.interaction_id !== interactionId);
+    if (count > 0) entries.push({ interaction_id: interactionId, count });
+    onUpdateUpgrade(index, { [field]: entries });
+  };
+  const updatePowerfulCard = (index, cardIndex, patch) => {
+    const upgrade = draft.hand_size_upgrades?.[index] || {};
+    const cards = [...(upgrade.add_cards || [])];
+    cards[cardIndex] = { ...(cards[cardIndex] || { interaction_ids: ["", ""], count: 1 }), ...patch };
+    onUpdateUpgrade(index, { add_cards: cards });
+  };
+  const removePowerfulCard = (index, cardIndex) => {
+    const upgrade = draft.hand_size_upgrades?.[index] || {};
+    onUpdateUpgrade(index, { add_cards: (upgrade.add_cards || []).filter((_, entryIndex) => entryIndex !== cardIndex) });
+  };
   return (
     <section className={panel}>
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1188,22 +1523,80 @@ const PlayerBoardEditor = ({
 
               <div className="rounded-md border border-cyan-100 bg-white p-3">
                 <div className="flex items-center justify-between gap-2">
-                  <h3 className="text-sm font-semibold text-teal-950">Hand upgrades</h3>
+                  <h3 className="text-sm font-semibold text-teal-950">Upgrades</h3>
                   <button className={subtleButton} onClick={onAddUpgrade} type="button">Add</button>
                 </div>
                 <div className="mt-2 space-y-2">
                   {(draft.hand_size_upgrades || []).map((upgrade, index) => (
-                    <div className="grid grid-cols-[1fr_1.5rem_1.5rem_auto] gap-1 rounded bg-cyan-50 p-2" key={index}>
-                      <select className="rounded border border-cyan-200 bg-white px-2 py-1 text-xs" value={upgrade.cost_resource || "energy"} onChange={(event) => onUpdateUpgrade(index, { cost_resource: event.target.value })}>
-                        <option value="energy">Energy</option>
-                        <option value="neurons">Neurons</option>
-                      </select>
-                      <input className="rounded border border-cyan-200 py-1 text-xs" min="1" type="number" value={upgrade.cost || 1} onChange={(event) => onUpdateUpgrade(index, { cost: Number(event.target.value) })} />
-                      <input className="rounded border border-cyan-200 py-1 text-xs" min="1" type="number" value={upgrade.hand_size_bonus || 1} onChange={(event) => onUpdateUpgrade(index, { hand_size_bonus: Number(event.target.value) })} />
-                      <button className="rounded border border-rose-200 bg-white px-2 py-1 text-xs text-rose-700" onClick={() => onRemoveUpgrade(index)} type="button">Remove</button>
+                    <div className="space-y-2 rounded bg-cyan-50 p-2" key={index}>
+                      <div className="grid grid-cols-[1fr_4rem_auto] gap-1">
+                        <select
+                          className="rounded border border-cyan-200 bg-white px-2 py-1 text-xs"
+                          value={upgrade.type || "hand_size"}
+                          onChange={(event) => onUpdateUpgrade(index, event.target.value === "deck_exchange"
+                            ? { type: "deck_exchange", cost_resource: "neurons", cost: 1, remove_cards: [], add_cards: [{ interaction_ids: [interactions[0]?.id || "", interactions[1]?.id || interactions[0]?.id || ""], count: 1 }] }
+                            : { type: "hand_size", cost_resource: "neurons", cost: 1, hand_size_bonus: 1 })}
+                        >
+                          <option value="hand_size">Hand size</option>
+                          <option value="deck_exchange">Deck exchange</option>
+                        </select>
+                        <input className="rounded border border-cyan-200 py-1 text-xs" min="1" type="number" value={upgrade.cost || 1} onChange={(event) => onUpdateUpgrade(index, { cost: Number(event.target.value) })} />
+                        <button className="rounded border border-rose-200 bg-white px-2 py-1 text-xs text-rose-700" onClick={() => onRemoveUpgrade(index)} type="button">Remove</button>
+                      </div>
+                      {(upgrade.type || "hand_size") === "hand_size" ? (
+                        <div className="grid grid-cols-[1fr_4rem] gap-1">
+                          <select className="rounded border border-cyan-200 bg-white px-2 py-1 text-xs" value={upgrade.cost_resource || "neurons"} onChange={(event) => onUpdateUpgrade(index, { cost_resource: event.target.value })}>
+                            <option value="neurons">Neurons</option>
+                            <option value="energy">Energy</option>
+                          </select>
+                          <input className="rounded border border-cyan-200 py-1 text-xs" min="1" type="number" value={upgrade.hand_size_bonus || 1} onChange={(event) => onUpdateUpgrade(index, { hand_size_bonus: Number(event.target.value) })} title="Hand size bonus" />
+                        </div>
+                      ) : (
+                        <div className="space-y-2">
+                          <div>
+                            <p className="text-[0.65rem] font-semibold uppercase text-slate-500">Remove from deck</p>
+                            <div className="mt-1 grid grid-cols-2 gap-1">
+                              {interactions.map((interaction) => {
+                                const removeCount = Number((upgrade.remove_cards || []).find((entry) => entry.interaction_id === interaction.id)?.count || 0);
+                                const maxCount = Number(deckByInteraction[interaction.id] || 0);
+                                return (
+                                  <label className="flex items-center justify-between gap-1 text-[0.65rem] text-slate-700" key={interaction.id}>
+                                    <span className="truncate">{interaction.name}</span>
+                                    <input className="w-12 rounded border border-cyan-200 px-1 py-0.5" max={maxCount} min="0" type="number" value={removeCount} onChange={(event) => updateUpgradeCardCount(index, "remove_cards", interaction.id, Number(event.target.value))} />
+                                  </label>
+                                );
+                              })}
+                            </div>
+                          </div>
+                          <div>
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="text-[0.65rem] font-semibold uppercase text-slate-500">Add powerful cards</p>
+                              <button className="rounded border border-cyan-200 bg-white px-2 py-1 text-[0.65rem] text-teal-800" onClick={() => onUpdateUpgrade(index, { add_cards: [...(upgrade.add_cards || []), { interaction_ids: [interactions[0]?.id || "", interactions[1]?.id || interactions[0]?.id || ""], count: 1 }] })} type="button">Add card</button>
+                            </div>
+                            <div className="mt-1 space-y-1">
+                              {(upgrade.add_cards || []).map((card, cardIndex) => (
+                                <div className="grid grid-cols-[1fr_1fr_3rem_auto] gap-1" key={cardIndex}>
+                                  {[0, 1].map((slot) => (
+                                    <select className="rounded border border-cyan-200 bg-white px-1 py-1 text-[0.65rem]" key={slot} value={card.interaction_ids?.[slot] || ""} onChange={(event) => {
+                                      const ids = [...(card.interaction_ids || ["", ""])];
+                                      ids[slot] = event.target.value;
+                                      updatePowerfulCard(index, cardIndex, { interaction_ids: ids });
+                                    }}>
+                                      <option value="">Action</option>
+                                      {interactions.map((interaction) => <option key={interaction.id} value={interaction.id}>{interaction.name}</option>)}
+                                    </select>
+                                  ))}
+                                  <input className="rounded border border-cyan-200 px-1 py-1 text-[0.65rem]" min="1" type="number" value={card.count || 1} onChange={(event) => updatePowerfulCard(index, cardIndex, { count: Number(event.target.value) })} />
+                                  <button className="rounded border border-rose-200 bg-white px-2 py-1 text-[0.65rem] text-rose-700" onClick={() => removePowerfulCard(index, cardIndex)} type="button">X</button>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   ))}
-                  {(draft.hand_size_upgrades || []).length === 0 ? <p className="text-xs text-slate-500">No hand-size upgrades.</p> : null}
+                  {(draft.hand_size_upgrades || []).length === 0 ? <p className="text-xs text-slate-500">No upgrades.</p> : null}
                 </div>
               </div>
           </div>
@@ -1285,23 +1678,120 @@ const TokenMark = ({ token, label, className = "" }) => {
   );
 };
 
-const TokenEditor = ({ tokens, tokenImageRefs, onSave, busy }) => (
-  <section className="grid gap-4 md:grid-cols-3">
-    {tokens.map((token) => (
-      <article className={panel} key={token.id}>
-        <div className="flex items-center gap-3">
-          <TokenMark token={token} />
-          <div>
-            <h2 className="font-semibold text-teal-950">{token.name}</h2>
-            <p className="text-xs text-slate-500">{token.id}</p>
-          </div>
-        </div>
-        <input ref={(node) => { tokenImageRefs.current[token.id] = node; }} className={`${input} mt-4 text-sm`} type="file" accept="image/png,image/jpeg,image/webp" />
-        <button className={`${primaryButton} mt-3`} disabled={busy} onClick={() => onSave(token.id)} type="button">Save token image</button>
-      </article>
-    ))}
-  </section>
-);
+const TokenEditor = ({ tokens, content, tokenImageRefs, onSave, busy }) => {
+  const [drafts, setDrafts] = useState({});
+
+  useEffect(() => {
+    setDrafts(Object.fromEntries((tokens || []).map((token) => [token.id, {
+      priority: Number(token.priority || 0),
+      initiator_capability_ids: token.initiator_capability_ids || [],
+      interaction_ids: token.interaction_ids || [],
+      counter_attack_interaction_ids: token.counter_attack_interaction_ids || [],
+      success_effects: token.success_effects || [],
+      counter_attack_effects: token.counter_attack_effects || [],
+      failure_effects: token.failure_effects || [],
+    }])));
+  }, [tokens]);
+
+  const setTokenDraft = (tokenId, updater) => {
+    setDrafts((current) => {
+      const previous = current[tokenId] || {};
+      return { ...current, [tokenId]: typeof updater === "function" ? updater(previous) : { ...previous, ...updater } };
+    });
+  };
+
+  const toggleInteraction = (tokenId, field, interactionId) => {
+    setTokenDraft(tokenId, (current) => {
+      const selected = new Set(current[field] || []);
+      if (selected.has(interactionId)) selected.delete(interactionId);
+      else selected.add(interactionId);
+      return { ...current, [field]: Array.from(selected) };
+    });
+  };
+
+  const toggleInitiator = (tokenId, capabilityId) => {
+    setTokenDraft(tokenId, (current) => {
+      const selected = new Set(current.initiator_capability_ids || []);
+      if (selected.has(capabilityId)) selected.delete(capabilityId);
+      else selected.add(capabilityId);
+      return { ...current, initiator_capability_ids: Array.from(selected) };
+    });
+  };
+
+  const addEffect = (tokenId, field, type) => {
+    setTokenDraft(tokenId, (current) => ({
+      ...current,
+      [field]: [
+        ...(current[field] || []),
+        {
+          type,
+          amount: noAmountEffectTypes.has(type) ? null : 1,
+          category_id: type === "remove_preys" ? content.categories?.[0]?.id || "" : undefined,
+        },
+      ],
+    }));
+  };
+
+  const updateEffect = (tokenId, field, index, patch) => {
+    setTokenDraft(tokenId, (current) => ({
+      ...current,
+      [field]: (current[field] || []).map((effect, effectIndex) => (effectIndex === index ? { ...effect, ...patch } : effect)),
+    }));
+  };
+
+  const removeEffect = (tokenId, field, index) => {
+    setTokenDraft(tokenId, (current) => ({
+      ...current,
+      [field]: (current[field] || []).filter((_, effectIndex) => effectIndex !== index),
+    }));
+  };
+
+  return (
+    <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+      {tokens.map((token) => {
+        const draft = drafts[token.id] || {};
+        return (
+          <article className={panel} key={token.id}>
+            <div className="flex items-center gap-3">
+              <TokenMark token={token} />
+              <div>
+                <h2 className="font-semibold text-teal-950">{token.name}</h2>
+                <p className="text-xs text-slate-500">{token.id}</p>
+              </div>
+            </div>
+            <input ref={(node) => { tokenImageRefs.current[token.id] = node; }} className={`${input} mt-4 text-sm`} type="file" accept="image/png,image/jpeg,image/webp" />
+            {token.id === "octopus" ? (
+              <div className="mt-4 space-y-3">
+                <label className="block text-sm">
+                  <span className="text-slate-600">Priority</span>
+                  <input className={`${input} mt-1`} min="0" step="1" type="number" value={draft.priority ?? 0} onChange={(event) => setTokenDraft(token.id, { priority: Number(event.target.value || 0) })} />
+                </label>
+                <div className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3">
+                  <h3 className="text-sm font-semibold text-teal-950">Can initiate interaction</h3>
+                  <div className="mt-2 space-y-2">
+                    {(content.player_boards || []).map((board) => (
+                      <label className="flex items-center gap-2 text-sm text-slate-700" key={board.id}>
+                        <input checked={(draft.initiator_capability_ids || []).includes(board.id)} onChange={() => toggleInitiator(token.id, board.id)} type="checkbox" />
+                        <span className="min-w-0 truncate">{board.name || board.id}</span>
+                      </label>
+                    ))}
+                    {(content.player_boards || []).length === 0 ? <p className="text-xs text-slate-500">Create player boards first.</p> : null}
+                  </div>
+                </div>
+                <InteractionChecklist title="Required to succeed" field="interaction_ids" interactions={content.interactions || []} selected={draft.interaction_ids || []} onToggle={(field, interactionId) => toggleInteraction(token.id, field, interactionId)} />
+                <InteractionChecklist title="Optional counter-attack" field="counter_attack_interaction_ids" interactions={content.interactions || []} selected={draft.counter_attack_interaction_ids || []} onToggle={(field, interactionId) => toggleInteraction(token.id, field, interactionId)} />
+                <EffectEditor title="Success effects" field="success_effects" effects={draft.success_effects || []} options={successEffectOptions} onAdd={(field, type) => addEffect(token.id, field, type)} onUpdate={(field, index, patch) => updateEffect(token.id, field, index, patch)} onRemove={(field, index) => removeEffect(token.id, field, index)} />
+                <EffectEditor title="Counter-attack effects" field="counter_attack_effects" effects={draft.counter_attack_effects || []} options={successEffectOptions} onAdd={(field, type) => addEffect(token.id, field, type)} onUpdate={(field, index, patch) => updateEffect(token.id, field, index, patch)} onRemove={(field, index) => removeEffect(token.id, field, index)} />
+                <EffectEditor categories={content.categories || []} title="Failure effects" field="failure_effects" effects={draft.failure_effects || []} options={failureEffectOptions} onAdd={(field, type) => addEffect(token.id, field, type)} onUpdate={(field, index, patch) => updateEffect(token.id, field, index, patch)} onRemove={(field, index) => removeEffect(token.id, field, index)} />
+              </div>
+            ) : null}
+            <button className={`${primaryButton} mt-3`} disabled={busy} onClick={() => onSave(token.id, draft)} type="button">Save token</button>
+          </article>
+        );
+      })}
+    </section>
+  );
+};
 
 const panelZoneLabels = { neurons: "Neurons", seashells: "Shells" };
 
@@ -1474,7 +1964,10 @@ const TileList = ({ content, eventsById, categoriesById, interactionsById, setTi
           <h3 className="mt-3 truncate font-semibold text-teal-950">{tile.name}</h3>
           <p className="text-xs text-slate-500">{event?.name || "Missing event"} - {categoriesById[event?.category_id]?.name || "No category"}</p>
           <p className="mt-1 text-xs text-slate-600">Priority: {Number(tile.priority || 0)}</p>
-          <p className="mt-3 text-xs text-slate-600">Success: {(tile.interaction_ids || []).length ? (tile.interaction_ids || []).map((id) => interactionsById[id]?.name || id).join(", ") : "Always succeeds"}</p>
+          <p className="mt-3 text-xs text-slate-600">
+            Success: {(tile.interaction_ids || []).length ? (tile.interaction_ids || []).map((id) => interactionsById[id]?.name || id).join(", ") : "No cards"}
+            {Number(tile.shell_requirement_count || 0) > 0 ? ` + ${tile.shell_requirement_count} shell${Number(tile.shell_requirement_count || 0) === 1 ? "" : "s"}` : ""}
+          </p>
           <p className="mt-1 text-xs text-slate-600">Counter: {(tile.counter_attack_interaction_ids || []).map((id) => interactionsById[id]?.name || id).join(", ") || "None"}</p>
           <div className="mt-3 flex gap-2">
             <button className={subtleButton} onClick={() => setTileDraft({ ...emptyTile, ...tile })} type="button">Edit</button>

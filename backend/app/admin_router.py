@@ -32,6 +32,8 @@ from .game_content_service import (
     save_player_board,
     update_token,
     update_poulpita_panel,
+    update_action_costs,
+    update_bot_settings,
     update_category,
     update_event,
     update_interaction,
@@ -386,6 +388,28 @@ async def admin_import_content_package(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.put("/admin/content/action-costs")
+async def admin_update_action_costs(
+    action_costs_json: str = Form(...),
+    _admin: User = Depends(require_admin),
+):
+    try:
+        return update_action_costs(_json_form_object(action_costs_json, "action_costs_json"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/admin/content/bot-settings")
+async def admin_update_bot_settings(
+    bot_settings_json: str = Form(...),
+    _admin: User = Depends(require_admin),
+):
+    try:
+        return update_bot_settings(_json_form_object(bot_settings_json, "bot_settings_json"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/admin/content/categories")
 async def admin_create_category(
     name: str = Form(...),
@@ -507,6 +531,7 @@ async def admin_create_tile(
     name: str = Form(...),
     event_id: str = Form(...),
     priority: int = Form(default=0),
+    shell_requirement_count: int = Form(default=0),
     interaction_ids_json: str = Form(...),
     counter_attack_interaction_ids_json: str = Form(default="[]"),
     success_effects_json: str = Form(default="[]"),
@@ -519,6 +544,7 @@ async def admin_create_tile(
             name=name,
             event_id=event_id,
             priority=priority,
+            shell_requirement_count=shell_requirement_count,
             interaction_ids=[str(item) for item in _json_form_list(interaction_ids_json, "interaction_ids_json")],
             counter_attack_interaction_ids=[
                 str(item)
@@ -538,6 +564,7 @@ async def admin_update_tile(
     name: str = Form(...),
     event_id: str = Form(...),
     priority: int = Form(default=0),
+    shell_requirement_count: int = Form(default=0),
     interaction_ids_json: str = Form(...),
     counter_attack_interaction_ids_json: str = Form(default="[]"),
     success_effects_json: str = Form(default="[]"),
@@ -551,6 +578,7 @@ async def admin_update_tile(
             name=name,
             event_id=event_id,
             priority=priority,
+            shell_requirement_count=shell_requirement_count,
             interaction_ids=[str(item) for item in _json_form_list(interaction_ids_json, "interaction_ids_json")],
             counter_attack_interaction_ids=[
                 str(item)
@@ -677,7 +705,11 @@ async def admin_create_level(
     groups_json: str = Form(...),
     objectives_json: str = Form(default="[]"),
     starting_energy: int = Form(default=3),
+    starting_neurons: int = Form(default=0),
+    night_duration_steps: int = Form(default=24),
     surprise_deck_id: str = Form(default=""),
+    poulpita_starting_node_id: str = Form(default=""),
+    node_tokens_json: str = Form(default="{}"),
     _admin: User = Depends(require_admin),
 ):
     try:
@@ -689,7 +721,11 @@ async def admin_create_level(
             groups=_json_form_list(groups_json, "groups_json"),
             objectives=_json_form_list(objectives_json, "objectives_json"),
             starting_energy=starting_energy,
+            starting_neurons=starting_neurons,
+            night_duration_steps=night_duration_steps,
             surprise_deck_id=surprise_deck_id,
+            poulpita_starting_node_id=poulpita_starting_node_id,
+            node_tokens=_json_form_object(node_tokens_json, "node_tokens_json"),
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -707,7 +743,11 @@ async def admin_update_level(
     groups_json: str = Form(...),
     objectives_json: str = Form(default="[]"),
     starting_energy: int = Form(default=3),
+    starting_neurons: int = Form(default=0),
+    night_duration_steps: int = Form(default=24),
     surprise_deck_id: str = Form(default=""),
+    poulpita_starting_node_id: str = Form(default=""),
+    node_tokens_json: str = Form(default="{}"),
     _admin: User = Depends(require_admin),
 ):
     try:
@@ -720,7 +760,11 @@ async def admin_update_level(
             groups=_json_form_list(groups_json, "groups_json"),
             objectives=_json_form_list(objectives_json, "objectives_json"),
             starting_energy=starting_energy,
+            starting_neurons=starting_neurons,
+            night_duration_steps=night_duration_steps,
             surprise_deck_id=surprise_deck_id,
+            poulpita_starting_node_id=poulpita_starting_node_id,
+            node_tokens=_json_form_object(node_tokens_json, "node_tokens_json"),
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -741,10 +785,27 @@ async def admin_delete_level(level_id: str, _admin: User = Depends(require_admin
 async def admin_update_token(
     token_id: str,
     image: UploadFile | None = File(default=None),
+    priority: int | None = Form(default=None),
+    initiator_capability_ids_json: str | None = Form(default=None),
+    interaction_ids_json: str | None = Form(default=None),
+    counter_attack_interaction_ids_json: str | None = Form(default=None),
+    success_effects_json: str | None = Form(default=None),
+    counter_attack_effects_json: str | None = Form(default=None),
+    failure_effects_json: str | None = Form(default=None),
     _admin: User = Depends(require_admin),
 ):
     try:
-        return await update_token(token_id=token_id, image=image)
+        return await update_token(
+            token_id=token_id,
+            image=image,
+            priority=priority,
+            initiator_capability_ids=_json_form_list(initiator_capability_ids_json, "initiator_capability_ids_json") if initiator_capability_ids_json is not None else None,
+            interaction_ids=_json_form_list(interaction_ids_json, "interaction_ids_json") if interaction_ids_json is not None else None,
+            counter_attack_interaction_ids=_json_form_list(counter_attack_interaction_ids_json, "counter_attack_interaction_ids_json") if counter_attack_interaction_ids_json is not None else None,
+            success_effects=_json_form_list(success_effects_json, "success_effects_json") if success_effects_json is not None else None,
+            counter_attack_effects=_json_form_list(counter_attack_effects_json, "counter_attack_effects_json") if counter_attack_effects_json is not None else None,
+            failure_effects=_json_form_list(failure_effects_json, "failure_effects_json") if failure_effects_json is not None else None,
+        )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

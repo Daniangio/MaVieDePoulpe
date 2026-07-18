@@ -8,6 +8,7 @@ from backend.app.game_room_service import (
     ROOM_STATE_IN_GAME,
     ROOM_STATE_SETUP,
     _apply_tile_visibility,
+    _goldfish_state,
 )
 from backend.app.server_models import User
 
@@ -221,6 +222,406 @@ def test_goldfish_join_seat_is_stable_for_owner():
         joined = await service.join_room(room_id=room["id"], user=user)
 
         assert joined == {"room_id": room["id"], "seat_id": "goldfish"}
+
+    run(scenario())
+
+
+def test_solo_with_bots_assigns_one_human_three_bots_and_shared_intelligence():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+
+        room = await service.create_room(user=user, mode="solo_with_bots", game_type="goldfish", human_ability_id="force")
+        setup_projection = await service.get_projection(room_id=room["id"], user=user)
+        start = await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_start_bots",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "goldfish",
+                "expected_version": 0,
+                "type": "start_goldfish_game",
+                "payload": {},
+            },
+        )
+
+        projection = start["projection"]
+        assert room["mode"] == "solo_with_bots"
+        assert setup_projection["mode"] == "solo_with_bots"
+        assert setup_projection["bot_config"]["human_ability_id"] == "force"
+        assert projection["mode"] == "solo_with_bots"
+        assert projection["focused_capability_id"] == "force"
+        assert projection["capabilities"]["force"]["controller_type"] == "human"
+        assert projection["capabilities"]["intelligence"]["controller_type"] == "shared"
+        assert {
+            capability_id
+            for capability_id, capability in projection["capabilities"].items()
+            if capability.get("controller_type") == "bot"
+        } == {"agility", "camouflage", "propulsion"}
+
+    run(scenario())
+
+
+def test_solo_with_bots_rejects_intelligence_as_human_seat():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+
+        with pytest.raises(ValueError):
+            await service.create_room(user=user, mode="solo_with_bots", game_type="goldfish", human_ability_id="intelligence")
+
+    run(scenario())
+
+
+def test_solo_with_bots_generates_public_bot_plan_proposals():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+
+        room = await service.create_room(user=user, mode="solo_with_bots", game_type="goldfish", human_ability_id="force")
+        await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_start_bot_plans",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "goldfish",
+                "expected_version": 0,
+                "type": "start_goldfish_game",
+                "payload": {},
+            },
+        )
+
+        plans = await service.get_bot_plans(room_id=room["id"], user=user)
+
+        assert plans["status"] == "awaiting_selection"
+        assert plans["generated_from_version"] == 1
+        assert 1 <= len(plans["proposals"]) <= 5
+        assert all("_score" not in proposal for proposal in plans["proposals"])
+        assert all(proposal["proposer_ability_id"] in {"agility", "camouflage", "propulsion"} for proposal in plans["proposals"])
+        assert all("step_preview" in proposal for proposal in plans["proposals"])
+
+    run(scenario())
+
+
+def test_bot_plans_do_not_suggest_moving_before_current_compulsory_tile():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+        room = await service.create_room(user=user, mode="solo_with_bots", game_type="goldfish", human_ability_id="force")
+        await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_start_forced_plan",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "goldfish",
+                "expected_version": 0,
+                "type": "start_goldfish_game",
+                "payload": {},
+            },
+        )
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "agility"
+        state["capabilities"]["agility"]["pa"] = 2
+        state["capabilities"]["agility"]["initiates_event_ids"] = ["shark"]
+        state["tile_catalog"] = {
+            "categories": {"threat": {"id": "threat", "name": "Threat", "compulsory_on_same_node": True}},
+            "events": {"shark": {"id": "shark", "name": "Shark", "category_id": "threat"}},
+            "tiles": {"shark-tile": {"id": "shark-tile", "event_id": "shark", "priority": 9, "interaction_ids": []}},
+            "interactions": {},
+        }
+        state["tiles"] = {"1A": [{"instance_id": "tile_shark", "tile_id": "shark-tile", "face_up": True}]}
+
+        plans = await service.get_bot_plans(room_id=room["id"], user=user)
+        plan_ids = [plan["plan_id"] for plan in plans["proposals"]]
+
+        assert any(plan_id.startswith("forced_agility_tile_shark") for plan_id in plan_ids)
+        assert not any(plan_id.startswith("move_inspect_") for plan_id in plan_ids)
+        assert plans["proposals"][0]["risk_label"] == "forced"
+
+    run(scenario())
+
+
+def test_execute_bot_plan_runs_only_next_command_through_reducer():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+        room = await service.create_room(user=user, mode="solo_with_bots", game_type="goldfish", human_ability_id="force")
+        await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_start_execute_plan",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "goldfish",
+                "expected_version": 0,
+                "type": "start_goldfish_game",
+                "payload": {},
+            },
+        )
+
+        result = await service.execute_bot_plan(room_id=room["id"], user=user, plan_id="take_control_collect_agility")
+
+        assert result["ok"] is True
+        assert result["status"] == "replan_required"
+        assert [entry["type"] for entry in result["command_results"]] == ["take_control"]
+        assert result["projection"]["active_capability_id"] == "agility"
+        assert result["projection"]["version"] == 2
+        assert result["projection"]["capabilities"]["agility"]["pa"] == 0
+
+    run(scenario())
+
+
+def test_bot_collect_plan_uses_configured_expected_ap_roll():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+        room = await service.create_room(user=user, mode="solo_with_bots", game_type="goldfish", human_ability_id="force")
+        await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_start_expected_roll_plan",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "goldfish",
+                "expected_version": 0,
+                "type": "start_goldfish_game",
+                "payload": {},
+            },
+        )
+        state = service._memory_states[room["id"]]
+        state["tile_catalog"]["bot_settings"] = {"expected_ap_roll": 5}
+
+        plans = await service.get_bot_plans(room_id=room["id"], user=user)
+        collect_plan = next(plan for plan in plans["proposals"] if plan["plan_id"] == "take_control_collect_agility")
+
+        assert collect_plan["statistics"]["expected_ap_roll"] == 5
+        assert collect_plan["expected_resources"]["expected_ap_gain_by_ability"] == {"agility": 5}
+        assert "average AP roll of 5" in collect_plan["rationale"]
+        assert len(collect_plan["plan_chain"]) > 2
+
+    run(scenario())
+
+
+def test_bot_plans_offer_surprise_resolution_without_public_card_ids():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+        room = await service.create_room(user=user, mode="solo_with_bots", game_type="goldfish", human_ability_id="force")
+        await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_start_surprise_plans",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "goldfish",
+                "expected_version": 0,
+                "type": "start_goldfish_game",
+                "payload": {},
+            },
+        )
+        state = service._memory_states[room["id"]]
+        state["pending_surprise"] = {
+            "card": {
+                "id": "surprise-1",
+                "name": "Spark",
+                "costs": [{"type": "play_cards", "interaction_ids": ["hide"]}],
+                "effects": [{"type": "gain_neurons", "amount": 2}],
+            }
+        }
+        state["capabilities"]["camouflage"]["hand"] = [
+            {"card_id": "secret_card_hide", "interaction_id": "hide", "interaction_ids": ["hide"], "owner_capability_id": "camouflage"}
+        ]
+
+        public_plans = await service.get_bot_plans(room_id=room["id"], user=user)
+        executed = await service.execute_bot_plan(room_id=room["id"], user=user, plan_id="surprise_accept_camouflage")
+
+        assert [plan["plan_id"] for plan in public_plans["proposals"]] == ["surprise_accept_camouflage", "surprise_skip"]
+        assert all("commands" not in plan for plan in public_plans["proposals"])
+        assert "secret_card_hide" not in str(public_plans)
+        assert executed["ok"] is True
+        assert executed["projection"]["pending_surprise"] is None
+        assert executed["projection"]["poulpita"]["neurons"] == 2
+        assert executed["projection"]["capabilities"]["camouflage"]["hand"] == []
+
+    run(scenario())
+
+
+def test_bot_plans_after_surprise_can_take_control_for_camouflage_forced_tile():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+        room = await service.create_room(user=user, mode="solo_with_bots", game_type="goldfish", human_ability_id="force")
+        await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_start_camouflage_forced_plan",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "goldfish",
+                "expected_version": 0,
+                "type": "start_goldfish_game",
+                "payload": {},
+            },
+        )
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "force"
+        state["capabilities"]["camouflage"]["pa"] = 2
+        state["capabilities"]["camouflage"]["initiates_event_ids"] = ["moray"]
+        state["tile_catalog"] = {
+            "categories": {"threat": {"id": "threat", "name": "Threat", "compulsory_on_same_node": True}},
+            "events": {"moray": {"id": "moray", "name": "Moray", "category_id": "threat"}},
+            "tiles": {"moray-tile": {"id": "moray-tile", "event_id": "moray", "priority": 10, "interaction_ids": []}},
+            "interactions": {},
+        }
+        state["tiles"] = {"1A": [{"instance_id": "tile_moray", "tile_id": "moray-tile", "face_up": True}]}
+
+        plans = await service.get_bot_plans(room_id=room["id"], user=user)
+        plan_ids = [plan["plan_id"] for plan in plans["proposals"]]
+
+        assert "take_control_forced_camouflage_tile_moray" in plan_ids
+        assert not any(plan_id.startswith("move_inspect_") for plan_id in plan_ids)
+        assert plans["proposals"][0]["risk_label"] == "forced"
+
+    run(scenario())
+
+
+def test_bot_plans_keep_current_active_plan_and_show_take_control_alternatives():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+        room = await service.create_room(user=user, mode="solo_with_bots", game_type="goldfish", human_ability_id="force")
+        await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_start_active_team_plan",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "goldfish",
+                "expected_version": 0,
+                "type": "start_goldfish_game",
+                "payload": {},
+            },
+        )
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "force"
+        state["capabilities"]["force"]["pa"] = 2
+        state["capabilities"]["force"]["actions_taken_this_control"] = 0
+
+        plans = await service.get_bot_plans(room_id=room["id"], user=user)
+        plan_ids = [plan["plan_id"] for plan in plans["proposals"]]
+
+        assert plans["status"] == "awaiting_selection"
+        assert "collect_force" in plan_ids
+        assert any(plan_id.startswith("take_control_collect_") for plan_id in plan_ids)
+        active_plan = next(plan for plan in plans["proposals"] if plan["plan_id"] == "collect_force")
+        alternative_plan = next(plan for plan in plans["proposals"] if plan["plan_id"].startswith("take_control_collect_"))
+        assert active_plan["statistics"]["efficiency"] >= alternative_plan["statistics"]["efficiency"]
+
+    run(scenario())
+
+
+def test_forced_current_tile_reports_manual_blocker_instead_of_empty_plans():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+        room = await service.create_room(user=user, mode="solo_with_bots", game_type="goldfish", human_ability_id="force")
+        await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_start_blocked_forced_plan",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "goldfish",
+                "expected_version": 0,
+                "type": "start_goldfish_game",
+                "payload": {},
+            },
+        )
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "force"
+        state["capabilities"]["force"]["initiates_event_ids"] = []
+        for capability in state["capabilities"].values():
+            capability["initiates_event_ids"] = []
+            capability["control_takes_this_night"] = capability["max_control_takes_per_night"]
+        state["tile_catalog"] = {
+            "categories": {"threat": {"id": "threat", "name": "Threat", "compulsory_on_same_node": True}},
+            "events": {"moray": {"id": "moray", "name": "Moray", "category_id": "threat"}},
+            "tiles": {"moray-tile": {"id": "moray-tile", "event_id": "moray", "priority": 10, "interaction_ids": []}},
+            "interactions": {},
+        }
+        state["tiles"] = {"1A": [{"instance_id": "tile_moray", "tile_id": "moray-tile", "face_up": True}]}
+
+        plans = await service.get_bot_plans(room_id=room["id"], user=user)
+
+        assert plans["status"] == "awaiting_selection"
+        assert plans["proposals"][0]["plan_id"] == "forced_tile_needs_manual_resolution"
+        assert plans["proposals"][0]["risk_label"] == "forced"
+
+    run(scenario())
+
+
+def test_bot_plans_support_open_interaction_with_public_statistics():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+        room = await service.create_room(user=user, mode="solo_with_bots", game_type="goldfish", human_ability_id="force")
+        await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_start_open_support_plan",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "goldfish",
+                "expected_version": 0,
+                "type": "start_goldfish_game",
+                "payload": {},
+            },
+        )
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "force"
+        state["tile_catalog"] = {
+            "categories": {"threat": {"id": "threat", "name": "Threat", "compulsory_on_same_node": True}},
+            "events": {"moray": {"id": "moray", "name": "Moray", "category_id": "threat"}},
+            "tiles": {"moray-tile": {"id": "moray-tile", "event_id": "moray", "priority": 10, "interaction_ids": ["hide"]}},
+            "interactions": {"hide": {"id": "hide", "name": "Hide"}},
+        }
+        state["interaction"] = {
+            "tile_instance_id": "tile_moray",
+            "tile_id": "moray-tile",
+            "node_id": "1A",
+            "initiator_capability_id": "force",
+            "played_cards": [],
+        }
+        state["capabilities"]["camouflage"]["hand"] = [
+            {"card_id": "private_hide_card", "interaction_id": "hide", "interaction_ids": ["hide"], "owner_capability_id": "camouflage"}
+        ]
+
+        plans = await service.get_bot_plans(room_id=room["id"], user=user)
+        proposal = next(plan for plan in plans["proposals"] if plan["plan_id"] == "support_interaction_camouflage_tile_moray")
+
+        assert "commands" not in proposal
+        assert "private_hide_card" not in str(plans)
+        assert proposal["statistics"]["success_probability"] >= 0.9
+        assert proposal["statistics"]["interaction_probabilities"][0]["tile_name"] == "Moray"
+        assert proposal["plan_chain"]
 
     run(scenario())
 
@@ -474,6 +875,32 @@ def test_draw_refills_empty_deck_from_discard(monkeypatch):
     run(scenario())
 
 
+def test_configured_move_action_costs_spend_ap_and_advance_time():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        await prepare_active_capability_with_ap(service, user, room)
+        state = service._memory_states[room["id"]]
+        state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["pa"] = 3
+        state["tile_catalog"]["action_costs"] = {"move": {"ap_cost": 2, "time_cost": 4}}
+
+        result = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_costed_move",
+            expected_version=3,
+            command_type="move_poulpita",
+            payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID, "target_node_id": "1B"},
+        )
+
+        capability = result["projection"]["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]
+        assert result["ok"] is True
+        assert capability["pa"] == 1
+        assert result["projection"]["night_time_spent"] == 4
+
+    run(scenario())
+
+
 def test_state_version_conflict_is_structured_rejection():
     async def scenario():
         service, user, room, _start = await create_started_room()
@@ -548,6 +975,45 @@ def test_failed_interaction_can_move_poulpita_and_tile_to_previous_node():
         assert projection["poulpita"]["previous_node_id"] == "1B"
         assert projection["tiles"]["1B"] == []
         assert projection["tiles"]["1A"][0]["instance_id"] == "tile_crab"
+
+    run(scenario())
+
+
+def test_successful_interaction_consumes_required_poulpita_shells():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["poulpita"]["seashells"] = 3
+        state["tile_catalog"] = {
+            "tiles": {
+                "shell-threat": {
+                    "id": "shell-threat",
+                    "event_id": "crab",
+                    "interaction_ids": [],
+                    "shell_requirement_count": 2,
+                    "success_effects": [{"type": "gain_neurons", "amount": 1}],
+                    "failure_effects": [],
+                }
+            },
+            "events": {"crab": {"id": "crab", "category_id": "prey"}},
+            "interactions": {},
+        }
+        state["tiles"] = {"1A": [{"instance_id": "tile_shell", "tile_id": "shell-threat", "face_up": True}]}
+        state["interaction"] = {"tile_instance_id": "tile_shell", "tile_id": "shell-threat", "node_id": "1A", "played_cards": []}
+
+        result = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_shell_success",
+            expected_version=1,
+            command_type="resolve_interaction",
+        )
+
+        assert result["ok"] is True
+        assert result["projection"]["poulpita"]["seashells"] == 1
+        assert result["projection"]["poulpita"]["neurons"] == 1
+        assert result["projection"]["tiles"]["1A"] == []
 
     run(scenario())
 
@@ -654,6 +1120,7 @@ def test_compulsory_same_node_interactions_follow_highest_priority_first():
         state = service._memory_states[room["id"]]
         state["phase"] = "night_action"
         state["active_capability_id"] = DEFAULT_ACTIVE_CAPABILITY_ID
+        state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["pa"] = 3
         state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["initiates_event_ids"] = ["shark", "crab"]
         state["tile_catalog"] = {
             "categories": {
@@ -717,12 +1184,151 @@ def test_compulsory_same_node_interactions_follow_highest_priority_first():
     run(scenario())
 
 
+def test_octopus_token_hydrates_tile_definition_and_enforces_initiators(monkeypatch):
+    async def scenario():
+        monkeypatch.setattr(
+            "backend.app.game_room_service.get_game_content_catalog",
+            lambda: {
+                "tiles": {},
+                "events": {},
+                "interactions": {},
+                "tokens": {
+                    "octopus": {
+                        "id": "octopus",
+                        "name": "Octopus token",
+                        "image_url": "/api/admin/content/images/octopus.png",
+                        "priority": 7,
+                        "initiator_capability_ids": ["force"],
+                        "interaction_ids": [],
+                        "counter_attack_interaction_ids": [],
+                        "success_effects": [],
+                        "counter_attack_effects": [],
+                        "failure_effects": [],
+                    }
+                },
+            },
+        )
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "force"
+        state["capabilities"]["force"]["pa"] = 1
+        state["tile_catalog"] = {
+            "categories": {},
+            "tiles": {},
+            "events": {},
+            "interactions": {},
+            "tokens": {
+                "octopus": {
+                    "id": "octopus",
+                    "name": "Octopus token",
+                    "image_url": "/api/admin/content/images/octopus.png",
+                    "priority": 7,
+                    "initiator_capability_ids": ["force"],
+                    "interaction_ids": [],
+                    "counter_attack_interaction_ids": [],
+                    "success_effects": [],
+                    "counter_attack_effects": [],
+                    "failure_effects": [],
+                }
+            },
+        }
+        state["tiles"] = {
+            "1A": [
+                {
+                    "instance_id": "octopus_1A",
+                    "tile_id": "__octopus_token__",
+                    "face_up": True,
+                    "token_type": "octopus",
+                }
+            ]
+        }
+
+        accepted = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_start_octopus_allowed",
+            expected_version=1,
+            command_type="start_interaction",
+            payload={"capability_id": "force", "tile_instance_id": "octopus_1A"},
+        )
+
+        assert accepted["ok"] is True
+        assert accepted["projection"]["interaction"]["tile_id"] == "__octopus_token__"
+        assert accepted["projection"]["tile_catalog"]["tiles"]["__octopus_token__"]["image_url"].endswith("octopus.png")
+
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "force"
+        state["capabilities"]["force"]["pa"] = 1
+        state["tile_catalog"] = {"categories": {}, "tiles": {}, "events": {}, "interactions": {}}
+        state["tiles"] = {"1A": [{"instance_id": "octopus_legacy", "tile_id": "octopus", "face_up": True, "token_type": "octopus"}]}
+
+        accepted_legacy = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_start_octopus_legacy",
+            expected_version=1,
+            command_type="start_interaction",
+            payload={"capability_id": "force", "tile_instance_id": "octopus_legacy"},
+        )
+
+        assert accepted_legacy["ok"] is True
+        assert accepted_legacy["projection"]["interaction"]["tile_id"] == "__octopus_token__"
+        assert accepted_legacy["projection"]["tiles"]["1A"][0]["tile_id"] == "__octopus_token__"
+
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "agility"
+        state["capabilities"]["agility"]["pa"] = 1
+        state["tile_catalog"] = {
+            "categories": {},
+            "tiles": {},
+            "events": {},
+            "interactions": {},
+            "tokens": {
+                "octopus": {
+                    "id": "octopus",
+                    "name": "Octopus token",
+                    "priority": 7,
+                    "initiator_capability_ids": ["force"],
+                    "interaction_ids": [],
+                    "counter_attack_interaction_ids": [],
+                    "success_effects": [],
+                    "counter_attack_effects": [],
+                    "failure_effects": [],
+                }
+            },
+        }
+        state["tiles"] = {"1A": [{"instance_id": "octopus_1A", "tile_id": "__octopus_token__", "face_up": True, "token_type": "octopus"}]}
+
+        rejected = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_start_octopus_rejected",
+            expected_version=1,
+            command_type="start_interaction",
+            payload={"capability_id": "agility", "tile_instance_id": "octopus_1A"},
+        )
+
+        assert rejected["ok"] is False
+        assert rejected["reason"] == "cannot_initiate_interaction"
+
+    run(scenario())
+
+
 def test_higher_priority_optional_interaction_can_precede_lower_compulsory_interaction():
     async def scenario():
         service, user, room, _start = await create_started_room()
         state = service._memory_states[room["id"]]
         state["phase"] = "night_action"
         state["active_capability_id"] = DEFAULT_ACTIVE_CAPABILITY_ID
+        state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["pa"] = 3
         state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["initiates_event_ids"] = ["shark", "crab"]
         state["tile_catalog"] = {
             "categories": {
@@ -788,6 +1394,7 @@ def test_latest_tile_priority_metadata_allows_high_priority_optional_interaction
         state = service._memory_states[room["id"]]
         state["phase"] = "night_action"
         state["active_capability_id"] = DEFAULT_ACTIVE_CAPABILITY_ID
+        state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["pa"] = 1
         state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["initiates_event_ids"] = ["shark", "surprise"]
         state["tile_catalog"] = {
             "categories": {
@@ -961,15 +1568,57 @@ def test_end_night_is_free_and_day_upgrades_stack_before_next_night():
         assert day_capability["actions_taken_this_control"] == 0
         assert bought["ok"] is True
         assert bought["projection"]["poulpita"]["neurons"] == 1
-        assert bought_capability["current_max_cards_in_hand"] == 4
+        assert bought_capability["current_max_cards_in_hand"] == 8
         assert bought_capability["purchased_hand_size_upgrade_indices"] == [0]
         assert duplicate["ok"] is False
         assert duplicate["reason"] == "upgrade_already_bought"
         assert night["ok"] is True
         assert night["projection"]["phase"] == "night_idle"
         assert night["projection"]["day_index"] == 2
-        assert night_capability["current_max_cards_in_hand"] == 4
+        assert night_capability["current_max_cards_in_hand"] == 8
         assert night_capability["control_takes_this_night"] == 0
+
+    run(scenario())
+
+
+def test_day_can_buy_deck_exchange_upgrade():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "day"
+        state["poulpita"]["neurons"] = 3
+        capability = state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]
+        capability["hand_size_upgrades"] = [
+            {
+                "type": "deck_exchange",
+                "cost_resource": "neurons",
+                "cost": 2,
+                "remove_cards": [{"interaction_id": "charge", "count": 1}],
+                "add_cards": [{"interaction_ids": ["charge", "hide"], "count": 1}],
+            }
+        ]
+        capability["purchased_hand_size_upgrade_indices"] = []
+        capability["draw_pile"] = [{"card_id": "card_old", "interaction_id": "charge", "interaction_ids": ["charge"], "owner_capability_id": DEFAULT_ACTIVE_CAPABILITY_ID}]
+        capability["hand"] = []
+        capability["discard"] = []
+
+        result = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_buy_deck_exchange",
+            expected_version=1,
+            command_type="buy_hand_size_upgrade",
+            payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID, "upgrade_index": 0},
+        )
+
+        next_capability = result["projection"]["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]
+        assert result["ok"] is True
+        assert result["projection"]["poulpita"]["neurons"] == 1
+        assert next_capability["purchased_hand_size_upgrade_indices"] == [0]
+        assert len(next_capability["draw_pile"]) == 1
+        assert next_capability["draw_pile"][0]["interaction_ids"] == ["charge", "hide"]
+        assert next_capability["draw_pile"][0]["upgraded"] is True
 
     run(scenario())
 
@@ -1040,14 +1689,61 @@ def test_poulpita_size_can_increase_once_per_day_without_spending_to_zero():
     run(scenario())
 
 
-def test_goldfish_game_uses_level_starting_energy():
+def test_goldfish_game_uses_level_starting_energy(monkeypatch):
     async def scenario():
+        level = {**TEST_LEVEL, "starting_energy": 3, "starting_neurons": 5, "night_duration_steps": 18}
+        monkeypatch.setattr("backend.app.game_room_service.get_level_config", lambda level_id=None: level)
         service, _user, _room, start = await create_started_room()
 
         assert start["projection"]["poulpita"]["energy"] == 3
+        assert start["projection"]["poulpita"]["neurons"] == 5
+        assert start["projection"]["night_time_total"] == 18
         assert service is not None
 
     run(scenario())
+
+
+def test_goldfish_game_uses_level_starting_node_and_node_tokens(monkeypatch):
+    level = {
+        **TEST_LEVEL,
+        "poulpita_starting_node_id": "1B",
+        "node_tokens": {"1A": [{"type": "shelter"}], "1B": [{"type": "octopus"}]},
+    }
+    monkeypatch.setattr("backend.app.game_room_service.get_level_config", lambda level_id=None: level)
+    monkeypatch.setattr(
+        "backend.app.game_room_service.get_game_content_catalog",
+        lambda: {
+            "tiles": {},
+            "events": {},
+            "categories": {},
+            "interactions": {"charge": {"id": "charge", "name": "Charge", "image_url": None}},
+            "tokens": {
+                "octopus": {
+                    "id": "octopus",
+                    "name": "Octopus token",
+                    "image_url": "/api/content/images/octopus.png",
+                    "priority": 12,
+                    "interaction_ids": ["charge"],
+                    "counter_attack_interaction_ids": [],
+                    "success_effects": [{"type": "gain_neurons", "amount": 1}],
+                    "counter_attack_effects": [],
+                    "failure_effects": [{"type": "lose_energy", "amount": 1}],
+                },
+                "shelter": {"id": "shelter", "name": "Shelter token", "image_url": None},
+            },
+        },
+    )
+
+    state = _goldfish_state("room_tokens", level_id="test-level")
+    octopus_instance = state["tiles"]["1B"][0]
+    octopus_tile = state["tile_catalog"]["tiles"][octopus_instance["tile_id"]]
+
+    assert state["poulpita"]["node_id"] == "1B"
+    assert state["shelters"]["1A"]["count"] == 1
+    assert octopus_instance["face_up"] is True
+    assert octopus_tile["priority"] == 12
+    assert octopus_tile["interaction_ids"] == ["charge"]
+    assert state["tile_catalog"]["categories"]["__octopus_token_threat__"]["compulsory_on_same_node"] is True
 
 
 def test_day_shell_transfer_secures_shelter_and_completes_objective():
@@ -1284,13 +1980,14 @@ def test_tile_with_no_required_interactions_resolves_successfully():
     run(scenario())
 
 
-def test_twenty_fifth_ap_spend_can_lose_game_when_energy_reaches_zero():
+def test_action_after_configured_night_duration_can_lose_game_when_energy_reaches_zero():
     async def scenario():
         service, user, room, _start = await create_started_room()
         state = service._memory_states[room["id"]]
         state["phase"] = "night_action"
         state["active_capability_id"] = DEFAULT_ACTIVE_CAPABILITY_ID
-        state["night_time_spent"] = 24
+        state["night_time_total"] = 10
+        state["night_time_spent"] = 10
         state["poulpita"]["energy"] = 1
         capability = state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]
         capability["pa"] = 1
@@ -1308,7 +2005,7 @@ def test_twenty_fifth_ap_spend_can_lose_game_when_energy_reaches_zero():
         game_result = await service.get_result(room_id=room["id"], user_id=user.id)
 
         assert result["ok"] is True
-        assert result["projection"]["night_time_spent"] == 25
+        assert result["projection"]["night_time_spent"] == 11
         assert result["projection"]["poulpita"]["energy"] == 0
         assert result["projection"]["phase"] == "game_over"
         assert game_result["outcome"] == "lost"

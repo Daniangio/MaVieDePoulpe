@@ -36,9 +36,18 @@ async def create_game_room(
     current_user: User = Depends(get_current_user),
 ):
     try:
-        return await _service().create_room(user=current_user, game_type=payload.game_type, map_id=payload.map_id, level_id=payload.level_id)
+        return await _service().create_room(
+            user=current_user,
+            mode=payload.mode,
+            game_type=payload.game_type,
+            map_id=payload.map_id,
+            level_id=payload.level_id,
+            human_ability_id=payload.human_ability_id,
+        )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/game/maps")
@@ -89,6 +98,30 @@ async def get_game_state(
     if state is None:
         raise HTTPException(status_code=404, detail="Game state not found.")
     return state
+
+
+@router.get("/game/rooms/{room_id}/bot-plans")
+async def get_bot_plans(room_id: str, current_user: User = Depends(get_current_user)):
+    plans = await _service().get_bot_plans(room_id=room_id, user=current_user)
+    if plans is None:
+        raise HTTPException(status_code=404, detail="Game state not found.")
+    return plans
+
+
+@router.post("/game/rooms/{room_id}/bot-plans/recalculate")
+async def recalculate_bot_plans(room_id: str, current_user: User = Depends(get_current_user)):
+    plans = await _service().get_bot_plans(room_id=room_id, user=current_user)
+    if plans is None:
+        raise HTTPException(status_code=404, detail="Game state not found.")
+    return plans
+
+
+@router.post("/game/rooms/{room_id}/bot-plans/{plan_id}/execute")
+async def execute_bot_plan(room_id: str, plan_id: str, current_user: User = Depends(get_current_user)):
+    result = await _service().execute_bot_plan(room_id=room_id, user=current_user, plan_id=plan_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Game state not found.")
+    return result
 
 
 @router.post("/game/rooms/{room_id}/commands", response_model=GameCommandQueuedResponse)
