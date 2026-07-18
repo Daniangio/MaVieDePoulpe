@@ -968,6 +968,48 @@ def _sync_interaction_cards(next_state: dict[str, Any], capability_id: str, sele
     interaction["played_cards"] = next_played
 
 
+def _auto_selected_interaction_card_ids(next_state: dict[str, Any], capability_id: str, required_interaction_ids: list[str]) -> list[str]:
+    interaction = next_state.get("interaction") or {}
+    capability = next_state.get("capabilities", {}).get(capability_id)
+    if capability is None:
+        return []
+    remaining = [str(interaction_id) for interaction_id in required_interaction_ids if interaction_id]
+    selected: list[str] = []
+    for card in interaction.get("played_cards") or []:
+        if str(card.get("capability_id") or "") == capability_id and card.get("card_id"):
+            selected.append(str(card.get("card_id")))
+        played_interaction_id = str(card.get("interaction_id") or "")
+        if played_interaction_id in remaining:
+            remaining.remove(played_interaction_id)
+    for card in capability.get("hand") or []:
+        if not remaining:
+            break
+        match = next((interaction_id for interaction_id in remaining if interaction_id in _card_interaction_options(card)), None)
+        if match:
+            remaining.remove(match)
+            selected.append(str(card.get("card_id")))
+    return selected
+
+
+def _auto_selected_surprise_card_ids(capability: dict[str, Any], costs: list[dict[str, Any]]) -> list[str]:
+    selected: list[str] = []
+    selected_ids: set[str] = set()
+    for cost in costs or []:
+        if str(cost.get("type") or "") != "play_cards":
+            continue
+        remaining = [str(interaction_id) for interaction_id in (cost.get("interaction_ids") or []) if interaction_id]
+        for card in capability.get("hand") or []:
+            card_id = str(card.get("card_id") or "")
+            if not remaining or card_id in selected_ids:
+                continue
+            match = next((interaction_id for interaction_id in remaining if interaction_id in _card_interaction_options(card)), None)
+            if match:
+                remaining.remove(match)
+                selected.append(card_id)
+                selected_ids.add(card_id)
+    return selected
+
+
 def _criteria_met(required: list[str], played: list[str]) -> bool:
     remaining = list(required or [])
     for interaction_id in played:
@@ -1341,7 +1383,8 @@ class GameRoomService:
                 "projection": _project_state(state),
                 "command_results": [],
             }
-        command_templates = list(proposal.get("commands") or [])[:8]
+        all_command_templates = list(proposal.get("commands") or [])
+        command_templates = all_command_templates[:1]
         if not command_templates:
             return {
                 "ok": False,
@@ -1414,6 +1457,10 @@ class GameRoomService:
                 status = "replan_required"
                 reason = f"{last_type}_changed_state"
                 message = "The plan reached a decision boundary. Recalculate plans."
+            elif len(command_results) < len(all_command_templates):
+                status = "replan_required"
+                reason = "planned_step_completed"
+                message = "One planned step was executed. Recalculate or execute the next selected step."
         return {
             "ok": status not in {"command_rejected", "invalidated"},
             "status": status,
@@ -1905,6 +1952,9 @@ class GameRoomService:
             selected_card_ids = [str(card_id) for card_id in (payload.get("card_ids") or [])]
             card = pending_surprise.get("card") or {}
             costs = card.get("costs") or []
+            if payload.get("auto_select_cards") and capability_id:
+                capability = (state.get("capabilities") or {}).get(capability_id) or {}
+                selected_card_ids = _auto_selected_surprise_card_ids(capability, costs)
             next_state = deepcopy(state)
             paid = False
             if not costs:
@@ -2109,6 +2159,12 @@ class GameRoomService:
                 "initiator_capability_id": capability_id,
                 "played_cards": [],
             }
+            if payload.get("auto_select_cards"):
+                selected_card_ids = _auto_selected_interaction_card_ids(
+                    next_state,
+                    capability_id,
+                    list(tile.get("interaction_ids") or []),
+                )
             try:
                 _sync_interaction_cards(next_state, capability_id, selected_card_ids)
             except ValueError as exc:
@@ -2188,6 +2244,12 @@ class GameRoomService:
                 if capability_id:
                     if capability_id != state.get("active_capability_id"):
                         self._reject(state, command_id, "not_active_capability", "Only the active capability can confirm cards.")
+                    if (payload or {}).get("auto_select_cards"):
+                        selected_card_ids = _auto_selected_interaction_card_ids(
+                            next_state,
+                            capability_id,
+                            list(tile.get("interaction_ids") or []),
+                        )
                     try:
                         _sync_interaction_cards(next_state, capability_id, selected_card_ids)
                     except ValueError as exc:

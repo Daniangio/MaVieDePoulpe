@@ -348,7 +348,7 @@ def test_bot_plans_do_not_suggest_moving_before_current_compulsory_tile():
     run(scenario())
 
 
-def test_execute_bot_plan_runs_multiple_commands_through_reducer():
+def test_execute_bot_plan_runs_only_next_command_through_reducer():
     async def scenario():
         service = GameRoomService()
         user = User(id="user_1", username="Player One")
@@ -371,10 +371,10 @@ def test_execute_bot_plan_runs_multiple_commands_through_reducer():
 
         assert result["ok"] is True
         assert result["status"] == "replan_required"
-        assert [entry["type"] for entry in result["command_results"]] == ["take_control", "collect_action_points"]
+        assert [entry["type"] for entry in result["command_results"]] == ["take_control"]
         assert result["projection"]["active_capability_id"] == "agility"
-        assert result["projection"]["version"] == 3
-        assert result["projection"]["capabilities"]["agility"]["pa"] == 1
+        assert result["projection"]["version"] == 2
+        assert result["projection"]["capabilities"]["agility"]["pa"] == 0
 
     run(scenario())
 

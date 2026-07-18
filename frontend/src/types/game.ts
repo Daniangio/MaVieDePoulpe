@@ -97,6 +97,10 @@ export type BotPlanSummary = {
     index?: number;
     label: string;
     command_type?: string | null;
+    public_command?: {
+      type: string;
+      payload?: Record<string, any>;
+    } | null;
     auto_executable?: boolean;
     decision_boundary?: boolean;
   }>;
@@ -108,10 +112,14 @@ export type BotPlanSummary = {
     energy_delta_expected?: number;
     shells_delta_expected?: number;
     neurons_delta_expected?: number;
+    expected_resource_delta?: Record<string, number>;
   };
   statistics?: {
     success_probability?: number;
     interaction_probabilities?: Array<Record<string, any>>;
+    interaction_summaries?: Array<Record<string, any>>;
+    expected_resource_delta?: Record<string, number>;
+    distance_to_closest_known_shelter?: number | null;
     estimated_take_controls?: number;
     estimated_actions?: number;
     estimated_time_steps?: number;

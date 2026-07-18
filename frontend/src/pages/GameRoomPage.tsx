@@ -5,7 +5,7 @@ import BoardView from "../components/BoardView.js";
 import CardPreview from "../components/CardPreview.jsx";
 import HexTilePreview from "../components/HexTilePreview.jsx";
 import { useStore } from "../store.js";
-import type { BotPlanStatus, CapabilityProjection, CardProjection, CommandRejection, GameProjection, NodeId } from "../types/game";
+import type { BotPlanStatus, BotPlanSummary, CapabilityProjection, CardProjection, CommandRejection, GameProjection, NodeId } from "../types/game";
 import { buildApiUrl, buildWsUrl } from "../utils/connection.js";
 
 const makeCommandId = () =>
@@ -970,20 +970,18 @@ const SurpriseCardPanel = ({
 
 const BotPlansOverlay = ({
   botPlanStatus,
-  executingPlanId,
   loading,
   open,
   onClose,
-  onExecute,
+  onSelectPlan,
   onRecalculate,
   projection,
 }: {
   botPlanStatus: BotPlanStatus | null;
-  executingPlanId: string | null;
   loading: boolean;
   open: boolean;
   onClose: () => void;
-  onExecute: (planId: string) => void;
+  onSelectPlan: (planId: string) => void;
   onRecalculate: () => void;
   projection: GameProjection;
 }) => {
@@ -1026,6 +1024,11 @@ const BotPlansOverlay = ({
             const controlTakes = Object.values(resources.control_takes_by_ability || {}).reduce((total, value) => total + Number(value || 0), 0);
             const stats = plan.statistics || {};
             const successPercent = Math.round(Number(stats.success_probability ?? plan.confidence ?? 1) * 100);
+            const expectedDelta = resources.expected_resource_delta || stats.expected_resource_delta || {};
+            const expectedDeltaText = Object.entries(expectedDelta)
+              .filter(([, value]) => Number(value || 0) !== 0)
+              .map(([key, value]) => `${Number(value) > 0 ? "+" : ""}${Number(value)} ${String(key).replaceAll("_", " ")}`)
+              .join(", ");
             const expanded = expandedPlanId === plan.plan_id;
             return (
               <article className="flex min-h-[18rem] flex-col rounded-md border border-slate-700 bg-slate-950 p-3" key={plan.plan_id}>
@@ -1038,6 +1041,8 @@ const BotPlansOverlay = ({
                 <div className="mt-3 rounded border border-slate-800 bg-slate-900 p-2 text-xs text-slate-300">
                   <p><span className="text-slate-500">Public cost:</span> {apCost} AP, {Number(resources.time_steps || 0)} time, {controlTakes} controls</p>
                   <p className="mt-1"><span className="text-slate-500">Estimated success:</span> {successPercent}%</p>
+                  {resources.expected_ap_gain_by_ability ? <p className="mt-1"><span className="text-slate-500">Expected AP:</span> {Object.entries(resources.expected_ap_gain_by_ability).map(([abilityId, value]) => `${projection.capabilities?.[abilityId]?.name || abilityId} +${Number(value || 0)}`).join(", ")}</p> : null}
+                  {expectedDeltaText ? <p className="mt-1"><span className="text-slate-500">EV:</span> {expectedDeltaText}</p> : null}
                   {plan.objective_effect ? <p className="mt-1"><span className="text-slate-500">Objective:</span> {plan.objective_effect}</p> : null}
                 </div>
                 <ol className="mt-3 flex-1 space-y-1 text-xs text-slate-300">
@@ -1058,7 +1063,26 @@ const BotPlansOverlay = ({
                     <p>
                       <span className="text-slate-500">Depth:</span> {Number(stats.planning_depth_take_controls || 0)} controls, {Number(stats.estimated_actions || 0)} actions, {Number(stats.estimated_time_steps || 0)} time
                     </p>
-                    {(stats.interaction_probabilities || []).length ? (
+                    {stats.distance_to_closest_known_shelter !== undefined ? (
+                      <p className="mt-1"><span className="text-slate-500">Shelter distance:</span> {stats.distance_to_closest_known_shelter}</p>
+                    ) : null}
+                    {(stats.interaction_summaries || []).length ? (
+                      <div className="mt-2 space-y-2">
+                        {(stats.interaction_summaries || []).map((entry: any) => (
+                          <article className="rounded border border-slate-800 bg-slate-950 p-2" key={entry.tile_instance_id || entry.tile_name}>
+                            <div className="flex items-center justify-between gap-2">
+                              <strong className="text-slate-100">{entry.tile_name || "Tile"}</strong>
+                              <span className="text-cyan-200">{Math.round(Number(entry.success_probability || 0) * 100)}%</span>
+                            </div>
+                            <p className="mt-1"><span className="text-slate-500">Needs:</span> {(entry.requirements || []).join(", ")}</p>
+                            {(entry.actor_candidates || []).length ? <p className="mt-1"><span className="text-slate-500">Actors:</span> {(entry.actor_candidates || []).map((candidate: any) => `${candidate.ability_name}${candidate.covers_required_cards_from_hand ? " covers" : ""}`).join("; ")}</p> : null}
+                            <p className="mt-1"><span className="text-slate-500">Success:</span> {(entry.success_effects || []).join(", ")}</p>
+                            <p className="mt-1"><span className="text-slate-500">Failure:</span> {(entry.failure_effects || []).join(", ")}</p>
+                            {entry.expected_delta ? <p className="mt-1"><span className="text-slate-500">EV:</span> {Object.entries(entry.expected_delta).map(([key, value]) => `${Number(value) > 0 ? "+" : ""}${Number(value)} ${String(key).replaceAll("_", " ")}`).join(", ") || "none"}</p> : null}
+                          </article>
+                        ))}
+                      </div>
+                    ) : (stats.interaction_probabilities || []).length ? (
                       <div className="mt-2 space-y-1">
                         {(stats.interaction_probabilities || []).map((entry: any) => (
                           <p key={entry.tile_instance_id || entry.tile_name}>
@@ -1082,11 +1106,11 @@ const BotPlansOverlay = ({
                 ) : null}
                 <button
                   className="mt-3 rounded bg-teal-400 px-3 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-300 disabled:cursor-wait disabled:opacity-60"
-                  disabled={loading || Boolean(executingPlanId)}
-                  onClick={() => onExecute(plan.plan_id)}
+                  disabled={loading}
+                  onClick={() => onSelectPlan(plan.plan_id)}
                   type="button"
                 >
-                  {executingPlanId === plan.plan_id ? "Executing..." : "Execute plan"}
+                  Use plan
                 </button>
               </article>
             );
@@ -1102,6 +1126,10 @@ const BotPlansOverlay = ({
 type PlanChainStep = {
   label: string;
   command_type?: string | null;
+  public_command?: {
+    type: string;
+    payload?: Record<string, unknown>;
+  } | null;
   auto_executable?: boolean;
   decision_boundary?: boolean;
 };
@@ -1113,31 +1141,190 @@ type BotLogEntry = {
   status?: string;
 };
 
-const BotPlanChain = ({
-  steps,
-  activeIndex,
+type PlanTreeOption = {
+  key: string;
+  label: string;
+  compactLabel: string;
+  public_command?: {
+    type: string;
+    payload?: Record<string, unknown>;
+  } | null;
+  planIds: string[];
+  proposerIds: string[];
+  avgSuccess: number;
+  expectedDelta: Record<string, number>;
+  preferred: boolean;
+};
+
+const commandKey = (command?: { type: string; payload?: Record<string, unknown> } | null) => {
+  if (!command) return "";
+  const payload = command.payload || {};
+  const sortedPayload = Object.fromEntries(Object.entries(payload).sort(([left], [right]) => left.localeCompare(right)));
+  return `${command.type}:${JSON.stringify(sortedPayload)}`;
+};
+
+const stepKey = (step?: PlanChainStep) => {
+  if (!step) return "";
+  return step.public_command ? commandKey(step.public_command) : `label:${step.label}`;
+};
+
+const mergePlanDeltas = (plans: BotPlanSummary[]) => {
+  const delta: Record<string, number> = {};
+  plans.forEach((plan) => {
+    const planDelta = plan.expected_resources?.expected_resource_delta || plan.statistics?.expected_resource_delta || {};
+    Object.entries(planDelta).forEach(([key, value]) => {
+      delta[key] = Number((delta[key] || 0) + Number(value || 0));
+    });
+  });
+  Object.keys(delta).forEach((key) => {
+    delta[key] = Math.round((delta[key] / Math.max(1, plans.length)) * 100) / 100;
+    if (!delta[key]) delete delta[key];
+  });
+  return delta;
+};
+
+const planOptionMetrics = (optionPlans: BotPlanSummary[]) => {
+  const successValues = optionPlans.map((plan) => Number(plan.statistics?.success_probability ?? plan.confidence ?? 1));
+  const avgSuccess = successValues.reduce((total, value) => total + value, 0) / Math.max(1, successValues.length);
+  return { avgSuccess, expectedDelta: mergePlanDeltas(optionPlans) };
+};
+
+const deltaText = (delta: Record<string, number>) =>
+  Object.entries(delta)
+    .filter(([, value]) => Number(value || 0) !== 0)
+    .map(([key, value]) => `${Number(value) > 0 ? "+" : ""}${Number(value)} ${String(key).replaceAll("_", " ")}`)
+    .join(", ");
+
+const abilityInitial = (projection: GameProjection, abilityId?: unknown) => {
+  const id = typeof abilityId === "string" ? abilityId : "";
+  const name = projection.capabilities?.[id]?.name || id || "?";
+  return String(name).trim().slice(0, 1).toUpperCase() || "?";
+};
+
+const tileNameForInstance = (projection: GameProjection, tileInstanceId?: unknown) => {
+  const instanceId = typeof tileInstanceId === "string" ? tileInstanceId : "";
+  if (!instanceId) return "tile";
+  for (const nodeTiles of Object.values(projection.tiles || {})) {
+    const instance = (nodeTiles || []).find((entry: any) => entry?.instance_id === instanceId);
+    if (!instance?.tile_id) continue;
+    const tile = projection.tile_catalog?.tiles?.[instance.tile_id];
+    return tile?.event?.name || tile?.name || tile?.id || "tile";
+  }
+  return "tile";
+};
+
+const compactPlanStepLabel = (step: PlanChainStep, projection: GameProjection) => {
+  const command = step.public_command;
+  const payload = command?.payload || {};
+  const actor = abilityInitial(projection, payload.capability_id);
+  switch (command?.type || step.command_type || "") {
+    case "take_control":
+      return `${actor} Take control`;
+    case "collect_action_points":
+      return `${actor} Collect AP`;
+    case "move_poulpita":
+      return `${actor} Move ${payload.target_node_id || "?"}`;
+    case "draw_action_card":
+      return `${actor} Draw`;
+    case "start_interaction":
+      return `${actor} Interact ${tileNameForInstance(projection, payload.tile_instance_id)}`;
+    case "resolve_interaction":
+      return `${actor} Commit cards`;
+    case "fail_interaction":
+      return "Fail interaction";
+    case "resolve_surprise_card":
+      return payload.accept === false ? "Skip surprise" : payload.capability_id ? `${actor} Resolve surprise` : "Resolve surprise";
+    case "end_day":
+      return "End day";
+    case "end_night":
+      return `${actor} End night`;
+    case "move_seashell_to_shelter":
+      return "Store shell";
+    case "move_seashell_from_shelter":
+      return "Take shell";
+    default:
+      return String(step.label || "Decision").replace(/^Use expected AP to /, "").slice(0, 34);
+  }
+};
+
+const BotPlanTree = ({
+  plans,
+  stepIndex,
+  preferredPlanId,
+  pending,
+  onClear,
+  onSelectOption,
+  projection,
 }: {
-  steps: PlanChainStep[];
-  activeIndex: number;
+  plans: BotPlanSummary[];
+  stepIndex: number;
+  preferredPlanId: string | null;
+  pending: boolean;
+  onClear: () => void;
+  onSelectOption: (option: PlanTreeOption) => void;
+  projection: GameProjection;
 }) => {
-  if (!steps.length) return null;
+  if (!plans.length) return null;
+  const groups = new Map<string, { step: PlanChainStep; plans: BotPlanSummary[] }>();
+  plans.forEach((plan) => {
+    const step = plan.plan_chain?.[stepIndex];
+    if (!step) return;
+    const key = stepKey(step);
+    if (!groups.has(key)) groups.set(key, { step, plans: [] });
+    groups.get(key)?.plans.push(plan);
+  });
+  const options: PlanTreeOption[] = Array.from(groups.entries()).map(([key, entry]) => {
+    const metrics = planOptionMetrics(entry.plans);
+    return {
+      key,
+      label: entry.step.label,
+      compactLabel: compactPlanStepLabel(entry.step, projection),
+      public_command: entry.step.public_command || null,
+      planIds: entry.plans.map((plan) => plan.plan_id),
+      proposerIds: Array.from(new Set(entry.plans.map((plan) => plan.proposer_ability_id).filter(Boolean) as string[])),
+      preferred: entry.plans.some((plan) => plan.plan_id === preferredPlanId),
+      ...metrics,
+    };
+  }).sort((left, right) => Number(right.preferred) - Number(left.preferred) || right.avgSuccess - left.avgSuccess);
+  const previewPlan = plans.find((plan) => plan.plan_id === preferredPlanId) || plans[0];
+  const futureSteps = previewPlan?.plan_chain?.slice(stepIndex + 1, stepIndex + 4) || [];
   return (
-    <div className="absolute left-3 top-3 z-[45] w-48 rounded-lg border border-cyan-300/60 bg-slate-950/90 p-2 shadow-lg">
-      <p className="text-[0.65rem] font-semibold uppercase tracking-wide text-cyan-200">Selected plan</p>
-      <ol className="mt-2 space-y-1.5">
-        {steps.map((step, index) => (
-          <li
-            className={[
-              "flex items-start gap-2 rounded px-2 py-1 text-[0.68rem] leading-tight",
-              index === activeIndex ? "bg-teal-300 text-slate-950" : index < activeIndex ? "bg-slate-800 text-slate-300" : "bg-slate-900 text-slate-400",
-            ].join(" ")}
-            key={`${step.label}_${index}`}
-          >
-            <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-current text-[0.55rem]">{index + 1}</span>
-            <span>{step.label}</span>
-          </li>
+    <div className="absolute left-3 top-3 z-[45] w-60 rounded-lg border border-cyan-300/60 bg-slate-950/90 p-2 shadow-lg">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-[0.65rem] font-semibold uppercase tracking-wide text-cyan-200">Planning tree</p>
+        <button className="text-[0.65rem] text-slate-400 hover:text-white" onClick={onClear} type="button">Clear</button>
+      </div>
+      <p className="mt-1 text-[0.62rem] text-slate-400">Step {stepIndex + 1} - {plans.length} plan{plans.length === 1 ? "" : "s"}</p>
+      <div className="mt-2 space-y-1.5">
+        {options.map((option) => (
+          <article className={["rounded border p-1.5 text-xs", option.preferred ? "border-teal-300 bg-teal-950/80" : "border-slate-800 bg-slate-900"].join(" ")} key={option.key}>
+            <div className="flex items-start justify-between gap-2">
+              <strong className="min-w-0 leading-tight text-slate-100">{option.compactLabel}</strong>
+              <span className="shrink-0 text-[0.65rem] text-cyan-200">{Math.round(option.avgSuccess * 100)}%</span>
+            </div>
+            <div className="mt-1 flex items-center justify-between gap-2 text-[0.6rem] text-slate-400">
+              <span>{option.proposerIds.length ? `Plans: ${option.proposerIds.map((id) => abilityInitial(projection, id)).join(" ")}` : "Team"}</span>
+              {deltaText(option.expectedDelta) ? <span className="truncate text-slate-300">EV {deltaText(option.expectedDelta)}</span> : null}
+            </div>
+            <button
+              className="mt-1.5 w-full rounded bg-teal-400 px-2 py-1 text-[0.65rem] font-semibold text-slate-950 hover:bg-teal-300 disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={pending || (!option.public_command && option.planIds.length === plans.length)}
+              onClick={() => onSelectOption(option)}
+              type="button"
+            >
+              {option.public_command ? "Execute" : "Choose"}
+            </button>
+          </article>
         ))}
-      </ol>
+      </div>
+      {futureSteps.length ? (
+        <div className="mt-2 rounded border border-slate-800 bg-slate-900 p-1.5 text-[0.62rem] text-slate-400">
+          <p className="font-semibold uppercase tracking-wide text-slate-300">Preferred continuation</p>
+          <ol className="mt-1 space-y-1">
+            {futureSteps.map((step, index) => <li key={`${step.label}_${index}`}>{stepIndex + index + 2}. {compactPlanStepLabel(step, projection)}</li>)}
+          </ol>
+        </div>
+      ) : null}
     </div>
   );
 };
@@ -1153,8 +1340,11 @@ const BotActionLog = ({
   popups: BotLogEntry[];
   onToggle: () => void;
 }) => (
-  <div className="absolute right-3 top-14 z-[45] w-72">
-    <div className="pointer-events-none mb-2 flex flex-col gap-2">
+  <div className="absolute right-3 top-[3.65rem] z-[45] flex w-72 flex-col items-end">
+    <button className="w-28 rounded-full border border-cyan-300 bg-slate-900 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-cyan-100 shadow-lg hover:bg-slate-800" onClick={onToggle} type="button">
+      {logOpen ? "Close log" : "Log"}
+    </button>
+    <div className="pointer-events-none mt-2 flex w-full flex-col gap-2">
       {popups.map((entry) => (
         <div
           className={[
@@ -1167,11 +1357,8 @@ const BotActionLog = ({
         </div>
       ))}
     </div>
-    <button className="rounded-full border border-cyan-300 bg-slate-900 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-cyan-100 shadow-lg hover:bg-slate-800" onClick={onToggle} type="button">
-      {logOpen ? "Close log" : "Log"}
-    </button>
     {logOpen ? (
-      <div className="mt-2 max-h-[42vh] overflow-auto rounded-lg border border-slate-700 bg-slate-950/95 p-2 text-xs text-slate-300 shadow-xl">
+      <div className="mt-2 max-h-[42vh] w-full overflow-auto rounded-lg border border-slate-700 bg-slate-950/95 p-2 text-xs text-slate-300 shadow-xl">
         {entries.length ? (
           entries.map((entry) => (
             <p className="border-b border-slate-800 py-1.5 last:border-b-0" key={entry.id}>
@@ -1191,7 +1378,6 @@ const GameRoomPage = () => {
   const { token, user } = useStore();
   const navigate = useNavigate();
   const socketRef = useRef<WebSocket | null>(null);
-  const openedBotPlansOnceRef = useRef(false);
   const [projection, setProjection] = useState<GameProjection | null>(null);
   const [levels, setLevels] = useState<Array<any>>([]);
   const [focusedCapabilityId, setFocusedCapabilityId] = useState<string | null>(null);
@@ -1209,10 +1395,9 @@ const GameRoomPage = () => {
   const [botPlansOpen, setBotPlansOpen] = useState(false);
   const [botPlanStatus, setBotPlanStatus] = useState<BotPlanStatus | null>(null);
   const [botPlansLoading, setBotPlansLoading] = useState(false);
-  const [executingBotPlanId, setExecutingBotPlanId] = useState<string | null>(null);
-  const [executionDelayMs, setExecutionDelayMs] = useState(1000);
-  const [activePlanChain, setActivePlanChain] = useState<PlanChainStep[]>([]);
-  const [activePlanStepIndex, setActivePlanStepIndex] = useState(0);
+  const [activePlanIds, setActivePlanIds] = useState<string[]>([]);
+  const [planStepIndex, setPlanStepIndex] = useState(0);
+  const [preferredPlanId, setPreferredPlanId] = useState<string | null>(null);
   const [botLogEntries, setBotLogEntries] = useState<BotLogEntry[]>([]);
   const [botLogPopups, setBotLogPopups] = useState<BotLogEntry[]>([]);
   const [botLogOpen, setBotLogOpen] = useState(false);
@@ -1229,6 +1414,12 @@ const GameRoomPage = () => {
   const selectedCapability = selectedCapabilityId ? capabilityMap[selectedCapabilityId] : null;
   const otherCapabilities = capabilities.filter((capability) => capability.id !== selectedCapabilityId);
   const botModeEnabled = projection?.mode === "solo_with_bots" && Boolean(projection?.bot_config);
+  const activePlanTreePlans = useMemo(() => {
+    const proposals = botPlanStatus?.proposals || [];
+    if (!activePlanIds.length) return [];
+    const activeIds = new Set(activePlanIds);
+    return proposals.filter((plan) => activeIds.has(plan.plan_id));
+  }, [activePlanIds, botPlanStatus?.proposals]);
 
   const pushBotLog = useCallback((text: string, status: string = "ok") => {
     const entry = { id: makeCommandId(), text, createdAt: Date.now(), status };
@@ -1261,20 +1452,6 @@ const GameRoomPage = () => {
       window.clearTimeout(clearTimer);
     };
   }, [feedback, error]);
-
-  useEffect(() => {
-    if (!activePlanChain.length) return undefined;
-    setActivePlanStepIndex(0);
-    let index = 0;
-    const timer = window.setInterval(() => {
-      index += 1;
-      setActivePlanStepIndex(Math.min(index, Math.max(0, activePlanChain.length - 1)));
-      if (index >= activePlanChain.length - 1) {
-        window.clearInterval(timer);
-      }
-    }, Math.max(100, executionDelayMs));
-    return () => window.clearInterval(timer);
-  }, [activePlanChain, executionDelayMs]);
 
   useEffect(() => {
     if (projection?.phase !== "game_over" || !roomId) return undefined;
@@ -1356,20 +1533,30 @@ const GameRoomPage = () => {
   }, [roomId, token]);
 
   useEffect(() => {
-    if (!botModeEnabled || !projection || projection.phase === "setup") return;
-    if (openedBotPlansOnceRef.current) return;
-    openedBotPlansOnceRef.current = true;
-    setBotPlansOpen(true);
-    void loadBotPlans();
-  }, [botModeEnabled, loadBotPlans, projection?.phase]);
+    if (!activePlanIds.length || !botPlanStatus || activePlanTreePlans.length) return;
+    const proposalIds = (botPlanStatus.proposals || []).map((plan) => plan.plan_id);
+    if (proposalIds.length) {
+      setActivePlanIds(proposalIds);
+      setPreferredPlanId(proposalIds[0] || null);
+      setPlanStepIndex(0);
+      return;
+    }
+    setActivePlanIds([]);
+    setPreferredPlanId(null);
+    setPlanStepIndex(0);
+    void loadBotPlans("POST");
+  }, [activePlanIds.length, activePlanTreePlans.length, botPlanStatus, loadBotPlans]);
 
   useEffect(() => {
     if (!botModeEnabled || !projection || projection.phase === "setup") {
       setBotPlanStatus(null);
+      setActivePlanIds([]);
+      setPreferredPlanId(null);
+      setPlanStepIndex(0);
       return;
     }
-    void loadBotPlans();
-  }, [botModeEnabled, loadBotPlans, projection?.phase, projection?.version]);
+    if (!botPlanStatus && !botPlansLoading) void loadBotPlans();
+  }, [botModeEnabled, botPlanStatus, botPlansLoading, loadBotPlans, projection?.phase]);
 
   useEffect(() => {
     void loadProjection();
@@ -1455,7 +1642,34 @@ const GameRoomPage = () => {
     };
   }, [loadProjection, roomId, token]);
 
-  const submitCommand = async (type: string, payload: Record<string, unknown> = {}) => {
+  const plannedCommandMatches = (step: PlanChainStep | undefined, type: string, payload: Record<string, unknown>) => {
+    const planned = step?.public_command;
+    if (!planned || planned.type !== type) return false;
+    const plannedPayload = planned.payload || {};
+    return Object.entries(plannedPayload).every(([key, value]) => payload[key] === value);
+  };
+
+  const advanceOrInvalidatePlan = (type: string, payload: Record<string, unknown>, source: "manual" | "plan") => {
+    if (!activePlanIds.length) return;
+    const currentPlans = activePlanTreePlans.length ? activePlanTreePlans : (botPlanStatus?.proposals || []).filter((plan) => activePlanIds.includes(plan.plan_id));
+    const matchingPlans = currentPlans.filter((plan) => plannedCommandMatches(plan.plan_chain?.[planStepIndex], type, payload));
+    if (matchingPlans.length) {
+      setActivePlanIds(matchingPlans.map((plan) => plan.plan_id));
+      setPreferredPlanId((current) => matchingPlans.some((plan) => plan.plan_id === current) ? current : matchingPlans[0]?.plan_id || null);
+      setPlanStepIndex((index) => index + 1);
+      return;
+    }
+    const currentHasExecutableAlternatives = currentPlans.some((plan) => Boolean(plan.plan_chain?.[planStepIndex]?.public_command));
+    if (source === "manual" && currentHasExecutableAlternatives) {
+      setActivePlanIds([]);
+      setPreferredPlanId(null);
+      setPlanStepIndex(0);
+      pushBotLog("Selected plan invalidated by a manual action.", "warn");
+      void loadBotPlans("POST");
+    }
+  };
+
+  const submitCommand = async (type: string, payload: Record<string, unknown> = {}, source: "manual" | "plan" = "manual") => {
     if (!token || !roomId || pending) return null;
     setPending(true);
     setFeedback("");
@@ -1486,6 +1700,7 @@ const GameRoomPage = () => {
         return result;
       }
       if (result.projection) setProjection(result.projection);
+      advanceOrInvalidatePlan(type, payload, source);
       return result;
     } catch (commandError: any) {
       setError(commandError.message || "Command failed.");
@@ -1678,44 +1893,43 @@ const GameRoomPage = () => {
   };
 
   const recalculateBotPlans = () => {
+    setActivePlanIds([]);
+    setPreferredPlanId(null);
+    setPlanStepIndex(0);
     void loadBotPlans("POST");
   };
 
-  const executeBotPlan = async (planId: string) => {
-    if (!token || !roomId || pending || executingBotPlanId) return;
+  const selectBotPlan = (planId: string) => {
     const selectedPlan = (botPlanStatus?.proposals || []).find((plan) => plan.plan_id === planId);
-    const selectedChain = selectedPlan?.plan_chain?.length
-      ? selectedPlan.plan_chain
-      : (selectedPlan?.step_preview || []).map((label) => ({ label }));
-    setActivePlanChain(selectedChain);
-    setActivePlanStepIndex(0);
-    setPending(true);
-    setExecutingBotPlanId(planId);
-    setFeedback("");
-    setError("");
-    try {
-      const response = await fetch(buildApiUrl(`/api/game/rooms/${roomId}/bot-plans/${encodeURIComponent(planId)}/execute`), {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(result.detail || "Failed to execute bot plan.");
-      if (result.projection) setProjection(result.projection);
-      setFeedback(result.message || "Bot plan executed.");
-      (result.command_results || []).forEach((entry: any, index: number) => {
-        const chainLabel = selectedChain[index]?.label || String(entry.type || "Action").replaceAll("_", " ");
-        pushBotLog(`${chainLabel}: ${entry.ok ? "done" : entry.message || entry.reason || "rejected"}`, entry.ok ? "ok" : "warn");
-      });
-      if (result.message) pushBotLog(result.message, result.status === "completed" ? "ok" : "warn");
-      await loadBotPlans("POST");
-    } catch (executeError: any) {
-      setError(executeError.message || "Failed to execute bot plan.");
-      pushBotLog(executeError.message || "Failed to execute bot plan.", "warn");
-    } finally {
-      setPending(false);
-      setExecutingBotPlanId(null);
-    }
+    setActivePlanIds((botPlanStatus?.proposals || []).map((plan) => plan.plan_id));
+    setPlanStepIndex(0);
+    setPreferredPlanId(planId);
+    setBotPlansOpen(false);
+    pushBotLog(`Selected plan: ${selectedPlan?.title || planId}`, "ok");
   };
+
+  const selectPlanTreeOption = async (option: PlanTreeOption) => {
+    if (pending) return;
+    setActivePlanIds(option.planIds);
+    setPreferredPlanId((current) => option.planIds.includes(String(current || "")) ? current : option.planIds[0] || null);
+    if (!option.public_command) {
+      pushBotLog(`Selected branch: ${option.compactLabel}`, "ok");
+      return;
+    }
+    const nextCommand = option.public_command;
+    const result = await submitCommand(nextCommand.type, nextCommand.payload || {}, "plan");
+    if (result?.ok === false) {
+      setActivePlanIds([]);
+      setPreferredPlanId(null);
+      setPlanStepIndex(0);
+      void loadBotPlans("POST");
+      return;
+    }
+    pushBotLog(`Planned action done: ${option.compactLabel}`, "ok");
+    void loadBotPlans("POST");
+  };
+
+  const hasAvailableBotPlans = Boolean(botModeEnabled && !botPlansOpen && !activePlanIds.length && (botPlanStatus?.proposals || []).length);
 
   return (
     <main className="h-screen overflow-hidden bg-slate-950 text-slate-100">
@@ -1725,21 +1939,6 @@ const GameRoomPage = () => {
           <span className="ml-3 text-slate-400">v{projection?.version ?? "-"} - {phaseLabel(projection)}</span>
         </div>
         <div className="flex items-center gap-2">
-          {botModeEnabled ? (
-            <label className="flex items-center gap-1 text-[0.68rem] text-slate-400">
-              Bot delay
-              <input
-                className="h-8 w-16 rounded border border-slate-700 bg-slate-950 px-2 text-xs text-white"
-                max={5}
-                min={0.1}
-                onChange={(event) => setExecutionDelayMs(Math.max(100, Math.round(Number(event.target.value || 1) * 1000)))}
-                step={0.1}
-                type="number"
-                value={Math.round(executionDelayMs / 100) / 10}
-              />
-              s
-            </label>
-          ) : null}
           {projection?.phase === "setup" ? (
             <>
               <select
@@ -1830,10 +2029,27 @@ const GameRoomPage = () => {
           {projection ? (
             <>
               <BoardView focusedCapabilityId={selectedCapabilityId} moveMode={moveMode} onInspectTile={inspectTile} onMove={movePoulpita} onMoveShellFromShelter={moveShellFromShelter} pending={pending} projection={projection} />
-              {botModeEnabled ? <BotPlanChain activeIndex={activePlanStepIndex} steps={activePlanChain} /> : null}
+              {botModeEnabled ? (
+                <BotPlanTree
+                  onClear={() => {
+                    setActivePlanIds([]);
+                    setPreferredPlanId(null);
+                    setPlanStepIndex(0);
+                  }}
+                  onSelectOption={selectPlanTreeOption}
+                  pending={pending}
+                  plans={activePlanTreePlans}
+                  preferredPlanId={preferredPlanId}
+                  projection={projection}
+                  stepIndex={planStepIndex}
+                />
+              ) : null}
               {botModeEnabled ? (
                 <button
-                  className="absolute right-3 top-3 z-[65] rounded-full border border-cyan-300 bg-slate-900 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-cyan-100 shadow-lg hover:bg-slate-800"
+                  className={[
+                    "absolute right-3 top-3 z-[65] w-28 rounded-full border bg-slate-900 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-cyan-100 shadow-lg hover:bg-slate-800",
+                    hasAvailableBotPlans ? "animate-pulse border-amber-300 ring-2 ring-amber-200/70" : "border-cyan-300",
+                  ].join(" ")}
                   onClick={() => {
                     setBotPlansOpen((open) => !open);
                     if (!botPlansOpen) void loadBotPlans();
@@ -1854,10 +2070,9 @@ const GameRoomPage = () => {
               {botModeEnabled ? (
                 <BotPlansOverlay
                   botPlanStatus={botPlanStatus}
-                  executingPlanId={executingBotPlanId}
                   loading={botPlansLoading}
                   onClose={() => setBotPlansOpen(false)}
-                  onExecute={executeBotPlan}
+                  onSelectPlan={selectBotPlan}
                   onRecalculate={recalculateBotPlans}
                   open={botPlansOpen}
                   projection={projection}

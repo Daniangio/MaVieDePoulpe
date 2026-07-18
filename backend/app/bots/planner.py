@@ -34,6 +34,7 @@ def _public_plan(
     commands: list[dict[str, Any]] | None = None,
     statistics: dict[str, Any] | None = None,
     plan_chain: list[dict[str, Any]] | None = None,
+    plan_group: str | None = None,
 ) -> dict[str, Any]:
     stats = statistics or {}
     success_probability = stats.get("success_probability")
@@ -51,8 +52,40 @@ def _public_plan(
         "statistics": stats,
         "warnings": warnings or [],
         "commands": commands or [],
+        "_plan_group": plan_group or plan_id,
         "_score": score,
     }
+
+
+def _safe_public_command(command: dict[str, Any]) -> dict[str, Any] | None:
+    command_type = str(command.get("type") or "")
+    payload = command.get("payload") or {}
+    if not isinstance(payload, dict):
+        payload = {}
+    safe_payload_keys = {
+        "take_control": {"capability_id"},
+        "collect_action_points": {"capability_id"},
+        "move_poulpita": {"capability_id", "target_node_id"},
+        "draw_action_card": {"capability_id"},
+        "start_interaction": {"capability_id", "tile_instance_id", "auto_select_cards"},
+        "resolve_interaction": {"capability_id", "auto_select_cards"},
+        "fail_interaction": {"target_node_id"},
+        "end_day": set(),
+        "end_night": {"capability_id"},
+        "move_seashell_to_shelter": set(),
+        "move_seashell_from_shelter": set(),
+        "resolve_surprise_card": {"accept", "capability_id", "auto_select_cards"},
+    }
+    if command_type not in safe_payload_keys:
+        return None
+    if "discard_card_id" in payload:
+        return None
+    if "card_ids" in payload:
+        if command_type not in {"resolve_interaction", "resolve_surprise_card"}:
+            return None
+        payload = {**payload, "auto_select_cards": True}
+    public_payload = {key: payload[key] for key in safe_payload_keys[command_type] if key in payload}
+    return {"type": command_type, "payload": public_payload}
 
 
 def _plan_chain(step_preview: list[str], commands: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -60,13 +93,15 @@ def _plan_chain(step_preview: list[str], commands: list[dict[str, Any]]) -> list
     chain = []
     for index in range(length):
         command_type = str((commands[index] if index < len(commands) else {}).get("type") or "")
+        public_command = _safe_public_command(commands[index]) if index < len(commands) else None
         label = step_preview[index] if index < len(step_preview) else command_type.replace("_", " ").title()
         chain.append(
             {
                 "index": index,
                 "label": label,
                 "command_type": command_type or None,
-                "auto_executable": bool(command_type),
+                "public_command": public_command,
+                "auto_executable": bool(public_command),
                 "decision_boundary": command_type in BOT_PLAN_TERMINAL_COMMANDS,
             }
         )
@@ -193,6 +228,164 @@ def _tile_display_name(state: dict[str, Any], tile: dict[str, Any]) -> str:
     return str(event.get("name") or tile.get("name") or tile.get("id") or "tile")
 
 
+def _interaction_display_name(state: dict[str, Any], interaction_id: str) -> str:
+    interaction = ((state.get("tile_catalog") or {}).get("interactions") or {}).get(interaction_id) or {}
+    return str(interaction.get("name") or interaction_id)
+
+
+def _requirement_labels(state: dict[str, Any], tile: dict[str, Any]) -> list[str]:
+    labels = [_interaction_display_name(state, str(interaction_id)) for interaction_id in (tile.get("interaction_ids") or []) if interaction_id]
+    shell_count = max(0, int(tile.get("shell_requirement_count") or 0))
+    if shell_count:
+        labels.append(f"{shell_count} Poulpita shell{'s' if shell_count != 1 else ''}")
+    return labels
+
+
+def _effect_amount(effect: dict[str, Any]) -> int:
+    return int(effect.get("amount") or 0)
+
+
+def _effect_delta(effects: list[dict[str, Any]]) -> dict[str, float]:
+    delta = {
+        "energy": 0.0,
+        "neurons": 0.0,
+        "seashells": 0.0,
+        "ap": 0.0,
+        "shelters": 0.0,
+        "surprise_cards": 0.0,
+        "removed_tiles": 0.0,
+    }
+    for effect in effects or []:
+        effect_type = str(effect.get("type") or "")
+        amount = _effect_amount(effect)
+        if effect_type == "gain_energy":
+            delta["energy"] += amount
+        elif effect_type == "lose_energy":
+            delta["energy"] -= amount
+        elif effect_type == "gain_neurons":
+            delta["neurons"] += amount
+        elif effect_type == "lose_neurons":
+            delta["neurons"] -= amount
+        elif effect_type == "gain_seashells":
+            delta["seashells"] += amount
+        elif effect_type == "lose_seashells":
+            delta["seashells"] -= amount
+        elif effect_type == "lose_ap":
+            delta["ap"] -= amount
+        elif effect_type in {"lose_half_ap", "lose_all_ap"}:
+            delta["ap"] -= 1
+        elif effect_type == "place_shelter_token":
+            delta["shelters"] += 1
+        elif effect_type == "draw_surprise_card":
+            delta["surprise_cards"] += 1
+        elif effect_type in {"remove_tile", "remove_preys"}:
+            delta["removed_tiles"] += 1
+    return delta
+
+
+def _combine_expected_delta(success_probability: float, success_effects: list[dict[str, Any]], failure_effects: list[dict[str, Any]]) -> dict[str, float]:
+    success_delta = _effect_delta(success_effects)
+    failure_delta = _effect_delta(failure_effects)
+    keys = sorted(set(success_delta) | set(failure_delta))
+    return {
+        key: round(success_probability * float(success_delta.get(key) or 0) + (1 - success_probability) * float(failure_delta.get(key) or 0), 2)
+        for key in keys
+        if round(success_probability * float(success_delta.get(key) or 0) + (1 - success_probability) * float(failure_delta.get(key) or 0), 2) != 0
+    }
+
+
+def _effect_labels(state: dict[str, Any], effects: list[dict[str, Any]]) -> list[str]:
+    labels = []
+    categories = (state.get("tile_catalog") or {}).get("categories") or {}
+    for effect in effects or []:
+        effect_type = str(effect.get("type") or "")
+        amount = _effect_amount(effect)
+        if effect_type == "gain_energy":
+            labels.append(f"+{amount} energy")
+        elif effect_type == "gain_neurons":
+            labels.append(f"+{amount} neurons")
+        elif effect_type == "gain_seashells":
+            labels.append(f"+{amount} seashells")
+        elif effect_type == "place_shelter_token":
+            labels.append("place shelter")
+        elif effect_type == "draw_surprise_card":
+            labels.append("draw surprise")
+        elif effect_type == "lose_energy":
+            labels.append(f"-{amount} energy")
+        elif effect_type == "lose_neurons":
+            labels.append(f"-{amount} neurons")
+        elif effect_type == "lose_seashells":
+            labels.append(f"-{amount} seashells")
+        elif effect_type == "lose_ap":
+            labels.append(f"-{amount} AP from all")
+        elif effect_type == "lose_half_ap":
+            labels.append("half AP lost")
+        elif effect_type == "lose_all_ap":
+            labels.append("all AP lost")
+        elif effect_type == "pulpita_move_previous":
+            labels.append("Poulpita returns")
+        elif effect_type == "pulpita_move_free":
+            labels.append("free forced move")
+        elif effect_type == "keep_tile":
+            labels.append("tile remains")
+        elif effect_type == "remove_tile":
+            labels.append("tile removed")
+        elif effect_type == "move_tile_previous":
+            labels.append("tile moves back")
+        elif effect_type == "remove_preys":
+            category = categories.get(effect.get("category_id")) or {}
+            labels.append(f"remove {category.get('name') or 'category'} here")
+    return labels
+
+
+def _actor_candidates_for_entry(state: dict[str, Any], entry: dict[str, Any], preferred_ability_id: str | None = None) -> list[dict[str, Any]]:
+    tile = entry.get("tile") or {}
+    candidates = []
+    ordered = []
+    if preferred_ability_id:
+        ordered.append(preferred_ability_id)
+    ordered.extend(ability_id for ability_id in _all_capability_ids(state) if ability_id not in ordered)
+    required = [str(interaction_id) for interaction_id in (tile.get("interaction_ids") or []) if interaction_id]
+    for ability_id in ordered:
+        if ability_id == "intelligence":
+            continue
+        capability = _capability(state, ability_id)
+        if not capability or not _can_initiate(state, ability_id, tile):
+            continue
+        selected = _selected_cards_for_requirements(capability, required)
+        candidates.append(
+            {
+                "ability_id": ability_id,
+                "ability_name": capability.get("name") or ability_id,
+                "can_initiate": True,
+                "covers_required_cards_from_hand": selected is not None,
+                "missing_card_count_after_hand": 0 if selected is not None else max(0, len(required) - _matched_requirement_count(capability.get("hand") or [], required)),
+                "has_control_available": ability_id == state.get("active_capability_id") or _has_control_take_left(capability),
+            }
+        )
+    return candidates
+
+
+def _interaction_resolution_summary(state: dict[str, Any], entry: dict[str, Any], *, preferred_ability_id: str | None = None) -> dict[str, Any]:
+    tile = entry.get("tile") or {}
+    probability = _interaction_probability(state, entry)
+    success_probability = float(probability.get("success_probability") or 0)
+    success_effects = tile.get("success_effects") or []
+    failure_effects = tile.get("failure_effects") or []
+    return {
+        **probability,
+        "node_id": entry.get("node_id"),
+        "priority": int(tile.get("priority") or 0),
+        "compulsory": bool(_tile_category(state, tile).get("compulsory_on_same_node")),
+        "requirements": _requirement_labels(state, tile) or ["automatic success"],
+        "success_effects": _effect_labels(state, success_effects) or ["remove tile"],
+        "counter_attack_effects": _effect_labels(state, tile.get("counter_attack_effects") or []),
+        "failure_effects": _effect_labels(state, failure_effects) or ["no configured penalty"],
+        "expected_delta": _combine_expected_delta(success_probability, success_effects, failure_effects),
+        "actor_candidates": _actor_candidates_for_entry(state, entry, preferred_ability_id),
+    }
+
+
 def _matched_requirement_count(cards: list[dict[str, Any]], required_interaction_ids: list[str]) -> int:
     remaining = [str(interaction_id) for interaction_id in required_interaction_ids if interaction_id]
     used_card_ids: set[str] = set()
@@ -269,6 +462,122 @@ def _interaction_probability(state: dict[str, Any], entry: dict[str, Any]) -> di
     }
 
 
+def _known_shelter_nodes(state: dict[str, Any]) -> set[str]:
+    nodes = set()
+    for node_id, raw in (state.get("shelters") or {}).items():
+        count = int(raw.get("count") or 0) if isinstance(raw, dict) else int(raw or 0)
+        if count > 0:
+            nodes.add(str(node_id))
+    for node_id, entries in (state.get("tiles") or {}).items():
+        for entry in entries or []:
+            if entry.get("face_up"):
+                tile = ((state.get("tile_catalog") or {}).get("tiles") or {}).get(entry.get("tile_id")) or {}
+                if any(str(effect.get("type") or "") == "place_shelter_token" for effect in tile.get("success_effects") or []):
+                    nodes.add(str(node_id))
+    return nodes
+
+
+def _distance_to_closest_shelter(state: dict[str, Any], start_node_id: str) -> int | None:
+    shelter_nodes = _known_shelter_nodes(state)
+    if not start_node_id or not shelter_nodes:
+        return None
+    if start_node_id in shelter_nodes:
+        return 0
+    adjacency = (state.get("map") or {}).get("adjacency") or {}
+    frontier = [(start_node_id, 0)]
+    visited = {start_node_id}
+    while frontier:
+        node_id, distance = frontier.pop(0)
+        for next_node_id in adjacency.get(node_id, []) or []:
+            next_node_id = str(next_node_id)
+            if next_node_id in visited:
+                continue
+            if next_node_id in shelter_nodes:
+                return distance + 1
+            visited.add(next_node_id)
+            frontier.append((next_node_id, distance + 1))
+    return None
+
+
+def _merge_deltas(deltas: list[dict[str, float]]) -> dict[str, float]:
+    merged: dict[str, float] = {}
+    for delta in deltas:
+        for key, value in (delta or {}).items():
+            merged[key] = round(float(merged.get(key) or 0) + float(value or 0), 2)
+    return {key: value for key, value in merged.items() if value}
+
+
+def _delta_score(delta: dict[str, float]) -> float:
+    return (
+        float(delta.get("energy") or 0) * 8
+        + float(delta.get("neurons") or 0) * 5
+        + float(delta.get("seashells") or 0) * 4
+        + float(delta.get("shelters") or 0) * 18
+        + float(delta.get("surprise_cards") or 0) * 6
+        + float(delta.get("removed_tiles") or 0) * 3
+        + float(delta.get("ap") or 0)
+    )
+
+
+def _format_delta(delta: dict[str, float]) -> str:
+    if not delta:
+        return "no expected resource change"
+    labels = []
+    names = {
+        "energy": "energy",
+        "neurons": "neurons",
+        "seashells": "seashells",
+        "ap": "AP",
+        "shelters": "shelters",
+        "surprise_cards": "surprise cards",
+        "removed_tiles": "removed tiles",
+    }
+    for key in ["energy", "neurons", "seashells", "ap", "shelters", "surprise_cards", "removed_tiles"]:
+        value = delta.get(key)
+        if value:
+            labels.append(f"{value:+g} {names.get(key, key)}")
+    return ", ".join(labels)
+
+
+def _interaction_step_labels(state: dict[str, Any], entries: list[dict[str, Any]], preferred_ability_id: str | None = None) -> list[str]:
+    labels = []
+    for entry in entries:
+        summary = _interaction_resolution_summary(state, entry, preferred_ability_id=preferred_ability_id)
+        actors = [candidate["ability_name"] for candidate in summary.get("actor_candidates") or [] if candidate.get("has_control_available")]
+        actor_label = actors[0] if actors else "manual support"
+        requirements = ", ".join(summary.get("requirements") or [])
+        rewards = ", ".join(summary.get("success_effects") or [])
+        expected_delta = _format_delta(summary.get("expected_delta") or {})
+        labels.append(
+            f"Resolve {summary['tile_name']} with {actor_label}: {round(float(summary.get('success_probability') or 0) * 100)}%, needs {requirements}, success {rewards}, EV {expected_delta}"
+        )
+    return labels
+
+
+def _node_followup_score(state: dict[str, Any], node_id: str, ability_id: str) -> tuple[float, list[dict[str, Any]], int | None]:
+    entries = _compulsory_choices_on_node(state, node_id, highest_only=False)
+    summaries = [_interaction_resolution_summary(state, entry, preferred_ability_id=ability_id) for entry in entries]
+    score = 0.0
+    for summary in summaries:
+        actor_candidates = summary.get("actor_candidates") or []
+        preferred_can_act = any(candidate.get("ability_id") == ability_id for candidate in actor_candidates)
+        any_actor = bool(actor_candidates)
+        score += float(summary.get("success_probability") or 0) * 30
+        score += _delta_score(summary.get("expected_delta") or {})
+        if summary.get("compulsory"):
+            score += 15
+        if preferred_can_act:
+            score += 18
+        elif any_actor:
+            score += 6
+        else:
+            score -= 30
+    shelter_distance = _distance_to_closest_shelter(state, node_id)
+    if shelter_distance is not None:
+        score += max(0, 10 - shelter_distance * 2)
+    return score, entries, shelter_distance
+
+
 def _plan_statistics(
     state: dict[str, Any],
     *,
@@ -279,6 +588,8 @@ def _plan_statistics(
     commands = commands or []
     interactions = interactions or []
     interaction_probabilities = [_interaction_probability(state, entry) for entry in interactions]
+    interaction_summaries = [_interaction_resolution_summary(state, entry) for entry in interactions]
+    expected_resource_delta = _merge_deltas([summary.get("expected_delta") or {} for summary in interaction_summaries])
     success_probability = 1.0
     for probability in interaction_probabilities:
         success_probability *= float(probability.get("success_probability") or 0)
@@ -310,6 +621,8 @@ def _plan_statistics(
         "estimated_actions": estimated_actions,
         "estimated_time_steps": estimated_time_steps,
         "expected_ap_roll": _expected_ap_roll(state),
+        "expected_resource_delta": expected_resource_delta,
+        "interaction_summaries": interaction_summaries,
         "planning_depth_take_controls": int(((state.get("bot_config") or {}).get("planning_depth_take_controls") or DEFAULT_PLANNING_TAKE_CONTROL_DEPTH)),
         "assumptions": assumptions or ["Surprise cards are modeled optimistically as no-op until one is actually drawn."],
     }
@@ -340,7 +653,16 @@ def _forced_actor_candidates(state: dict[str, Any]) -> list[tuple[str, bool]]:
 
 def _interaction_commands(ability_id: str, entry: dict[str, Any]) -> list[dict[str, Any]]:
     tile = entry["tile"]
-    commands = [{"type": "start_interaction", "payload": {"capability_id": ability_id, "tile_instance_id": entry["instance"].get("instance_id")}}]
+    commands = [
+        {
+            "type": "start_interaction",
+            "payload": {
+                "capability_id": ability_id,
+                "tile_instance_id": entry["instance"].get("instance_id"),
+                "auto_select_cards": True,
+            },
+        }
+    ]
     if _interaction_requirements(tile) == 0:
         commands.append({"type": "resolve_interaction", "payload": {"capability_id": ability_id}})
     return commands
@@ -416,6 +738,7 @@ def _surprise_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
                 score=90 if not costs else 75,
                 warnings=[] if not costs else ["Private card identities are hidden from the public proposal."],
                 commands=commands,
+                plan_chain=_plan_chain(["Resolve surprise"], commands),
                 statistics=_plan_statistics(state, commands=commands, assumptions=["This proposal resolves the real drawn surprise card; no further hidden draw is assumed."]),
             )
         )
@@ -432,6 +755,7 @@ def _surprise_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
                 expected_resources=_resource_estimate(),
                 score=40,
                 commands=commands,
+                plan_chain=_plan_chain(["Skip surprise"], commands),
                 statistics=_plan_statistics(state, commands=commands, assumptions=["Optional surprise costs can be declined with no reward."]),
             )
         )
@@ -459,7 +783,29 @@ def _forced_interaction_plan(
         commands.extend(_interaction_commands(ability_id, entry))
     else:
         commands.append({"type": "collect_action_points", "payload": {"capability_id": ability_id}})
+    interaction_summary = _interaction_resolution_summary(state, entry, preferred_ability_id=ability_id)
+    expected_delta = interaction_summary.get("expected_delta") or {}
     statistics = _plan_statistics(state, commands=commands, interactions=[entry])
+    statistics["interaction_summaries"] = [interaction_summary]
+    statistics["expected_resource_delta"] = expected_delta
+    expected_resources = _resource_estimate(
+        ap=interact_cost["ap_cost"] if has_ap else 0,
+        time_steps=interact_cost["time_cost"] if has_ap else 0,
+        control_takes={ability_id: 1} if include_take_control else {},
+    )
+    expected_resources["expected_resource_delta"] = expected_delta
+    expected_resources["energy_delta_expected"] = expected_delta.get("energy", 0)
+    expected_resources["shells_delta_expected"] = expected_delta.get("seashells", 0)
+    expected_resources["neurons_delta_expected"] = expected_delta.get("neurons", 0)
+    chain_labels = []
+    if include_take_control:
+        chain_labels.append(f"{name} takes control")
+    if has_ap:
+        chain_labels.append(f"Start {event.get('name') or tile.get('name') or 'interaction'}")
+        if _interaction_requirements(tile) == 0:
+            chain_labels.append("Confirm interaction")
+    else:
+        chain_labels.append("Collect action points")
     return _public_plan(
         plan_id=f"{'take_control_' if include_take_control else ''}forced_{ability_id}_{entry['instance'].get('instance_id')}",
         proposer_ability_id=ability_id,
@@ -471,14 +817,11 @@ def _forced_interaction_plan(
             "Start the compulsory interaction" if has_ap else "Collect AP first, then replan for the compulsory interaction",
             "Resolve immediately" if has_ap and _interaction_requirements(tile) == 0 else "Pause if cards or shells are required",
         ],
-        expected_resources=_resource_estimate(
-            ap=interact_cost["ap_cost"] if has_ap else 0,
-            time_steps=interact_cost["time_cost"] if has_ap else 0,
-            control_takes={ability_id: 1} if include_take_control else {},
-        ),
-        score=score if has_ap else score - 20,
+        expected_resources=expected_resources,
+        score=(score if has_ap else score - 20) + _delta_score(expected_delta),
         warnings=[] if has_ap else ["This bot needs AP before starting the forced interaction."],
         commands=commands,
+        plan_chain=_plan_chain(chain_labels, commands),
         statistics=statistics,
     )
 
@@ -553,6 +896,10 @@ def _interaction_support_proposals(state: dict[str, Any]) -> list[dict[str, Any]
         active_id = _legal_active_actor(state) or str(state.get("active_capability_id") or "")
         if active_id:
             commands = [{"type": "resolve_interaction", "payload": {"capability_id": active_id}}]
+            interaction_summary = _interaction_resolution_summary(state, entry, preferred_ability_id=active_id)
+            statistics = _plan_statistics(state, commands=commands, interactions=[entry])
+            statistics["interaction_summaries"] = [interaction_summary]
+            statistics["expected_resource_delta"] = interaction_summary.get("expected_delta") or {}
             proposals.append(
                 _public_plan(
                     plan_id=f"confirm_interaction_{active_id}_{(entry['instance'] or {}).get('instance_id')}",
@@ -564,7 +911,8 @@ def _interaction_support_proposals(state: dict[str, Any]) -> list[dict[str, Any]
                     expected_resources=_resource_estimate(),
                     score=115,
                     commands=commands,
-                    statistics=_plan_statistics(state, commands=commands, interactions=[entry]),
+                    plan_chain=_plan_chain(["Confirm interaction"], commands),
+                    statistics=statistics,
                 )
             )
         return proposals
@@ -587,6 +935,10 @@ def _interaction_support_proposals(state: dict[str, Any]) -> list[dict[str, Any]
             commands.append({"type": "take_control", "payload": {"capability_id": ability_id}})
         commands.append({"type": "resolve_interaction", "payload": {"capability_id": ability_id, "card_ids": selected}})
         name = capability.get("name") or ability_id
+        interaction_summary = _interaction_resolution_summary(state, entry, preferred_ability_id=ability_id)
+        statistics = _plan_statistics(state, commands=commands, interactions=[entry])
+        statistics["interaction_summaries"] = [interaction_summary]
+        statistics["expected_resource_delta"] = interaction_summary.get("expected_delta") or {}
         proposals.append(
             _public_plan(
                 plan_id=f"support_interaction_{ability_id}_{(entry['instance'] or {}).get('instance_id')}",
@@ -603,8 +955,12 @@ def _interaction_support_proposals(state: dict[str, Any]) -> list[dict[str, Any]
                 expected_resources=_resource_estimate(control_takes={ability_id: 1} if include_take_control else {}),
                 score=110 if include_take_control else 120,
                 commands=commands,
+                plan_chain=_plan_chain(
+                    ([f"{name} takes control"] if include_take_control else []) + [f"{name} plays support cards"],
+                    commands,
+                ),
                 warnings=["Private card identities are hidden from the public proposal."],
-                statistics=_plan_statistics(state, commands=commands, interactions=[entry]),
+                statistics=statistics,
             )
         )
     if not proposals:
@@ -642,6 +998,7 @@ def _optimistic_collect_followup(state: dict[str, Any], ability_id: str, *, incl
     move_cost = _action_cost(state, "move")
     draw_cost = _action_cost(state, "special_power")
     followup_steps: list[str] = []
+    followup_public_commands: list[dict[str, Any]] = []
     followup_interactions: list[dict[str, Any]] = []
     followup_label = "future actions"
     score_bonus = 0
@@ -659,56 +1016,83 @@ def _optimistic_collect_followup(state: dict[str, Any], ability_id: str, *, incl
         for entry in current_compulsory:
             if _can_initiate(simulated, ability_id, entry["tile"]):
                 tile_name = _tile_display_name(simulated, entry["tile"])
+                summary = _interaction_resolution_summary(simulated, entry, preferred_ability_id=ability_id)
                 return {
-                    "steps": [
-                        f"Expected roll gives {expected_roll} AP",
-                        f"Use expected AP to start forced {tile_name}",
-                        "Resolve immediately if no support is missing; otherwise replan support",
+                    "steps": [f"Expected roll gives {expected_roll} AP", f"Interact {tile_name}"],
+                    "public_commands": [
+                        {
+                            "type": "start_interaction",
+                            "payload": {
+                                "capability_id": ability_id,
+                                "tile_instance_id": entry["instance"].get("instance_id"),
+                                "auto_select_cards": True,
+                            },
+                        },
                     ],
                     "interactions": [entry],
+                    "summaries": [summary],
                     "label": f"forced {tile_name}",
-                    "score_bonus": 35,
+                    "score_bonus": 35 + _delta_score(summary.get("expected_delta") or {}),
+                    "shelter_distance": _distance_to_closest_shelter(simulated, current_node_id),
                 }
     if not current_compulsory and int(capability.get("pa") or 0) >= interact_cost["ap_cost"]:
         for entry in _visible_current_tiles(simulated):
             if _can_initiate(simulated, ability_id, entry["tile"]):
                 tile_name = _tile_display_name(simulated, entry["tile"])
+                summary = _interaction_resolution_summary(simulated, entry, preferred_ability_id=ability_id)
                 followup_steps = [
                     f"Expected roll gives {expected_roll} AP",
-                    f"Use expected AP to start {tile_name}",
-                    "Resolve immediately if no support is missing; otherwise replan support",
+                    f"Interact {tile_name}",
+                ]
+                followup_public_commands = [
+                    {
+                        "type": "start_interaction",
+                        "payload": {
+                            "capability_id": ability_id,
+                            "tile_instance_id": entry["instance"].get("instance_id"),
+                            "auto_select_cards": True,
+                        },
+                    },
                 ]
                 followup_interactions = [entry]
                 followup_label = tile_name
-                score_bonus = 22
+                score_bonus = 22 + _delta_score(summary.get("expected_delta") or {})
                 break
     if not followup_steps and not current_compulsory and int(capability.get("pa") or 0) >= move_cost["ap_cost"]:
         adjacent = list(((state.get("map") or {}).get("adjacency") or {}).get(current_node_id) or [])
         if adjacent:
-            target_node_id = str(adjacent[0])
-            target_compulsory = _compulsory_choices_on_node(simulated, target_node_id, highest_only=False)
-            followup_steps = [f"Expected roll gives {expected_roll} AP", f"Use expected AP to move to {target_node_id}"]
-            if target_compulsory:
-                followup_steps.append(f"Then account for {len(target_compulsory)} known compulsory tile{'s' if len(target_compulsory) != 1 else ''}")
-            else:
-                followup_steps.append("Reveal nearby tiles and replan")
+            scored_nodes = []
+            for adjacent_node_id in adjacent:
+                node_score, node_entries, shelter_distance = _node_followup_score(simulated, str(adjacent_node_id), ability_id)
+                scored_nodes.append((node_score, str(adjacent_node_id), node_entries, shelter_distance))
+            scored_nodes.sort(key=lambda item: item[0], reverse=True)
+            _node_score, target_node_id, target_compulsory, shelter_distance = scored_nodes[0]
+            followup_steps = [f"Expected roll gives {expected_roll} AP", f"Move {target_node_id}"]
+            followup_public_commands = [{"type": "move_poulpita", "payload": {"capability_id": ability_id, "target_node_id": target_node_id}}]
+            if not target_compulsory:
+                shelter_label = "unknown" if shelter_distance is None else str(shelter_distance)
+                followup_steps.append(f"Reveal nearby tiles and replan; distance to closest known shelter: {shelter_label}")
             followup_interactions = target_compulsory
             followup_label = f"node {target_node_id}"
-            score_bonus = 14 + len(target_compulsory) * 6
+            score_bonus = 14 + max(0, _node_score)
     if not followup_steps and not current_compulsory and int(capability.get("pa") or 0) >= draw_cost["ap_cost"]:
         hand_count = len(capability.get("hand") or [])
         hand_limit = int(capability.get("current_max_cards_in_hand") or 3)
         if hand_count < hand_limit and (capability.get("draw_pile") or capability.get("discard")):
-            followup_steps = [f"Expected roll gives {expected_roll} AP", "Use expected AP to draw a card", "Replan with the new card"]
+            followup_steps = [f"Expected roll gives {expected_roll} AP", "Draw action card", "Replan with the new card"]
+            followup_public_commands = [{"type": "draw_action_card", "payload": {"capability_id": ability_id}}]
             followup_label = "card draw"
             score_bonus = 8
     if not followup_steps:
         followup_steps = [f"Expected roll gives {expected_roll} AP", "Recalculate with the real dice result"]
     return {
         "steps": followup_steps,
+        "public_commands": followup_public_commands,
         "interactions": followup_interactions,
+        "summaries": [_interaction_resolution_summary(simulated, entry, preferred_ability_id=ability_id) for entry in followup_interactions],
         "label": followup_label,
         "score_bonus": score_bonus,
+        "shelter_distance": _distance_to_closest_shelter(simulated, current_node_id),
     }
 
 
@@ -728,18 +1112,46 @@ def _collect_plan(
         commands.append({"type": "take_control", "payload": {"capability_id": ability_id}})
     commands.append({"type": "collect_action_points", "payload": {"capability_id": ability_id}})
     followup = _optimistic_collect_followup(state, ability_id, include_take_control=include_take_control)
-    step_preview = ([f"{name} takes control"] if include_take_control else []) + ["Collect action points"] + followup["steps"][1:]
+    followup_public_commands = followup.get("public_commands") or []
+    followup_action_labels = (followup.get("steps") or [])[1 : 1 + len(followup_public_commands)]
+    step_preview = ([f"{name} takes control"] if include_take_control else []) + ["Collect action points"] + followup_action_labels
     expected_resources = _resource_estimate(
         ap=collect_cost["ap_cost"],
         time_steps=collect_cost["time_cost"],
         control_takes={ability_id: 1} if include_take_control else {},
     )
     expected_resources["expected_ap_gain_by_ability"] = {ability_id: _expected_ap_roll(state)}
+    expected_delta = _merge_deltas([summary.get("expected_delta") or {} for summary in followup.get("summaries") or []])
+    expected_resources["energy_delta_expected"] = expected_delta.get("energy", 0)
+    expected_resources["shells_delta_expected"] = expected_delta.get("seashells", 0)
+    expected_resources["neurons_delta_expected"] = expected_delta.get("neurons", 0)
+    expected_resources["expected_resource_delta"] = expected_delta
     plan_chain = _plan_chain(step_preview, commands)
-    for index in range(len(commands), len(plan_chain)):
+    for public_index, public_command in enumerate(followup_public_commands):
+        chain_index = len(commands) + public_index
+        if chain_index < len(plan_chain):
+            plan_chain[chain_index]["public_command"] = _safe_public_command(public_command)
+            plan_chain[chain_index]["auto_executable"] = bool(plan_chain[chain_index]["public_command"])
+            plan_chain[chain_index]["command_type"] = public_command.get("type")
+    for index in range(len(commands) + len(followup_public_commands), len(plan_chain)):
         plan_chain[index]["auto_executable"] = False
         plan_chain[index]["decision_boundary"] = True
         plan_chain[index]["command_type"] = None
+    statistics = _plan_statistics(
+        state,
+        commands=commands,
+        interactions=followup.get("interactions") or [],
+        assumptions=[
+            f"Collect AP is simulated with expected roll {_expected_ap_roll(state)} for follow-up planning.",
+            "Only the collect command is auto-executed; the real dice result triggers replanning before follow-up actions.",
+            "Surprise cards are modeled optimistically as no-op until one is actually drawn.",
+        ],
+    )
+    if followup.get("summaries"):
+        statistics["interaction_summaries"] = followup["summaries"]
+        statistics["expected_resource_delta"] = expected_delta
+    if followup.get("shelter_distance") is not None:
+        statistics["distance_to_closest_known_shelter"] = followup["shelter_distance"]
     return _public_plan(
         plan_id=f"{'take_control_' if include_take_control else ''}collect_{ability_id}",
         proposer_ability_id=ability_id,
@@ -751,16 +1163,8 @@ def _collect_plan(
         score=base_score + float(followup.get("score_bonus") or 0),
         commands=commands,
         plan_chain=plan_chain,
-        statistics=_plan_statistics(
-            state,
-            commands=commands,
-            interactions=followup.get("interactions") or [],
-            assumptions=[
-                f"Collect AP is simulated with expected roll {_expected_ap_roll(state)} for follow-up planning.",
-                "Only the collect command is auto-executed; the real dice result triggers replanning before follow-up actions.",
-                "Surprise cards are modeled optimistically as no-op until one is actually drawn.",
-            ],
-        ),
+        statistics=statistics,
+        plan_group=f"collect:{followup['label']}",
     )
 
 
@@ -844,6 +1248,7 @@ def _active_night_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
                 expected_resources=_resource_estimate(ap=draw_cost["ap_cost"], time_steps=draw_cost["time_cost"]),
                 score=28,
                 commands=draw_commands,
+                plan_chain=_plan_chain(["Draw one action card"], draw_commands),
                 statistics=_plan_statistics(state, commands=draw_commands),
             )
         )
@@ -859,7 +1264,7 @@ def _active_night_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
             if target_compulsory:
                 known_count = len(target_compulsory)
                 initiable_count = sum(1 for entry in target_compulsory if _can_initiate(state, active_id, entry["tile"]))
-                steps.append(f"Account for {known_count} known compulsory tile{'s' if known_count != 1 else ''} on arrival")
+                steps.extend(_interaction_step_labels(state, target_compulsory, active_id))
                 warnings.append("Destination has known compulsory tiles; optional actions wait until those are handled.")
                 if initiable_count < known_count:
                     warnings.append("This bot may need another ability to finish all compulsory interactions there.")
@@ -867,6 +1272,23 @@ def _active_night_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
                 risk = "forced"
             else:
                 steps.append("Recalculate after movement")
+            move_statistics = _plan_statistics(
+                state,
+                commands=[{"type": "move_poulpita", "payload": {"capability_id": active_id, "target_node_id": target_node_id}}],
+                interactions=target_compulsory,
+            )
+            if target_compulsory:
+                move_statistics["interaction_summaries"] = [
+                    _interaction_resolution_summary(state, entry, preferred_ability_id=active_id)
+                    for entry in target_compulsory
+                ]
+            move_statistics["distance_to_closest_known_shelter"] = _distance_to_closest_shelter(state, str(target_node_id))
+            expected_delta = _merge_deltas([summary.get("expected_delta") or {} for summary in move_statistics.get("interaction_summaries") or []])
+            expected_resources = _resource_estimate(ap=move_cost["ap_cost"], time_steps=move_cost["time_cost"])
+            expected_resources["expected_resource_delta"] = expected_delta
+            expected_resources["energy_delta_expected"] = expected_delta.get("energy", 0)
+            expected_resources["shells_delta_expected"] = expected_delta.get("seashells", 0)
+            expected_resources["neurons_delta_expected"] = expected_delta.get("neurons", 0)
             proposals.append(
                 # Movement can reveal or expose forced tiles, so execute only the move and let the next plan handle them.
                 _public_plan(
@@ -876,15 +1298,15 @@ def _active_night_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
                     rationale="A one-step move is legal. Known compulsory tiles on the destination are included before optional follow-up actions.",
                     risk_label=risk,
                     step_preview=steps,
-                    expected_resources=_resource_estimate(ap=move_cost["ap_cost"], time_steps=move_cost["time_cost"]),
+                    expected_resources=expected_resources,
                     score=score,
                     warnings=warnings,
                     commands=[{"type": "move_poulpita", "payload": {"capability_id": active_id, "target_node_id": target_node_id}}],
-                    statistics=_plan_statistics(
-                        state,
-                        commands=[{"type": "move_poulpita", "payload": {"capability_id": active_id, "target_node_id": target_node_id}}],
-                        interactions=target_compulsory,
+                    plan_chain=_plan_chain(
+                        [f"Move Poulpita to {target_node_id}"],
+                        [{"type": "move_poulpita", "payload": {"capability_id": active_id, "target_node_id": target_node_id}}],
                     ),
+                    statistics=move_statistics,
                 )
             )
     if not current_compulsory and int(capability.get("pa") or 0) >= interact_cost["ap_cost"] and not state.get("interaction"):
@@ -895,6 +1317,16 @@ def _active_night_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
             event = ((state.get("tile_catalog") or {}).get("events") or {}).get(tile.get("event_id")) or {}
             required_count = _interaction_requirements(tile)
             commands = _interaction_commands(active_id, entry)
+            interaction_summary = _interaction_resolution_summary(state, entry, preferred_ability_id=active_id)
+            expected_delta = interaction_summary.get("expected_delta") or {}
+            expected_resources = _resource_estimate(ap=interact_cost["ap_cost"], time_steps=interact_cost["time_cost"])
+            expected_resources["expected_resource_delta"] = expected_delta
+            expected_resources["energy_delta_expected"] = expected_delta.get("energy", 0)
+            expected_resources["shells_delta_expected"] = expected_delta.get("seashells", 0)
+            expected_resources["neurons_delta_expected"] = expected_delta.get("neurons", 0)
+            statistics = _plan_statistics(state, commands=commands, interactions=[entry])
+            statistics["interaction_summaries"] = [interaction_summary]
+            statistics["expected_resource_delta"] = expected_delta
             proposals.append(
                 _public_plan(
                     plan_id=f"interact_{active_id}_{entry['instance'].get('instance_id')}",
@@ -903,11 +1335,12 @@ def _active_night_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
                     rationale="This visible optional tile can be initiated by the active bot ability.",
                     risk_label="moderate",
                     step_preview=["Start interaction", "Resolve immediately" if required_count == 0 else "Pause if cards or shells are required"],
-                    expected_resources=_resource_estimate(ap=interact_cost["ap_cost"], time_steps=interact_cost["time_cost"]),
-                    score=26 - required_count,
+                    expected_resources=expected_resources,
+                    score=26 - required_count + _delta_score(expected_delta),
                     warnings=[] if required_count == 0 else ["May require support cards."],
                     commands=commands,
-                    statistics=_plan_statistics(state, commands=commands, interactions=[entry]),
+                    plan_chain=_plan_chain(["Start interaction", "Resolve interaction"] if required_count == 0 else ["Start interaction"], commands),
+                    statistics=statistics,
                 )
             )
     return proposals
@@ -935,6 +1368,7 @@ def _day_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
                 score=45,
                 objective_effect="Can progress secure-shelter objectives.",
                 commands=commands,
+                plan_chain=_plan_chain(["Move shell to shelter"] * len(commands), commands),
                 statistics=_plan_statistics(state, commands=commands),
             )
         )
@@ -950,6 +1384,7 @@ def _day_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
             expected_resources=_resource_estimate(),
             score=10,
             commands=commands,
+            plan_chain=_plan_chain(["End day"], commands),
             statistics=_plan_statistics(state, commands=commands),
         )
     )
@@ -978,7 +1413,7 @@ def generate_bot_plan_status(state: dict[str, Any]) -> dict[str, Any]:
             proposals = _day_proposals(state)
         else:
             proposals = []
-    proposals = sorted(proposals, key=lambda proposal: float(proposal.pop("_score", 0)), reverse=True)[:5]
+    proposals = _select_diverse_proposals(proposals, limit=5)
     return {
         "status": "awaiting_selection" if proposals else "idle",
         "proposal_set_id": f"plans_{state.get('room_id')}_{int(state.get('version') or 0)}",
@@ -991,7 +1426,32 @@ def generate_bot_plan_status(state: dict[str, Any]) -> dict[str, Any]:
 def public_bot_plan_status(status: dict[str, Any]) -> dict[str, Any]:
     public_status = dict(status)
     public_status["proposals"] = [
-        {key: value for key, value in dict(proposal).items() if key not in {"commands", "_score", "private_basis"}}
+        {key: value for key, value in dict(proposal).items() if key not in {"commands", "_score", "_plan_group", "private_basis"}}
         for proposal in status.get("proposals") or []
     ]
     return public_status
+
+
+def _select_diverse_proposals(proposals: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    ranked = sorted(proposals, key=lambda proposal: float(proposal.get("_score") or 0), reverse=True)
+    selected: list[dict[str, Any]] = []
+    seen_groups: set[str] = set()
+    for proposal in ranked:
+        group = str(proposal.get("_plan_group") or proposal.get("plan_id") or "")
+        if group in seen_groups:
+            continue
+        selected.append(proposal)
+        seen_groups.add(group)
+        if len(selected) >= limit:
+            break
+    if len(selected) < limit:
+        selected_ids = {proposal.get("plan_id") for proposal in selected}
+        for proposal in ranked:
+            if proposal.get("plan_id") in selected_ids:
+                continue
+            selected.append(proposal)
+            if len(selected) >= limit:
+                break
+    for proposal in selected:
+        proposal.pop("_score", None)
+    return selected
