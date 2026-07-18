@@ -430,6 +430,13 @@ def _ensure_octopus_tile_catalog(tile_catalog: dict[str, Any]) -> dict[str, Any]
     return tile_catalog
 
 
+def _is_octopus_tile_instance(tile_instance: dict[str, Any]) -> bool:
+    return (
+        str(tile_instance.get("token_type") or "") == OCTOPUS_TOKEN_ID
+        or str(tile_instance.get("tile_id") or "") in {OCTOPUS_TILE_ID, OCTOPUS_TOKEN_ID}
+    )
+
+
 def _build_tile_catalog() -> dict[str, Any]:
     catalog = get_game_content_catalog()
     public_tiles = {}
@@ -478,7 +485,8 @@ def _level_tiles(level_config: dict[str, Any], catalog: dict[str, Any]) -> dict[
             expanded = expanded[count:]
     for node_id, tokens in (level_config.get("node_tokens") or {}).items():
         for token in tokens or []:
-            if str(token.get("type") if isinstance(token, dict) else token) == OCTOPUS_TOKEN_ID and OCTOPUS_TILE_ID in (catalog.get("tiles") or {}):
+            if str(token.get("type") if isinstance(token, dict) else token) == OCTOPUS_TOKEN_ID:
+                _ensure_octopus_tile_catalog(catalog)
                 node_tiles.setdefault(str(node_id), []).append(
                     {
                         "instance_id": f"octopus_{node_id}_{uuid.uuid4().hex}",
@@ -2167,10 +2175,12 @@ class GameRoomService:
                 self._reject(state, command_id, "tile_not_on_poulpita_node", "Poulpita must be on the tile node.")
             if not tile_instance.get("face_up"):
                 self._reject(state, command_id, "tile_face_down", "This tile is not revealed yet.")
-            tile_catalog = state.get("tile_catalog") or {}
-            if tile_instance.get("tile_id") == OCTOPUS_TILE_ID:
+            tile_catalog = state.get("tile_catalog") if isinstance(state.get("tile_catalog"), dict) else {}
+            is_octopus_instance = _is_octopus_tile_instance(tile_instance)
+            if is_octopus_instance:
                 _ensure_octopus_tile_catalog(tile_catalog)
-            tile = (tile_catalog.get("tiles") or {}).get(tile_instance.get("tile_id"))
+            lookup_tile_id = OCTOPUS_TILE_ID if is_octopus_instance else tile_instance.get("tile_id")
+            tile = (tile_catalog.get("tiles") or {}).get(lookup_tile_id)
             if not tile:
                 self._reject(state, command_id, "unknown_tile", "Tile definition not found.")
             compulsory_choices = _compulsory_tile_choices(state, str(node_id))
@@ -2196,9 +2206,15 @@ class GameRoomService:
             elif tile.get("event_id") not in (capability.get("initiates_event_ids") or []):
                 self._reject(state, command_id, "cannot_initiate_interaction", "This ability cannot initiate interaction with this event.")
             next_state = deepcopy(state)
+            if is_octopus_instance:
+                next_state["tile_catalog"] = tile_catalog
+                next_node_id, next_tile_instance = _find_tile_instance(next_state, tile_instance_id)
+                if next_tile_instance:
+                    next_tile_instance["tile_id"] = OCTOPUS_TILE_ID
+                    next_tile_instance["token_type"] = OCTOPUS_TOKEN_ID
             next_state["interaction"] = {
                 "tile_instance_id": tile_instance_id,
-                "tile_id": tile_instance.get("tile_id"),
+                "tile_id": lookup_tile_id,
                 "node_id": node_id,
                 "initiator_capability_id": capability_id,
                 "played_cards": [],

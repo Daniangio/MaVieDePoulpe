@@ -212,6 +212,92 @@ def _weighted_expected_gain(state: dict[str, Any], delta: dict[str, Any]) -> flo
     return round(score, 2)
 
 
+def _state_has_shelter(state: dict[str, Any], node_id: str) -> bool:
+    raw = (state.get("shelters") or {}).get(str(node_id))
+    if isinstance(raw, dict):
+        return int(raw.get("count") or 0) > 0
+    return int(raw or 0) > 0
+
+
+def _current_size_value(state: dict[str, Any]) -> float:
+    panel = (state.get("tile_catalog") or {}).get("poulpita_panel") or {}
+    sizes = panel.get("sizes") or []
+    size_index = max(0, int((state.get("poulpita") or {}).get("size_index") or 0))
+    if size_index >= len(sizes):
+        return float(size_index)
+    size = sizes[size_index] or {}
+    amount = float(size.get("amount") if size.get("amount") is not None else size.get("kg") or size_index)
+    unit = str(size.get("unit") or "kg")
+    multiplier = {"mg": 0.000001, "g": 0.001, "kg": 1.0}.get(unit, 1.0)
+    return amount * multiplier
+
+
+def _global_state_score_components(state: dict[str, Any]) -> dict[str, float]:
+    poulpita = state.get("poulpita") or {}
+    capabilities = state.get("capabilities") or {}
+    current_node_id = str(poulpita.get("node_id") or "")
+    hand_cards = sum(len(capability.get("hand") or []) for capability in capabilities.values())
+    hand_capacity = sum(int(capability.get("current_max_cards_in_hand") or capability.get("default_max_cards_in_hand") or 0) for capability in capabilities.values())
+    purchased_upgrades = sum(len(capability.get("purchased_hand_size_upgrade_indices") or []) for capability in capabilities.values())
+    total_ap = sum(int(capability.get("pa") or 0) for capability in capabilities.values())
+    shelter_entries = [raw for raw in (state.get("shelters") or {}).values()]
+    shelter_count = 0
+    secure_shelters = 0
+    shelter_shells = 0
+    for raw in shelter_entries:
+        if isinstance(raw, dict):
+            count = int(raw.get("count") or 0)
+            shelter_count += count
+            shelter_shells += int(raw.get("seashells") or 0)
+            if count and bool(raw.get("secure")):
+                secure_shelters += 1
+        elif int(raw or 0) > 0:
+            shelter_count += int(raw or 0)
+    night_time_spent = int(state.get("night_time_spent") or 0)
+    night_time_total = max(1, int(state.get("night_time_total") or 24))
+    unsheltered_night_end_penalty = 1.0 if state.get("phase") in {"night_idle", "night_action"} and night_time_spent >= night_time_total and not _state_has_shelter(state, current_node_id) else 0.0
+    return {
+        "energy": float(poulpita.get("energy") or 0),
+        "neurons": float(poulpita.get("neurons") or 0),
+        "seashells": float(poulpita.get("seashells") or 0),
+        "shelter_shells": float(shelter_shells),
+        "cards_in_hand": float(hand_cards),
+        "hand_capacity": float(hand_capacity),
+        "purchased_upgrades": float(purchased_upgrades),
+        "size_index": float(poulpita.get("size_index") or 0),
+        "size_value": _current_size_value(state),
+        "shelters": float(shelter_count),
+        "secure_shelters": float(secure_shelters),
+        "ap": float(total_ap),
+        "night_time_remaining": float(max(0, night_time_total - night_time_spent)),
+        "unsheltered_night_end_penalty": unsheltered_night_end_penalty,
+    }
+
+
+def _global_state_score(state: dict[str, Any]) -> float:
+    defaults = {
+        "energy": 10.0,
+        "neurons": 5.0,
+        "seashells": 4.0,
+        "shelter_shells": 3.0,
+        "cards_in_hand": 2.0,
+        "hand_capacity": 1.0,
+        "purchased_upgrades": 10.0,
+        "size_index": 14.0,
+        "size_value": 0.0,
+        "shelters": 12.0,
+        "secure_shelters": 18.0,
+        "ap": 0.5,
+        "night_time_remaining": 0.15,
+        "unsheltered_night_end_penalty": -10.0,
+    }
+    components = _global_state_score_components(state)
+    score = 0.0
+    for key, fallback in defaults.items():
+        score += float(components.get(key) or 0) * _resource_weight(state, key, fallback)
+    return round(score, 2)
+
+
 def _tile_category(state: dict[str, Any], tile: dict[str, Any]) -> dict[str, Any]:
     catalog = state.get("tile_catalog") or {}
     event = (catalog.get("events") or {}).get(tile.get("event_id")) or {}
@@ -778,13 +864,18 @@ def _attach_plan_metrics(state: dict[str, Any], proposal: dict[str, Any]) -> dic
     commands = _proposal_efficiency_commands(proposal)
     efficiency = _efficiency_metrics(state, commands)
     expected_delta = statistics.get("expected_resource_delta") or (proposal.get("expected_resources") or {}).get("expected_resource_delta") or {}
-    expected_gain_score = _weighted_expected_gain(state, expected_delta)
+    base_global_score = _global_state_score(state)
+    simulated = _clone_simulation_state(state)
+    for command in commands:
+        _simulate_public_command(simulated, command)
+    expected_gain_score = _global_state_score(simulated)
+    expected_delta_score = _weighted_expected_gain(state, expected_delta)
     confidence = max(0.0, min(1.0, float(statistics.get("success_probability") if statistics.get("success_probability") is not None else proposal.get("confidence") if proposal.get("confidence") is not None else 1.0)))
     efficiency_score = float(efficiency["efficiency"])
     aggregate_score = round(
         _planner_weight(state, "efficiency", 35.0) * efficiency_score
         + _planner_weight(state, "confidence", 35.0) * confidence
-        + _planner_weight(state, "expected_gain", 30.0) * (expected_gain_score / 20.0),
+        + _planner_weight(state, "expected_gain", 30.0) * ((expected_gain_score - base_global_score + expected_delta_score) / 20.0),
         2,
     )
     statistics.update(
@@ -792,16 +883,20 @@ def _attach_plan_metrics(state: dict[str, Any], proposal: dict[str, Any]) -> dic
             **efficiency,
             "confidence_score": round(confidence, 2),
             "expected_gain_score": expected_gain_score,
+            "base_global_score": base_global_score,
+            "projected_global_score": expected_gain_score,
+            "global_score_delta": round(expected_gain_score - base_global_score, 2),
+            "global_score_components": _global_state_score_components(simulated),
             "planner_score": aggregate_score,
             "pareto_axes": {
                 "efficiency": round(efficiency_score, 2),
                 "confidence": round(confidence, 2),
-                "expected_gain": expected_gain_score,
+                "expected_gain": round(expected_gain_score - base_global_score + expected_delta_score, 2),
             },
         }
     )
     proposal["statistics"] = statistics
-    proposal["plan_chain"] = _attach_step_metrics(state, proposal, confidence=confidence, expected_gain_score=expected_gain_score)
+    proposal["plan_chain"] = _attach_step_metrics(state, proposal, confidence=confidence)
     proposal["_score"] = aggregate_score
     return proposal
 
@@ -811,7 +906,6 @@ def _attach_step_metrics(
     proposal: dict[str, Any],
     *,
     confidence: float,
-    expected_gain_score: float,
 ) -> list[dict[str, Any]]:
     chain = [dict(step) for step in (proposal.get("plan_chain") or [])]
     active_id = str(state.get("active_capability_id") or "")
@@ -836,12 +930,19 @@ def _attach_step_metrics(
             step_efficiency = round(min(1.0, max(0.0, used_before_switch / max(1, active_capacity))), 2)
         elif _is_action_command(command_type) and command_ability_id == active_id:
             step_efficiency = 1.0
+        simulated = _clone_simulation_state(state)
+        for command in prefix_commands:
+            _simulate_public_command(simulated, command)
+        projected_global_score = _global_state_score(simulated)
         step["statistics"] = {
             **prefix_metrics,
             "efficiency": round(step_efficiency, 2),
             "confidence_score": round(confidence, 2),
             "risk_score": round(1.0 - confidence, 2),
-            "expected_gain_score": expected_gain_score,
+            "expected_gain_score": projected_global_score,
+            "projected_global_score": projected_global_score,
+            "global_score_delta": round(projected_global_score - _global_state_score(state), 2),
+            "global_score_components": _global_state_score_components(simulated),
             "step_index": index,
         }
     return chain
@@ -982,6 +1083,24 @@ def _apply_success_effects_to_simulation(state: dict[str, Any], entry: dict[str,
                 shelter["count"] = int(shelter.get("count") or 0) + 1
 
 
+def _simulate_advance_time(state: dict[str, Any], chunks: int) -> None:
+    if state.get("phase") not in {"night_idle", "night_action"}:
+        return
+    previous_time = int(state.get("night_time_spent") or 0)
+    next_time = previous_time + max(0, int(chunks or 0))
+    state["night_time_spent"] = next_time
+    night_time_total = max(1, int(state.get("night_time_total") or 24))
+    if previous_time <= night_time_total < next_time:
+        poulpita = state.setdefault("poulpita", {})
+        poulpita["energy"] = max(0, int(poulpita.get("energy") or 0) - 1)
+
+
+def _current_shelter_secure_for_simulation(state: dict[str, Any]) -> bool:
+    current_node_id = str((state.get("poulpita") or {}).get("node_id") or "")
+    raw = (state.get("shelters") or {}).get(current_node_id)
+    return bool(raw.get("secure")) if isinstance(raw, dict) else False
+
+
 def _simulate_public_command(state: dict[str, Any], command: dict[str, Any]) -> None:
     command_type = str(command.get("type") or "")
     payload = command.get("payload") or {}
@@ -993,12 +1112,15 @@ def _simulate_public_command(state: dict[str, Any], command: dict[str, Any]) -> 
         capability["control_takes_this_night"] = int(capability.get("control_takes_this_night") or 0) + 1
         capability["actions_taken_this_control"] = 0
     elif command_type == "collect_action_points" and ability_id:
+        cost = _action_cost(state, "gain_ap")
         capability["pa"] = int(capability.get("pa") or 0) + _expected_ap_roll(state)
         capability["actions_taken_this_control"] = int(capability.get("actions_taken_this_control") or 0) + 1
+        _simulate_advance_time(state, cost["time_cost"])
     elif command_type == "move_poulpita" and ability_id:
         cost = _action_cost(state, "move")
         capability["pa"] = max(0, int(capability.get("pa") or 0) - cost["ap_cost"])
         capability["actions_taken_this_control"] = int(capability.get("actions_taken_this_control") or 0) + 1
+        _simulate_advance_time(state, cost["time_cost"])
         target_node_id = str(payload.get("target_node_id") or "")
         state.setdefault("poulpita", {})["previous_node_id"] = state.get("poulpita", {}).get("node_id")
         state["poulpita"]["node_id"] = target_node_id
@@ -1006,6 +1128,7 @@ def _simulate_public_command(state: dict[str, Any], command: dict[str, Any]) -> 
         cost = _action_cost(state, "special_power")
         capability["pa"] = max(0, int(capability.get("pa") or 0) - cost["ap_cost"])
         capability["actions_taken_this_control"] = int(capability.get("actions_taken_this_control") or 0) + 1
+        _simulate_advance_time(state, cost["time_cost"])
         missing = _missing_interaction_ids_for_open_interaction(state) if state.get("interaction") else []
         candidate_zones = ["draw_pile", "discard"]
         drawn_card = None
@@ -1032,6 +1155,7 @@ def _simulate_public_command(state: dict[str, Any], command: dict[str, Any]) -> 
         cost = _action_cost(state, "interact")
         capability["pa"] = max(0, int(capability.get("pa") or 0) - cost["ap_cost"])
         capability["actions_taken_this_control"] = int(capability.get("actions_taken_this_control") or 0) + 1
+        _simulate_advance_time(state, cost["time_cost"])
         entry = _simulated_tile_entry(state, str(payload.get("tile_instance_id") or ""))
         if entry:
             state["interaction"] = {
@@ -1057,6 +1181,63 @@ def _simulate_public_command(state: dict[str, Any], command: dict[str, Any]) -> 
                 if str(instance.get("instance_id") or "") != str(entry["instance"].get("instance_id") or "")
             ]
         state["interaction"] = None
+    elif command_type == "move_seashell_to_shelter":
+        current_node_id = str((state.get("poulpita") or {}).get("node_id") or "")
+        poulpita = state.setdefault("poulpita", {})
+        if int(poulpita.get("seashells") or 0) > 0 and _state_has_shelter(state, current_node_id):
+            shelter = state.setdefault("shelters", {}).setdefault(current_node_id, {"count": 1, "seashells": 0, "secure": False})
+            if isinstance(shelter, dict):
+                poulpita["seashells"] = int(poulpita.get("seashells") or 0) - 1
+                shelter["seashells"] = int(shelter.get("seashells") or 0) + 1
+                shelter["secure"] = int(shelter.get("seashells") or 0) >= 3
+    elif command_type == "move_seashell_from_shelter":
+        current_node_id = str((state.get("poulpita") or {}).get("node_id") or "")
+        shelter = (state.get("shelters") or {}).get(current_node_id)
+        if isinstance(shelter, dict) and int(shelter.get("seashells") or 0) > 0:
+            shelter["seashells"] = int(shelter.get("seashells") or 0) - 1
+            shelter["secure"] = int(shelter.get("seashells") or 0) >= 3
+            state.setdefault("poulpita", {})["seashells"] = int(state.setdefault("poulpita", {}).get("seashells") or 0) + 1
+    elif command_type == "buy_hand_size_upgrade" and ability_id:
+        upgrade_index = int(payload.get("upgrade_index") or 0)
+        upgrades = capability.get("hand_size_upgrades") or []
+        if 0 <= upgrade_index < len(upgrades):
+            upgrade = upgrades[upgrade_index] or {}
+            cost = max(0, int(upgrade.get("cost") or 0))
+            state.setdefault("poulpita", {})["neurons"] = max(0, int(state.get("poulpita", {}).get("neurons") or 0) - cost)
+            if str(upgrade.get("type") or "hand_size") == "hand_size":
+                capability["current_max_cards_in_hand"] = int(capability.get("current_max_cards_in_hand") or capability.get("default_max_cards_in_hand") or 3) + max(1, int(upgrade.get("hand_size_bonus") or 1))
+            capability.setdefault("purchased_hand_size_upgrade_indices", []).append(upgrade_index)
+    elif command_type == "buy_poulpita_size":
+        poulpita = state.setdefault("poulpita", {})
+        sizes = ((state.get("tile_catalog") or {}).get("poulpita_panel") or {}).get("sizes") or []
+        next_size_index = int(poulpita.get("size_index") or 0) + 1
+        if next_size_index < len(sizes):
+            base_cost = max(1, int((sizes[next_size_index] or {}).get("energy_cost") or 1))
+            cost = max(0, base_cost - (1 if _current_shelter_secure_for_simulation(state) else 0))
+            poulpita["energy"] = max(0, int(poulpita.get("energy") or 0) - cost)
+            poulpita["size_index"] = next_size_index
+            poulpita["size_upgraded_today"] = True
+    elif command_type == "end_night":
+        current_node_id = str((state.get("poulpita") or {}).get("node_id") or "")
+        if not _state_has_shelter(state, current_node_id):
+            state.setdefault("poulpita", {})["energy"] = max(0, int(state.get("poulpita", {}).get("energy") or 0) - 1)
+        state["phase"] = "day"
+        state["night_time_spent"] = 0
+        state["active_capability_id"] = None
+        for next_capability in (state.get("capabilities") or {}).values():
+            next_capability["pa"] = 0
+            next_capability["actions_taken_this_control"] = 0
+            next_capability["control_takes_this_night"] = 0
+        state.setdefault("poulpita", {})["size_upgraded_today"] = False
+    elif command_type == "end_day":
+        state["phase"] = "night_idle"
+        state["night_time_spent"] = 0
+        state["active_capability_id"] = None
+        for next_capability in (state.get("capabilities") or {}).values():
+            next_capability["pa"] = 0
+            next_capability["actions_taken_this_control"] = 0
+            next_capability["control_takes_this_night"] = 0
+        state.setdefault("poulpita", {})["size_upgraded_today"] = False
 
 
 def _best_rollout_interaction(state: dict[str, Any], ability_id: str, entries: list[dict[str, Any]]) -> dict[str, Any] | None:

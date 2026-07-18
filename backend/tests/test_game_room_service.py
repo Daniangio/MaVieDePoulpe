@@ -1184,8 +1184,30 @@ def test_compulsory_same_node_interactions_follow_highest_priority_first():
     run(scenario())
 
 
-def test_octopus_token_hydrates_tile_definition_and_enforces_initiators():
+def test_octopus_token_hydrates_tile_definition_and_enforces_initiators(monkeypatch):
     async def scenario():
+        monkeypatch.setattr(
+            "backend.app.game_room_service.get_game_content_catalog",
+            lambda: {
+                "tiles": {},
+                "events": {},
+                "interactions": {},
+                "tokens": {
+                    "octopus": {
+                        "id": "octopus",
+                        "name": "Octopus token",
+                        "image_url": "/api/admin/content/images/octopus.png",
+                        "priority": 7,
+                        "initiator_capability_ids": ["force"],
+                        "interaction_ids": [],
+                        "counter_attack_interaction_ids": [],
+                        "success_effects": [],
+                        "counter_attack_effects": [],
+                        "failure_effects": [],
+                    }
+                },
+            },
+        )
         service, user, room, _start = await create_started_room()
         state = service._memory_states[room["id"]]
         state["phase"] = "night_action"
@@ -1235,6 +1257,28 @@ def test_octopus_token_hydrates_tile_definition_and_enforces_initiators():
         assert accepted["ok"] is True
         assert accepted["projection"]["interaction"]["tile_id"] == "__octopus_token__"
         assert accepted["projection"]["tile_catalog"]["tiles"]["__octopus_token__"]["image_url"].endswith("octopus.png")
+
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "force"
+        state["capabilities"]["force"]["pa"] = 1
+        state["tile_catalog"] = {"categories": {}, "tiles": {}, "events": {}, "interactions": {}}
+        state["tiles"] = {"1A": [{"instance_id": "octopus_legacy", "tile_id": "octopus", "face_up": True, "token_type": "octopus"}]}
+
+        accepted_legacy = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_start_octopus_legacy",
+            expected_version=1,
+            command_type="start_interaction",
+            payload={"capability_id": "force", "tile_instance_id": "octopus_legacy"},
+        )
+
+        assert accepted_legacy["ok"] is True
+        assert accepted_legacy["projection"]["interaction"]["tile_id"] == "__octopus_token__"
+        assert accepted_legacy["projection"]["tiles"]["1A"][0]["tile_id"] == "__octopus_token__"
 
         service, user, room, _start = await create_started_room()
         state = service._memory_states[room["id"]]

@@ -1077,7 +1077,7 @@ const BotPlansOverlay = ({
                     <div className="mt-2 grid gap-1 sm:grid-cols-3">
                       <p className="rounded bg-slate-950 px-2 py-1"><span className="text-slate-500">Efficiency:</span> {Math.round(Number(stats.efficiency ?? 1) * 100)}%</p>
                       <p className="rounded bg-slate-950 px-2 py-1"><span className="text-slate-500">Confidence:</span> {Math.round(Number(stats.confidence_score ?? successPercent / 100) * 100)}%</p>
-                      <p className="rounded bg-slate-950 px-2 py-1"><span className="text-slate-500">Gain:</span> {Math.round(Number(stats.expected_gain_score || 0))}</p>
+                      <p className="rounded bg-slate-950 px-2 py-1"><span className="text-slate-500">Score:</span> {Math.round(Number(stats.expected_gain_score || 0))}</p>
                     </div>
                     <p className="mt-1 text-[0.68rem] text-slate-400">
                       Planner score {Number(stats.planner_score || 0).toFixed(1)}
@@ -1368,7 +1368,7 @@ const PlanActionNode = ({
       <span className={["grid w-12 shrink-0 gap-0.5 rounded-md border px-1.5 py-1 text-[0.5rem] leading-none shadow", selected ? "border-cyan-200 bg-slate-950/95 text-black-100" : "border-slate-700 bg-slate-950/85 text-slate-200"].join(" ")}>
         <span>Eff {Math.round(option.avgEfficiency * 100)}%</span>
         <span>Risk {Math.round((1 - option.avgSuccess) * 100)}%</span>
-        <span>Gain {Math.round(option.avgExpectedGain)}</span>
+        <span>Score {Math.round(option.avgExpectedGain)}</span>
       </span>
     </button>
   );
@@ -1386,6 +1386,7 @@ const PlanDetailTree = ({ plan, projection }: { plan: BotPlanSummary; projection
           const color = abilityColor(projection, visual.actorId);
           const Icon = visual.Icon;
           const stats = step.statistics || {};
+          const components = stats.global_score_components || {};
           const efficiency = Math.round(Number(stats.efficiency ?? 1) * 100);
           const risk = Math.round(Number(stats.risk_score ?? 1 - Number(stats.confidence_score ?? plan.statistics?.success_probability ?? 1)) * 100);
           const gain = Math.round(Number(stats.expected_gain_score ?? plan.statistics?.expected_gain_score ?? 0));
@@ -1410,13 +1411,18 @@ const PlanDetailTree = ({ plan, projection }: { plan: BotPlanSummary; projection
               <span className="grid w-12 shrink-0 gap-0.5 text-[0.5rem] leading-none text-slate-300">
                 <span>Eff {efficiency}%</span>
                 <span>Risk {risk}%</span>
-                <span>Gain {gain}</span>
+                <span>Score {gain}</span>
               </span>
               <span className="truncate text-[0.65rem] text-slate-300">{index + 1}. {compactPlanStepLabel(step, projection)}</span>
               <div className="pointer-events-none absolute left-16 top-9 z-[80] hidden w-64 rounded-md border border-cyan-300 bg-slate-950 p-2 text-[0.65rem] text-slate-300 shadow-xl group-hover:block">
                 <p className="font-semibold text-white">{compactPlanStepLabel(step, projection)}</p>
                 <p className="mt-1 text-slate-400">{step.label}</p>
-                <p className="mt-2">Efficiency {efficiency}% - Risk {risk}% - Gain {gain}</p>
+                <p className="mt-2">Efficiency {efficiency}% - Risk {risk}% - Score {gain}</p>
+                {Object.keys(components).length ? (
+                  <p className="mt-1">
+                    Energy {Number(components.energy || 0)}, neurons {Number(components.neurons || 0)}, hand {Number(components.cards_in_hand || 0)}, upgrades {Number(components.purchased_upgrades || 0)}, size {Number(components.size_index || 0)}
+                  </p>
+                ) : null}
                 <p className="mt-1">Used {Number(stats.planned_actions_used || 0)} / {Number(stats.planned_action_capacity || 0)} planned actions.</p>
                 {Number(stats.wasted_current_actions || 0) > 0 ? <p className="mt-1 text-amber-200">{Number(stats.wasted_current_actions || 0)} current action(s) left unused by initiative switch.</p> : null}
                 {deltaText(expectedDelta) ? <p className="mt-1">EV: {deltaText(expectedDelta)}</p> : null}
