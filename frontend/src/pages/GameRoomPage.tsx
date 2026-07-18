@@ -191,15 +191,17 @@ const CapabilityBoard = ({
   const ArticleTag = compact ? "button" : "article";
   const controllerType = capability.controller_type || "human";
   const controllerLabel = controllerType === "bot" ? "Bot" : controllerType === "shared" ? "Shared" : "Human";
+  const boardColor = projection ? abilityColor(projection, capability.id) : "#0891b2";
   return (
   <ArticleTag
     className={[
-      "group/board relative min-w-0 overflow-auto rounded-md border bg-slate-900 text-left text-slate-100 shadow-xl transition",
-      compact ? "cursor-pointer hover:z-50 hover:border-cyan-300 hover:bg-slate-800 hover:shadow-cyan-500/20 focus:outline-none focus:ring-2 focus:ring-cyan-300" : "",
-      active ? "border-teal-300" : focused ? "border-amber-300" : "border-slate-700",
+      "group/board relative min-w-0 overflow-auto rounded-md border-2 bg-slate-900 text-left text-slate-100 shadow-xl transition",
+      compact ? "cursor-pointer hover:z-50 hover:bg-slate-800 hover:shadow-cyan-500/20 focus:outline-none focus:ring-2 focus:ring-cyan-300" : "",
+      active ? "ring-2 ring-teal-200" : focused ? "ring-2 ring-amber-200" : "",
       compact ? "h-full p-1" : "h-full p-2",
     ].join(" ")}
     onClick={compact ? onFocus : undefined}
+    style={{ borderColor: boardColor }}
     type={compact ? "button" : undefined}
   >
     <div className="flex items-start justify-between gap-1">
@@ -1481,7 +1483,7 @@ const BotPlanTree = ({
   return (
     <div className="absolute left-3 top-3 z-[45] w-max max-w-none overflow-visible p-0">
       <div className="flex items-center justify-between gap-2">
-        <p className="text-[0.65rem] font-semibold uppercase tracking-wide text-cyan-100 drop-shadow">Planning tree</p>
+        <p className="text-[0.65rem] font-semibold uppercase tracking-wide text-black-100 drop-shadow">Planning tree</p>
         <button
           className="rounded bg-teal-400 px-2 py-1 text-[0.62rem] font-semibold uppercase tracking-wide text-slate-950 shadow hover:bg-teal-300 disabled:cursor-not-allowed disabled:opacity-50"
           disabled={pending || !selectedOption?.public_command}
