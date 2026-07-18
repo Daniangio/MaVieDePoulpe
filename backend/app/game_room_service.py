@@ -382,6 +382,54 @@ def _tile_public(tile: dict[str, Any], catalog: dict[str, dict[str, Any]]) -> di
     }
 
 
+def _octopus_public_tile(octopus_token: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    octopus_event = {
+        "id": OCTOPUS_EVENT_ID,
+        "name": octopus_token.get("name") or "Octopus token",
+        "category_id": OCTOPUS_CATEGORY_ID,
+        "image_url": octopus_token.get("image_url"),
+    }
+    octopus_category = {
+        "id": OCTOPUS_CATEGORY_ID,
+        "name": "Threat",
+        "compulsory_on_same_node": True,
+    }
+    octopus_tile = {
+        "id": OCTOPUS_TILE_ID,
+        "name": octopus_token.get("name") or "Octopus token",
+        "event_id": OCTOPUS_EVENT_ID,
+        "event": octopus_event,
+        "image_url": octopus_token.get("image_url"),
+        "priority": int(octopus_token.get("priority") or 0),
+        "initiator_capability_ids": list(octopus_token.get("initiator_capability_ids") or []),
+        "interaction_ids": list(octopus_token.get("interaction_ids") or []),
+        "counter_attack_interaction_ids": list(octopus_token.get("counter_attack_interaction_ids") or []),
+        "shell_requirement_count": int(octopus_token.get("shell_requirement_count") or 0),
+        "success_effects": deepcopy(octopus_token.get("success_effects") or []),
+        "counter_attack_effects": deepcopy(octopus_token.get("counter_attack_effects") or []),
+        "failure_effects": deepcopy(octopus_token.get("failure_effects") or []),
+        "token_type": OCTOPUS_TOKEN_ID,
+    }
+    return octopus_tile, octopus_event, octopus_category
+
+
+def _ensure_octopus_tile_catalog(tile_catalog: dict[str, Any]) -> dict[str, Any]:
+    token_catalog = tile_catalog.get("tokens") or {}
+    octopus_token = token_catalog.get(OCTOPUS_TOKEN_ID) or {}
+    if not octopus_token:
+        latest_catalog = get_game_content_catalog()
+        token_catalog = latest_catalog.get("tokens") or {}
+        octopus_token = token_catalog.get(OCTOPUS_TOKEN_ID) or {}
+        if token_catalog:
+            tile_catalog["tokens"] = token_catalog
+    if octopus_token:
+        octopus_tile, octopus_event, octopus_category = _octopus_public_tile(octopus_token)
+        tile_catalog.setdefault("tiles", {})[OCTOPUS_TILE_ID] = octopus_tile
+        tile_catalog.setdefault("events", {})[OCTOPUS_EVENT_ID] = octopus_event
+        tile_catalog.setdefault("categories", {})[OCTOPUS_CATEGORY_ID] = octopus_category
+    return tile_catalog
+
+
 def _build_tile_catalog() -> dict[str, Any]:
     catalog = get_game_content_catalog()
     public_tiles = {}
@@ -390,33 +438,10 @@ def _build_tile_catalog() -> dict[str, Any]:
     token_catalog = catalog.get("tokens") or {}
     octopus_token = token_catalog.get(OCTOPUS_TOKEN_ID) or {}
     if octopus_token:
-        octopus_event = {
-            "id": OCTOPUS_EVENT_ID,
-            "name": octopus_token.get("name") or "Octopus token",
-            "category_id": OCTOPUS_CATEGORY_ID,
-            "image_url": octopus_token.get("image_url"),
-        }
+        octopus_tile, octopus_event, octopus_category = _octopus_public_tile(octopus_token)
         catalog.setdefault("events", {})[OCTOPUS_EVENT_ID] = octopus_event
-        catalog.setdefault("categories", {})[OCTOPUS_CATEGORY_ID] = {
-            "id": OCTOPUS_CATEGORY_ID,
-            "name": "Threat",
-            "compulsory_on_same_node": True,
-        }
-        public_tiles[OCTOPUS_TILE_ID] = {
-            "id": OCTOPUS_TILE_ID,
-            "name": octopus_token.get("name") or "Octopus token",
-            "event_id": OCTOPUS_EVENT_ID,
-            "event": octopus_event,
-            "image_url": octopus_token.get("image_url"),
-            "priority": int(octopus_token.get("priority") or 0),
-            "interaction_ids": list(octopus_token.get("interaction_ids") or []),
-            "counter_attack_interaction_ids": list(octopus_token.get("counter_attack_interaction_ids") or []),
-            "shell_requirement_count": int(octopus_token.get("shell_requirement_count") or 0),
-            "success_effects": deepcopy(octopus_token.get("success_effects") or []),
-            "counter_attack_effects": deepcopy(octopus_token.get("counter_attack_effects") or []),
-            "failure_effects": deepcopy(octopus_token.get("failure_effects") or []),
-            "token_type": OCTOPUS_TOKEN_ID,
-        }
+        catalog.setdefault("categories", {})[OCTOPUS_CATEGORY_ID] = octopus_category
+        public_tiles[OCTOPUS_TILE_ID] = octopus_tile
     cards = catalog.get("cards") or {}
     if isinstance(cards, list):
         cards = {card["id"]: card for card in cards if card.get("id")}
@@ -592,33 +617,10 @@ def _project_state(state: dict[str, Any]) -> dict[str, Any]:
         latest_tokens = latest_catalog.get("tokens") or {}
         latest_octopus_token = latest_tokens.get(OCTOPUS_TOKEN_ID) or {}
         if latest_octopus_token:
-            octopus_event = {
-                "id": OCTOPUS_EVENT_ID,
-                "name": latest_octopus_token.get("name") or "Octopus token",
-                "category_id": OCTOPUS_CATEGORY_ID,
-                "image_url": latest_octopus_token.get("image_url"),
-            }
+            octopus_tile, octopus_event, octopus_category = _octopus_public_tile(latest_octopus_token)
             preserved_special_events[OCTOPUS_EVENT_ID] = octopus_event
-            preserved_special_categories[OCTOPUS_CATEGORY_ID] = {
-                "id": OCTOPUS_CATEGORY_ID,
-                "name": "Threat",
-                "compulsory_on_same_node": True,
-            }
-            preserved_special_tiles[OCTOPUS_TILE_ID] = {
-                "id": OCTOPUS_TILE_ID,
-                "name": latest_octopus_token.get("name") or "Octopus token",
-                "event_id": OCTOPUS_EVENT_ID,
-                "event": octopus_event,
-                "image_url": latest_octopus_token.get("image_url"),
-                "priority": int(latest_octopus_token.get("priority") or 0),
-                "interaction_ids": list(latest_octopus_token.get("interaction_ids") or []),
-                "counter_attack_interaction_ids": list(latest_octopus_token.get("counter_attack_interaction_ids") or []),
-                "shell_requirement_count": int(latest_octopus_token.get("shell_requirement_count") or 0),
-                "success_effects": deepcopy(latest_octopus_token.get("success_effects") or []),
-                "counter_attack_effects": deepcopy(latest_octopus_token.get("counter_attack_effects") or []),
-                "failure_effects": deepcopy(latest_octopus_token.get("failure_effects") or []),
-                "token_type": OCTOPUS_TOKEN_ID,
-            }
+            preserved_special_categories[OCTOPUS_CATEGORY_ID] = octopus_category
+            preserved_special_tiles[OCTOPUS_TILE_ID] = octopus_tile
         tile_catalog["tiles"] = {
             tile_id: _tile_public(tile, {"events": latest_events})
             for tile_id, tile in latest_tiles.items()
@@ -1619,6 +1621,7 @@ class GameRoomService:
             next_state.setdefault("tile_catalog", {})["surprise_decks"] = latest_catalog.get("surprise_decks") or next_state["tile_catalog"].get("surprise_decks") or {}
             next_state.setdefault("tile_catalog", {})["action_costs"] = latest_catalog.get("action_costs") or next_state["tile_catalog"].get("action_costs") or {}
             next_state.setdefault("tile_catalog", {})["bot_settings"] = latest_catalog.get("bot_settings") or next_state["tile_catalog"].get("bot_settings") or {}
+            _ensure_octopus_tile_catalog(next_state["tile_catalog"])
         except Exception:
             return state
         return next_state
@@ -2164,7 +2167,10 @@ class GameRoomService:
                 self._reject(state, command_id, "tile_not_on_poulpita_node", "Poulpita must be on the tile node.")
             if not tile_instance.get("face_up"):
                 self._reject(state, command_id, "tile_face_down", "This tile is not revealed yet.")
-            tile = (state.get("tile_catalog") or {}).get("tiles", {}).get(tile_instance.get("tile_id"))
+            tile_catalog = state.get("tile_catalog") or {}
+            if tile_instance.get("tile_id") == OCTOPUS_TILE_ID:
+                _ensure_octopus_tile_catalog(tile_catalog)
+            tile = (tile_catalog.get("tiles") or {}).get(tile_instance.get("tile_id"))
             if not tile:
                 self._reject(state, command_id, "unknown_tile", "Tile definition not found.")
             compulsory_choices = _compulsory_tile_choices(state, str(node_id))
@@ -2181,7 +2187,13 @@ class GameRoomService:
                         f"A compulsory interaction with priority {highest_priority} must be resolved first.",
                     )
             capability = (state.get("capabilities") or {}).get(capability_id) or {}
-            if tile.get("token_type") != OCTOPUS_TOKEN_ID and tile.get("event_id") not in (capability.get("initiates_event_ids") or []):
+            if tile.get("token_type") == OCTOPUS_TOKEN_ID:
+                allowed_initiators = tile.get("initiator_capability_ids")
+                if allowed_initiators is None:
+                    allowed_initiators = list((state.get("capabilities") or {}).keys())
+                if capability_id not in allowed_initiators:
+                    self._reject(state, command_id, "cannot_initiate_interaction", "This ability cannot initiate interaction with the octopus token.")
+            elif tile.get("event_id") not in (capability.get("initiates_event_ids") or []):
                 self._reject(state, command_id, "cannot_initiate_interaction", "This ability cannot initiate interaction with this event.")
             next_state = deepcopy(state)
             next_state["interaction"] = {

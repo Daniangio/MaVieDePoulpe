@@ -729,7 +729,17 @@ const InteractionPanel = ({
   const tileInstance = activeInteraction || inspectedTileInstance;
   if (!tileInstance) return null;
   const tile = projection.tile_catalog?.tiles?.[tileInstance.tile_id] || {};
-  const event = tile.event || projection.tile_catalog?.events?.[tile.event_id];
+  const octopusToken = projection.tile_catalog?.tokens?.octopus;
+  const rawEvent = tile.event || projection.tile_catalog?.events?.[tile.event_id];
+  const isOctopusToken = tile?.token_type === "octopus" || tileInstance?.token_type === "octopus";
+  const event = isOctopusToken
+    ? {
+        ...(rawEvent || {}),
+        id: rawEvent?.id || "__octopus_token_event__",
+        name: rawEvent?.name || tile?.name || octopusToken?.name || "Octopus token",
+        image_url: rawEvent?.image_url || tile?.image_url || octopusToken?.image_url || "",
+      }
+    : rawEvent;
   const interactionsById = projection.tile_catalog?.interactions || {};
   const activePlayedCards = activeInteraction?.played_cards || [];
   const selectedCapabilityId = selectedCapability?.id;
@@ -1048,7 +1058,7 @@ const BotPlansOverlay = ({
                 </div>
                 <ol className="mt-3 flex-1 space-y-1 text-xs text-slate-300">
                   {plan.step_preview.map((step, index) => (
-                    <li key={step}>{index + 1}. {step}</li>
+                    <li key={`${plan.plan_id}:step:${index}`}>{index + 1}. {step}</li>
                   ))}
                 </ol>
                 {(plan.warnings || []).length ? <p className="mt-3 text-xs text-amber-200">{plan.warnings?.join(" ")}</p> : null}

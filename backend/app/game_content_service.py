@@ -90,7 +90,7 @@ DEFAULT_ACTION_COSTS = {
 DEFAULT_BOT_SETTINGS = {
     "expected_ap_roll": 3,
     "planning_depth_take_controls": 3,
-    "max_plans": 8,
+    "max_plans": 3,
     "weights": {
         "efficiency": 35,
         "confidence": 35,
@@ -235,6 +235,7 @@ def _default_tokens() -> list[dict[str, Any]]:
             entry.update(
                 {
                     "priority": 0,
+                    "initiator_capability_ids": list(PLAYER_BOARD_ORDER),
                     "interaction_ids": [],
                     "counter_attack_interaction_ids": [],
                     "success_effects": [],
@@ -256,6 +257,13 @@ def _normalize_tokens(raw_tokens: list[dict[str, Any]]) -> list[dict[str, Any]]:
         current["image_filename"] = current.get("image_filename") or None
         if current["id"] == OCTOPUS_TOKEN_ID:
             current["priority"] = int(current.get("priority") or 0)
+            configured_initiators = current.get("initiator_capability_ids")
+            if configured_initiators is None:
+                configured_initiators = list(PLAYER_BOARD_ORDER)
+            selected_initiators = {str(capability_id) for capability_id in configured_initiators or []}
+            current["initiator_capability_ids"] = [
+                capability_id for capability_id in PLAYER_BOARD_ORDER if capability_id in selected_initiators
+            ]
             current["interaction_ids"] = list(current.get("interaction_ids") or [])
             current["counter_attack_interaction_ids"] = list(current.get("counter_attack_interaction_ids") or [])
             current["success_effects"] = list(current.get("success_effects") or [])
@@ -686,7 +694,7 @@ def _normalize_bot_settings(raw_settings: dict[str, Any]) -> dict[str, Any]:
         return normalized
     normalized["expected_ap_roll"] = max(1, min(6, int(raw_settings.get("expected_ap_roll") if raw_settings.get("expected_ap_roll") is not None else normalized["expected_ap_roll"])))
     normalized["planning_depth_take_controls"] = max(1, min(8, int(raw_settings.get("planning_depth_take_controls") if raw_settings.get("planning_depth_take_controls") is not None else normalized["planning_depth_take_controls"])))
-    normalized["max_plans"] = max(3, min(16, int(raw_settings.get("max_plans") if raw_settings.get("max_plans") is not None else normalized["max_plans"])))
+    normalized["max_plans"] = max(1, min(16, int(raw_settings.get("max_plans") if raw_settings.get("max_plans") is not None else normalized["max_plans"])))
     raw_weights = raw_settings.get("weights") if isinstance(raw_settings.get("weights"), dict) else {}
     for key, fallback in DEFAULT_BOT_SETTINGS["weights"].items():
         normalized["weights"][key] = max(0.0, float(raw_weights.get(key) if raw_weights.get(key) is not None else fallback))
@@ -727,6 +735,7 @@ async def update_token(
     token_id: str,
     image: UploadFile | None,
     priority: int | None = None,
+    initiator_capability_ids: list[str] | None = None,
     interaction_ids: list[str] | None = None,
     counter_attack_interaction_ids: list[str] | None = None,
     success_effects: list[dict[str, Any]] | None = None,
@@ -745,7 +754,18 @@ async def update_token(
     if token_id == OCTOPUS_TOKEN_ID:
         interaction_set = {interaction.get("id") for interaction in content["interactions"]}
         category_ids = {category.get("id") for category in content["categories"]}
+        capability_set = set(PLAYER_BOARD_ORDER)
         current["priority"] = int(priority if priority is not None else current.get("priority") or 0)
+        if initiator_capability_ids is not None:
+            unknown_capabilities = [capability_id for capability_id in initiator_capability_ids if capability_id not in capability_set]
+            if unknown_capabilities:
+                raise ValueError("Octopus token initiators must be known player boards.")
+            selected_initiators = {str(capability_id) for capability_id in initiator_capability_ids}
+            current["initiator_capability_ids"] = [
+                capability_id for capability_id in PLAYER_BOARD_ORDER if capability_id in selected_initiators
+            ]
+        elif current.get("initiator_capability_ids") is None:
+            current["initiator_capability_ids"] = list(PLAYER_BOARD_ORDER)
         current["interaction_ids"] = _normalize_interaction_ids(
             interaction_ids if interaction_ids is not None else current.get("interaction_ids") or [],
             interaction_set,

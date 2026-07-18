@@ -143,7 +143,7 @@ const botAbilityOptions = [
 const defaultBotSettings = {
   expected_ap_roll: 3,
   planning_depth_take_controls: 3,
-  max_plans: 8,
+  max_plans: 3,
   weights: {
     efficiency: 35,
     confidence: 35,
@@ -544,6 +544,7 @@ const AdminContentPage = () => {
       if (file) form.set("image", file);
       if (tokenId === "octopus") {
         form.set("priority", String(Number(tokenConfig.priority || 0)));
+        form.set("initiator_capability_ids_json", JSON.stringify(tokenConfig.initiator_capability_ids || []));
         form.set("interaction_ids_json", JSON.stringify(tokenConfig.interaction_ids || []));
         form.set("counter_attack_interaction_ids_json", JSON.stringify(tokenConfig.counter_attack_interaction_ids || []));
         form.set("success_effects_json", JSON.stringify(tokenConfig.success_effects || []));
@@ -1156,16 +1157,16 @@ const BotSettingsEditor = ({ botSettings, onSave, busy }) => {
           />
         </label>
         <label className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3 text-sm">
-          <span className="font-semibold text-teal-950">Max plans shown</span>
-          <span className="mt-1 block text-xs text-slate-500">Upper bound after Pareto pruning. Default is 8.</span>
+          <span className="font-semibold text-teal-950">Max plans per bot</span>
+          <span className="mt-1 block text-xs text-slate-500">Upper bound per proposer after Pareto pruning. Default is 3.</span>
           <input
             className={`${input} mt-3`}
             max="16"
             min="3"
             step="1"
             type="number"
-            value={Number(draft.max_plans || 8)}
-            onChange={(event) => setDraft((current) => ({ ...current, max_plans: Math.max(3, Math.min(16, Number(event.target.value || 8))) }))}
+            value={Number(draft.max_plans || 3)}
+            onChange={(event) => setDraft((current) => ({ ...current, max_plans: Math.max(1, Math.min(16, Number(event.target.value || 3))) }))}
           />
         </label>
       </div>
@@ -1683,6 +1684,7 @@ const TokenEditor = ({ tokens, content, tokenImageRefs, onSave, busy }) => {
   useEffect(() => {
     setDrafts(Object.fromEntries((tokens || []).map((token) => [token.id, {
       priority: Number(token.priority || 0),
+      initiator_capability_ids: token.initiator_capability_ids || [],
       interaction_ids: token.interaction_ids || [],
       counter_attack_interaction_ids: token.counter_attack_interaction_ids || [],
       success_effects: token.success_effects || [],
@@ -1704,6 +1706,15 @@ const TokenEditor = ({ tokens, content, tokenImageRefs, onSave, busy }) => {
       if (selected.has(interactionId)) selected.delete(interactionId);
       else selected.add(interactionId);
       return { ...current, [field]: Array.from(selected) };
+    });
+  };
+
+  const toggleInitiator = (tokenId, capabilityId) => {
+    setTokenDraft(tokenId, (current) => {
+      const selected = new Set(current.initiator_capability_ids || []);
+      if (selected.has(capabilityId)) selected.delete(capabilityId);
+      else selected.add(capabilityId);
+      return { ...current, initiator_capability_ids: Array.from(selected) };
     });
   };
 
@@ -1755,6 +1766,18 @@ const TokenEditor = ({ tokens, content, tokenImageRefs, onSave, busy }) => {
                   <span className="text-slate-600">Priority</span>
                   <input className={`${input} mt-1`} min="0" step="1" type="number" value={draft.priority ?? 0} onChange={(event) => setTokenDraft(token.id, { priority: Number(event.target.value || 0) })} />
                 </label>
+                <div className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3">
+                  <h3 className="text-sm font-semibold text-teal-950">Can initiate interaction</h3>
+                  <div className="mt-2 space-y-2">
+                    {(content.player_boards || []).map((board) => (
+                      <label className="flex items-center gap-2 text-sm text-slate-700" key={board.id}>
+                        <input checked={(draft.initiator_capability_ids || []).includes(board.id)} onChange={() => toggleInitiator(token.id, board.id)} type="checkbox" />
+                        <span className="min-w-0 truncate">{board.name || board.id}</span>
+                      </label>
+                    ))}
+                    {(content.player_boards || []).length === 0 ? <p className="text-xs text-slate-500">Create player boards first.</p> : null}
+                  </div>
+                </div>
                 <InteractionChecklist title="Required to succeed" field="interaction_ids" interactions={content.interactions || []} selected={draft.interaction_ids || []} onToggle={(field, interactionId) => toggleInteraction(token.id, field, interactionId)} />
                 <InteractionChecklist title="Optional counter-attack" field="counter_attack_interaction_ids" interactions={content.interactions || []} selected={draft.counter_attack_interaction_ids || []} onToggle={(field, interactionId) => toggleInteraction(token.id, field, interactionId)} />
                 <EffectEditor title="Success effects" field="success_effects" effects={draft.success_effects || []} options={successEffectOptions} onAdd={(field, type) => addEffect(token.id, field, type)} onUpdate={(field, index, patch) => updateEffect(token.id, field, index, patch)} onRemove={(field, index) => removeEffect(token.id, field, index)} />

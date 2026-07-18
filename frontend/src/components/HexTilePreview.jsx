@@ -69,7 +69,8 @@ const ShellRequirementZone = ({ count = 0 }) => {
 };
 
 const HexTilePreview = ({ tile, event, interactionsById = {}, className = "" }) => {
-  const imageUrl = event?.image_url ? buildApiUrl(event.image_url) : "";
+  const imagePath = event?.image_url || tile?.image_url || "";
+  const imageUrl = imagePath ? buildApiUrl(imagePath) : "";
   return (
     <div className={`relative mx-auto aspect-[1.05/1] w-full max-w-[18rem] ${className}`}>
       <div

@@ -104,7 +104,7 @@ const OctopusBoardToken = ({
   const sizeClass = large ? "h-28 w-28" : "h-10 w-10";
   return (
     <span className="relative flex items-center justify-center bg-transparent">
-      <span className={["absolute z-10", large ? "-top-7" : "-top-5"].join(" ")}>
+      <span className={["absolute z-10", large ? "-top-4" : "-top-2"].join(" ")}>
         <RequirementStrip interactionsById={interactionsById} large={large} tile={tile} />
       </span>
       <span

@@ -497,7 +497,7 @@ def test_bot_plans_after_surprise_can_take_control_for_camouflage_forced_tile():
     run(scenario())
 
 
-def test_bot_plans_prefer_current_active_ability_when_it_can_act():
+def test_bot_plans_keep_current_active_plan_and_show_take_control_alternatives():
     async def scenario():
         service = GameRoomService()
         user = User(id="user_1", username="Player One")
@@ -526,7 +526,10 @@ def test_bot_plans_prefer_current_active_ability_when_it_can_act():
 
         assert plans["status"] == "awaiting_selection"
         assert "collect_force" in plan_ids
-        assert not any(plan_id.startswith("take_control_collect_") for plan_id in plan_ids)
+        assert any(plan_id.startswith("take_control_collect_") for plan_id in plan_ids)
+        active_plan = next(plan for plan in plans["proposals"] if plan["plan_id"] == "collect_force")
+        alternative_plan = next(plan for plan in plans["proposals"] if plan["plan_id"].startswith("take_control_collect_"))
+        assert active_plan["statistics"]["efficiency"] >= alternative_plan["statistics"]["efficiency"]
 
     run(scenario())
 
@@ -1177,6 +1180,100 @@ def test_compulsory_same_node_interactions_follow_highest_priority_first():
         assert rejected_optional["reason"] == "compulsory_interaction_first"
         assert accepted_high["ok"] is True
         assert accepted_high["projection"]["interaction"]["tile_instance_id"] == "tile_shark_high"
+
+    run(scenario())
+
+
+def test_octopus_token_hydrates_tile_definition_and_enforces_initiators():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "force"
+        state["capabilities"]["force"]["pa"] = 1
+        state["tile_catalog"] = {
+            "categories": {},
+            "tiles": {},
+            "events": {},
+            "interactions": {},
+            "tokens": {
+                "octopus": {
+                    "id": "octopus",
+                    "name": "Octopus token",
+                    "image_url": "/api/admin/content/images/octopus.png",
+                    "priority": 7,
+                    "initiator_capability_ids": ["force"],
+                    "interaction_ids": [],
+                    "counter_attack_interaction_ids": [],
+                    "success_effects": [],
+                    "counter_attack_effects": [],
+                    "failure_effects": [],
+                }
+            },
+        }
+        state["tiles"] = {
+            "1A": [
+                {
+                    "instance_id": "octopus_1A",
+                    "tile_id": "__octopus_token__",
+                    "face_up": True,
+                    "token_type": "octopus",
+                }
+            ]
+        }
+
+        accepted = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_start_octopus_allowed",
+            expected_version=1,
+            command_type="start_interaction",
+            payload={"capability_id": "force", "tile_instance_id": "octopus_1A"},
+        )
+
+        assert accepted["ok"] is True
+        assert accepted["projection"]["interaction"]["tile_id"] == "__octopus_token__"
+        assert accepted["projection"]["tile_catalog"]["tiles"]["__octopus_token__"]["image_url"].endswith("octopus.png")
+
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "agility"
+        state["capabilities"]["agility"]["pa"] = 1
+        state["tile_catalog"] = {
+            "categories": {},
+            "tiles": {},
+            "events": {},
+            "interactions": {},
+            "tokens": {
+                "octopus": {
+                    "id": "octopus",
+                    "name": "Octopus token",
+                    "priority": 7,
+                    "initiator_capability_ids": ["force"],
+                    "interaction_ids": [],
+                    "counter_attack_interaction_ids": [],
+                    "success_effects": [],
+                    "counter_attack_effects": [],
+                    "failure_effects": [],
+                }
+            },
+        }
+        state["tiles"] = {"1A": [{"instance_id": "octopus_1A", "tile_id": "__octopus_token__", "face_up": True, "token_type": "octopus"}]}
+
+        rejected = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_start_octopus_rejected",
+            expected_version=1,
+            command_type="start_interaction",
+            payload={"capability_id": "agility", "tile_instance_id": "octopus_1A"},
+        )
+
+        assert rejected["ok"] is False
+        assert rejected["reason"] == "cannot_initiate_interaction"
 
     run(scenario())
 
