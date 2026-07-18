@@ -13,7 +13,7 @@ from typing import Any, Optional
 
 from fastapi import WebSocket
 
-from .bots.planner import generate_bot_plan_status
+from .bots.planner import generate_bot_plan_status, public_bot_plan_status
 from .game_content_service import get_game_content_catalog, get_level_config, get_player_board_configs
 from .map_service import get_map
 from .server_models import User
@@ -1318,7 +1318,7 @@ class GameRoomService:
         if state is None:
             return None
         state = self._state_with_latest_content_metadata(state)
-        return generate_bot_plan_status(state)
+        return public_bot_plan_status(generate_bot_plan_status(state))
 
     async def execute_bot_plan(self, *, room_id: str, user: User, plan_id: str) -> dict[str, Any] | None:
         room = await self._load_room(room_id)

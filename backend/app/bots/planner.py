@@ -76,6 +76,13 @@ def _capability(state: dict[str, Any], ability_id: str) -> dict[str, Any]:
     return (state.get("capabilities") or {}).get(ability_id) or {}
 
 
+def _planner_capability_ids(state: dict[str, Any]) -> list[str]:
+    ids = _controller_ids(state, "bot")
+    if "intelligence" in (state.get("capabilities") or {}):
+        ids.append("intelligence")
+    return ids
+
+
 def _has_control_take_left(capability: dict[str, Any]) -> bool:
     return int(capability.get("control_takes_this_night") or 0) < int(capability.get("max_control_takes_per_night") or 0)
 
@@ -132,6 +139,14 @@ def _interaction_requirements(tile: dict[str, Any]) -> int:
     return len(tile.get("interaction_ids") or []) + max(0, int(tile.get("shell_requirement_count") or 0))
 
 
+def _card_interaction_options(card: dict[str, Any]) -> list[str]:
+    options = [str(interaction_id) for interaction_id in (card.get("interaction_ids") or []) if interaction_id]
+    interaction_id = str(card.get("interaction_id") or "")
+    if interaction_id and interaction_id not in options:
+        options.insert(0, interaction_id)
+    return options
+
+
 def _legal_active_bot(state: dict[str, Any]) -> str | None:
     active_id = str(state.get("active_capability_id") or "")
     if active_id not in _controller_ids(state, "bot"):
@@ -145,6 +160,94 @@ def _interaction_commands(ability_id: str, entry: dict[str, Any]) -> list[dict[s
     if _interaction_requirements(tile) == 0:
         commands.append({"type": "resolve_interaction", "payload": {"capability_id": ability_id}})
     return commands
+
+
+def _selected_cards_for_requirements(capability: dict[str, Any], required_interaction_ids: list[str]) -> list[str] | None:
+    remaining = [str(interaction_id) for interaction_id in required_interaction_ids if interaction_id]
+    selected: list[str] = []
+    for card in capability.get("hand") or []:
+        if not remaining:
+            break
+        match = next((interaction_id for interaction_id in remaining if interaction_id in _card_interaction_options(card)), None)
+        if match:
+            remaining.remove(match)
+            selected.append(str(card.get("card_id")))
+    return selected if not remaining else None
+
+
+def _surprise_accept_payloads(state: dict[str, Any], card: dict[str, Any]) -> list[dict[str, Any]]:
+    costs = card.get("costs") or []
+    if not costs:
+        return [{"accept": True}]
+    payloads = []
+    for capability_id in _planner_capability_ids(state):
+        capability = _capability(state, capability_id)
+        selected_card_ids: list[str] = []
+        payable = True
+        for cost in costs:
+            cost_type = str(cost.get("type") or "")
+            if cost_type == "play_cards":
+                selected = _selected_cards_for_requirements(capability, [str(interaction_id) for interaction_id in cost.get("interaction_ids") or []])
+                if selected is None:
+                    payable = False
+                    break
+                selected_card_ids.extend(selected)
+            elif cost_type == "pay_ap":
+                payer_id = str(cost.get("capability_id") or capability_id)
+                payer = _capability(state, payer_id)
+                if int(payer.get("pa") or 0) < max(1, int(cost.get("amount") or 1)):
+                    payable = False
+                    break
+            else:
+                payable = False
+                break
+        if payable:
+            payloads.append({"accept": True, "capability_id": capability_id, "card_ids": selected_card_ids})
+    return payloads
+
+
+def _surprise_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
+    card = ((state.get("pending_surprise") or {}).get("card") or {})
+    if not card:
+        return []
+    costs = card.get("costs") or []
+    proposals = []
+    for payload in _surprise_accept_payloads(state, card):
+        capability_id = payload.get("capability_id")
+        capability_name = (_capability(state, str(capability_id)).get("name") if capability_id else "") or "Team"
+        proposals.append(
+            _public_plan(
+                plan_id=f"surprise_accept_{capability_id or 'free'}",
+                proposer_ability_id=str(capability_id) if capability_id else None,
+                title=f"Resolve surprise: {card.get('name') or 'Surprise'}",
+                rationale="A surprise card is pending. This plan resolves it before returning to board planning.",
+                risk_label="low" if not costs else "moderate",
+                step_preview=[
+                    "Acknowledge automatic effect" if not costs else f"{capability_name} pays the optional cost",
+                    "Apply surprise effects",
+                    "Recalculate board plans",
+                ],
+                expected_resources=_resource_estimate(),
+                score=90 if not costs else 75,
+                warnings=[] if not costs else ["Private card identities are hidden from the public proposal."],
+                commands=[{"type": "resolve_surprise_card", "payload": payload}],
+            )
+        )
+    if costs:
+        proposals.append(
+            _public_plan(
+                plan_id="surprise_skip",
+                proposer_ability_id=None,
+                title=f"Do not pay: {card.get('name') or 'Surprise'}",
+                rationale="Surprise costs are optional. The team can skip the cost and return to board planning.",
+                risk_label="low",
+                step_preview=["Decline the optional surprise cost", "Discard the pending surprise decision", "Recalculate board plans"],
+                expected_resources=_resource_estimate(),
+                score=40,
+                commands=[{"type": "resolve_surprise_card", "payload": {"accept": False}}],
+            )
+        )
+    return proposals
 
 
 def _forced_interaction_plan(
@@ -226,14 +329,34 @@ def _night_idle_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _active_night_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
     proposals = []
+    current_node_id = str((state.get("poulpita") or {}).get("node_id") or "")
+    current_compulsory = _compulsory_choices_on_node(state, current_node_id)
+    interact_cost = _action_cost(state, "interact")
+    if current_compulsory and not state.get("interaction"):
+        active_capability_id = str(state.get("active_capability_id") or "")
+        for ability_id in _controller_ids(state, "bot"):
+            capability = _capability(state, ability_id)
+            if ability_id != active_capability_id and not _has_control_take_left(capability):
+                continue
+            for entry in current_compulsory:
+                if _can_initiate(state, ability_id, entry["tile"]):
+                    proposals.append(
+                        _forced_interaction_plan(
+                            state,
+                            ability_id=ability_id,
+                            entry=entry,
+                            include_take_control=ability_id != active_capability_id,
+                            score=105 if ability_id != active_capability_id else 110,
+                        )
+                    )
+                    break
+        if proposals:
+            return proposals
     active_id = _legal_active_bot(state)
     if not active_id:
         return proposals
     capability = _capability(state, active_id)
     name = capability.get("name") or active_id
-    current_node_id = str((state.get("poulpita") or {}).get("node_id") or "")
-    current_compulsory = _compulsory_choices_on_node(state, current_node_id)
-    interact_cost = _action_cost(state, "interact")
     if current_compulsory and int(capability.get("pa") or 0) >= interact_cost["ap_cost"] and not state.get("interaction"):
         for entry in current_compulsory:
             if _can_initiate(state, active_id, entry["tile"]):
@@ -382,15 +505,18 @@ def generate_bot_plan_status(state: dict[str, Any]) -> dict[str, Any]:
             "proposals": [],
             "message": "Bot planning is disabled for this room.",
         }
-    phase = str(state.get("phase") or "")
-    if phase == "night_idle":
-        proposals = _night_idle_proposals(state)
-    elif phase == "night_action":
-        proposals = _active_night_proposals(state)
-    elif phase == "day":
-        proposals = _day_proposals(state)
+    if state.get("pending_surprise"):
+        proposals = _surprise_proposals(state)
     else:
-        proposals = []
+        phase = str(state.get("phase") or "")
+        if phase == "night_idle":
+            proposals = _night_idle_proposals(state)
+        elif phase == "night_action":
+            proposals = _active_night_proposals(state)
+        elif phase == "day":
+            proposals = _day_proposals(state)
+        else:
+            proposals = []
     proposals = sorted(proposals, key=lambda proposal: float(proposal.pop("_score", 0)), reverse=True)[:5]
     return {
         "status": "awaiting_selection" if proposals else "idle",
@@ -399,3 +525,12 @@ def generate_bot_plan_status(state: dict[str, Any]) -> dict[str, Any]:
         "proposals": proposals,
         "message": "" if proposals else "No bot proposals are available for the current state.",
     }
+
+
+def public_bot_plan_status(status: dict[str, Any]) -> dict[str, Any]:
+    public_status = dict(status)
+    public_status["proposals"] = [
+        {key: value for key, value in dict(proposal).items() if key not in {"commands", "_score", "private_basis"}}
+        for proposal in status.get("proposals") or []
+    ]
+    return public_status
