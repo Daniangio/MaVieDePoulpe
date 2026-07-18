@@ -83,6 +83,14 @@ def _planner_capability_ids(state: dict[str, Any]) -> list[str]:
     return ids
 
 
+def _all_capability_ids(state: dict[str, Any]) -> list[str]:
+    preferred = ["agility", "camouflage", "force", "propulsion", "intelligence"]
+    capabilities = state.get("capabilities") or {}
+    ordered = [capability_id for capability_id in preferred if capability_id in capabilities]
+    ordered.extend(capability_id for capability_id in capabilities if capability_id not in ordered)
+    return ordered
+
+
 def _has_control_take_left(capability: dict[str, Any]) -> bool:
     return int(capability.get("control_takes_this_night") or 0) < int(capability.get("max_control_takes_per_night") or 0)
 
@@ -147,11 +155,27 @@ def _card_interaction_options(card: dict[str, Any]) -> list[str]:
     return options
 
 
-def _legal_active_bot(state: dict[str, Any]) -> str | None:
+def _legal_active_actor(state: dict[str, Any]) -> str | None:
     active_id = str(state.get("active_capability_id") or "")
-    if active_id not in _controller_ids(state, "bot"):
+    if active_id not in (state.get("capabilities") or {}):
         return None
     return active_id if _action_slots_left(_capability(state, active_id)) > 0 else None
+
+
+def _forced_actor_candidates(state: dict[str, Any]) -> list[tuple[str, bool]]:
+    active_id = str(state.get("active_capability_id") or "")
+    candidates: list[tuple[str, bool]] = []
+    if active_id in (state.get("capabilities") or {}) and _action_slots_left(_capability(state, active_id)) > 0:
+        candidates.append((active_id, False))
+    for ability_id in _all_capability_ids(state):
+        if ability_id == active_id:
+            continue
+        capability = _capability(state, ability_id)
+        if ability_id == "intelligence":
+            continue
+        if _has_control_take_left(capability):
+            candidates.append((ability_id, True))
+    return candidates
 
 
 def _interaction_commands(ability_id: str, entry: dict[str, Any]) -> list[dict[str, Any]]:
@@ -293,6 +317,30 @@ def _forced_interaction_plan(
     )
 
 
+def _forced_blocker_plan(state: dict[str, Any], compulsory: list[dict[str, Any]]) -> dict[str, Any]:
+    names = []
+    catalog_events = (state.get("tile_catalog") or {}).get("events") or {}
+    for entry in compulsory:
+        tile = entry.get("tile") or {}
+        event = catalog_events.get(tile.get("event_id")) or {}
+        names.append(str(event.get("name") or tile.get("name") or tile.get("id") or "forced tile"))
+    return _public_plan(
+        plan_id="forced_tile_needs_manual_resolution",
+        proposer_ability_id=None,
+        title="Forced tile needs manual resolution",
+        rationale="A compulsory tile is revealed on Poulpita's node, but the planner could not find an ability with both legal initiation and available control/action capacity.",
+        risk_label="forced",
+        step_preview=[
+            f"Resolve: {', '.join(names[:3])}",
+            "Check that the correct ability can initiate this event",
+            "Take control, collect AP, or adjust the content configuration if needed",
+        ],
+        expected_resources=_resource_estimate(),
+        score=60,
+        warnings=["No movement plans are shown because the current compulsory tile blocks optional planning."],
+    )
+
+
 def _night_idle_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
     proposals = []
     current_node_id = str((state.get("poulpita") or {}).get("node_id") or "")
@@ -333,11 +381,7 @@ def _active_night_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
     current_compulsory = _compulsory_choices_on_node(state, current_node_id)
     interact_cost = _action_cost(state, "interact")
     if current_compulsory and not state.get("interaction"):
-        active_capability_id = str(state.get("active_capability_id") or "")
-        for ability_id in _controller_ids(state, "bot"):
-            capability = _capability(state, ability_id)
-            if ability_id != active_capability_id and not _has_control_take_left(capability):
-                continue
+        for ability_id, include_take_control in _forced_actor_candidates(state):
             for entry in current_compulsory:
                 if _can_initiate(state, ability_id, entry["tile"]):
                     proposals.append(
@@ -345,14 +389,15 @@ def _active_night_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
                             state,
                             ability_id=ability_id,
                             entry=entry,
-                            include_take_control=ability_id != active_capability_id,
-                            score=105 if ability_id != active_capability_id else 110,
+                            include_take_control=include_take_control,
+                            score=105 if include_take_control else 115,
                         )
                     )
                     break
         if proposals:
-            return proposals
-    active_id = _legal_active_bot(state)
+            return sorted(proposals, key=lambda proposal: float(proposal.get("_score") or 0), reverse=True)[:3]
+        return [_forced_blocker_plan(state, current_compulsory)]
+    active_id = _legal_active_actor(state)
     if not active_id:
         return proposals
     capability = _capability(state, active_id)

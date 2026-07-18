@@ -465,6 +465,82 @@ def test_bot_plans_after_surprise_can_take_control_for_camouflage_forced_tile():
     run(scenario())
 
 
+def test_bot_plans_prefer_current_active_ability_when_it_can_act():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+        room = await service.create_room(user=user, mode="solo_with_bots", game_type="goldfish", human_ability_id="force")
+        await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_start_active_team_plan",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "goldfish",
+                "expected_version": 0,
+                "type": "start_goldfish_game",
+                "payload": {},
+            },
+        )
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "force"
+        state["capabilities"]["force"]["pa"] = 2
+        state["capabilities"]["force"]["actions_taken_this_control"] = 0
+
+        plans = await service.get_bot_plans(room_id=room["id"], user=user)
+        plan_ids = [plan["plan_id"] for plan in plans["proposals"]]
+
+        assert plans["status"] == "awaiting_selection"
+        assert "collect_force" in plan_ids
+        assert not any(plan_id.startswith("take_control_collect_") for plan_id in plan_ids)
+
+    run(scenario())
+
+
+def test_forced_current_tile_reports_manual_blocker_instead_of_empty_plans():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+        room = await service.create_room(user=user, mode="solo_with_bots", game_type="goldfish", human_ability_id="force")
+        await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_start_blocked_forced_plan",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "goldfish",
+                "expected_version": 0,
+                "type": "start_goldfish_game",
+                "payload": {},
+            },
+        )
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "force"
+        state["capabilities"]["force"]["initiates_event_ids"] = []
+        for capability in state["capabilities"].values():
+            capability["initiates_event_ids"] = []
+            capability["control_takes_this_night"] = capability["max_control_takes_per_night"]
+        state["tile_catalog"] = {
+            "categories": {"threat": {"id": "threat", "name": "Threat", "compulsory_on_same_node": True}},
+            "events": {"moray": {"id": "moray", "name": "Moray", "category_id": "threat"}},
+            "tiles": {"moray-tile": {"id": "moray-tile", "event_id": "moray", "priority": 10, "interaction_ids": []}},
+            "interactions": {},
+        }
+        state["tiles"] = {"1A": [{"instance_id": "tile_moray", "tile_id": "moray-tile", "face_up": True}]}
+
+        plans = await service.get_bot_plans(room_id=room["id"], user=user)
+
+        assert plans["status"] == "awaiting_selection"
+        assert plans["proposals"][0]["plan_id"] == "forced_tile_needs_manual_resolution"
+        assert plans["proposals"][0]["risk_label"] == "forced"
+
+    run(scenario())
+
+
 def test_start_goldfish_game_initializes_16_node_board():
     async def scenario():
         service, user, room, start = await create_started_room()
