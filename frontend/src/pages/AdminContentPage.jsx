@@ -21,6 +21,7 @@ const emptyTile = {
   name: "",
   event_id: "",
   priority: 0,
+  shell_requirement_count: 0,
   interaction_ids: [],
   counter_attack_interaction_ids: [],
   success_effects: [],
@@ -86,6 +87,7 @@ const contentTabs = [
   ["events", "Events/Animals"],
   ["tiles", "Tiles"],
   ["cards", "Cards"],
+  ["action_costs", "Action Costs"],
   ["surprise_cards", "Surprise Cards"],
   ["surprise_decks", "Surprise Decks"],
   ["player_boards", "Player Boards"],
@@ -110,7 +112,22 @@ const importSummaryLabels = {
   surprise_decks: "Surprise Decks",
   player_boards: "Player Boards",
   tokens: "Tokens",
+  action_costs: "Action Costs",
   poulpita_panel: "Poulpita Panel",
+};
+
+const actionCostLabels = {
+  gain_ap: "Gain AP",
+  move: "Move",
+  interact: "Interact",
+  special_power: "Use special power",
+};
+
+const defaultActionCosts = {
+  gain_ap: { ap_cost: 0, time_cost: 0 },
+  move: { ap_cost: 1, time_cost: 1 },
+  interact: { ap_cost: 1, time_cost: 2 },
+  special_power: { ap_cost: 1, time_cost: 0 },
 };
 
 const formatImportSummary = (result) => {
@@ -130,7 +147,7 @@ const formatImportSummary = (result) => {
 
 const AdminContentPage = () => {
   const { token, user } = useStore();
-  const [content, setContent] = useState({ categories: [], card_categories: [], interactions: [], events: [], tiles: [], levels: [], surprise_cards: [], surprise_decks: [], player_boards: [], tokens: [], poulpita_panel: null, cards: [] });
+  const [content, setContent] = useState({ categories: [], card_categories: [], interactions: [], events: [], tiles: [], levels: [], surprise_cards: [], surprise_decks: [], player_boards: [], tokens: [], poulpita_panel: null, action_costs: defaultActionCosts, cards: [] });
   const [categoryName, setCategoryName] = useState("");
   const [categoryCompulsory, setCategoryCompulsory] = useState(false);
   const [interactionDraft, setInteractionDraft] = useState(emptyInteraction);
@@ -349,6 +366,7 @@ const AdminContentPage = () => {
       form.set("name", tileDraft.name);
       form.set("event_id", tileDraft.event_id);
       form.set("priority", String(Number(tileDraft.priority || 0)));
+      form.set("shell_requirement_count", String(Math.max(0, Number(tileDraft.shell_requirement_count || 0))));
       form.set("interaction_ids_json", JSON.stringify(tileDraft.interaction_ids || []));
       form.set("counter_attack_interaction_ids_json", JSON.stringify(tileDraft.counter_attack_interaction_ids || []));
       form.set("success_effects_json", JSON.stringify(tileDraft.success_effects || []));
@@ -427,6 +445,21 @@ const AdminContentPage = () => {
       await loadContent();
     } catch (saveError) {
       setError(saveError.message || "Failed to save player board.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveActionCosts = async (actionCosts) => {
+    setBusy(true);
+    setError("");
+    try {
+      const form = new FormData();
+      form.set("action_costs_json", JSON.stringify(actionCosts || {}));
+      await request("/api/admin/content/action-costs", { method: "PUT", body: form });
+      await loadContent();
+    } catch (saveError) {
+      setError(saveError.message || "Failed to save action costs.");
     } finally {
       setBusy(false);
     }
@@ -709,6 +742,14 @@ const AdminContentPage = () => {
 
       {activeTab === "cards" ? <CardsView cardCategories={cardCategories} content={content} /> : null}
 
+      {activeTab === "action_costs" ? (
+        <ActionCostEditor
+          actionCosts={content.action_costs || defaultActionCosts}
+          busy={busy}
+          onSave={saveActionCosts}
+        />
+      ) : null}
+
       {activeTab === "surprise_cards" ? (
         <SurpriseCardEditor
           busy={busy}
@@ -889,6 +930,17 @@ const TileEditor = ({ addEffect, busy, categoriesById, content, deleteItem, even
             onChange={(event) => setTileDraft((current) => ({ ...current, priority: Number(event.target.value || 0) }))}
           />
         </label>
+        <label className="block text-sm">
+          <span className="text-slate-600">Poulpita shells required</span>
+          <input
+            className={`${input} mt-1`}
+            min="0"
+            step="1"
+            type="number"
+            value={tileDraft.shell_requirement_count ?? 0}
+            onChange={(event) => setTileDraft((current) => ({ ...current, shell_requirement_count: Math.max(0, Number(event.target.value || 0)) }))}
+          />
+        </label>
         <InteractionChecklist title="Required to succeed" field="interaction_ids" interactions={content.interactions} selected={tileDraft.interaction_ids} onToggle={toggleTileInteraction} />
         <InteractionChecklist title="Optional counter-attack" field="counter_attack_interaction_ids" interactions={content.interactions} selected={tileDraft.counter_attack_interaction_ids} onToggle={toggleTileInteraction} />
         <EffectEditor title="Success effects" field="success_effects" effects={tileDraft.success_effects} options={successEffectOptions} onAdd={addEffect} onUpdate={updateEffect} onRemove={removeEffect} />
@@ -916,6 +968,53 @@ const CardsView = ({ cardCategories, content }) => (
     </div>
   </section>
 );
+
+const ActionCostEditor = ({ actionCosts, onSave, busy }) => {
+  const [draft, setDraft] = useState({ ...defaultActionCosts, ...(actionCosts || {}) });
+
+  useEffect(() => {
+    setDraft({ ...defaultActionCosts, ...(actionCosts || {}) });
+  }, [actionCosts]);
+
+  const updateCost = (actionId, field, value) => {
+    setDraft((current) => ({
+      ...current,
+      [actionId]: {
+        ...(current[actionId] || defaultActionCosts[actionId]),
+        [field]: Math.max(0, Number(value || 0)),
+      },
+    }));
+  };
+
+  return (
+    <section className={panel}>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="font-semibold text-teal-950">Action Costs</h2>
+          <p className="mt-1 text-xs text-slate-500">Time cost is measured in 15-minute night-track steps.</p>
+        </div>
+        <button className={primaryButton} disabled={busy} onClick={() => onSave(draft)} type="button">Save action costs</button>
+      </div>
+      <div className="mt-4 grid gap-3 md:grid-cols-2">
+        {Object.entries(actionCostLabels).map(([actionId, label]) => (
+          <article className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3" key={actionId}>
+            <h3 className="text-sm font-semibold text-teal-950">{label}</h3>
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <label className="text-xs text-slate-600">
+                AP cost
+                <input className={`${input} mt-1`} min="0" type="number" value={Number(draft[actionId]?.ap_cost || 0)} onChange={(event) => updateCost(actionId, "ap_cost", event.target.value)} />
+              </label>
+              <label className="text-xs text-slate-600">
+                Time steps
+                <input className={`${input} mt-1`} min="0" type="number" value={Number(draft[actionId]?.time_cost || 0)} onChange={(event) => updateCost(actionId, "time_cost", event.target.value)} />
+              </label>
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+};
 
 const abilityOptions = [
   ["", "Any focused ability"],
@@ -1631,7 +1730,10 @@ const TileList = ({ content, eventsById, categoriesById, interactionsById, setTi
           <h3 className="mt-3 truncate font-semibold text-teal-950">{tile.name}</h3>
           <p className="text-xs text-slate-500">{event?.name || "Missing event"} - {categoriesById[event?.category_id]?.name || "No category"}</p>
           <p className="mt-1 text-xs text-slate-600">Priority: {Number(tile.priority || 0)}</p>
-          <p className="mt-3 text-xs text-slate-600">Success: {(tile.interaction_ids || []).length ? (tile.interaction_ids || []).map((id) => interactionsById[id]?.name || id).join(", ") : "Always succeeds"}</p>
+          <p className="mt-3 text-xs text-slate-600">
+            Success: {(tile.interaction_ids || []).length ? (tile.interaction_ids || []).map((id) => interactionsById[id]?.name || id).join(", ") : "No cards"}
+            {Number(tile.shell_requirement_count || 0) > 0 ? ` + ${tile.shell_requirement_count} shell${Number(tile.shell_requirement_count || 0) === 1 ? "" : "s"}` : ""}
+          </p>
           <p className="mt-1 text-xs text-slate-600">Counter: {(tile.counter_attack_interaction_ids || []).map((id) => interactionsById[id]?.name || id).join(", ") || "None"}</p>
           <div className="mt-3 flex gap-2">
             <button className={subtleButton} onClick={() => setTileDraft({ ...emptyTile, ...tile })} type="button">Edit</button>

@@ -383,6 +383,7 @@ def _build_tile_catalog() -> dict[str, Any]:
         "card_categories": catalog.get("card_categories") or [],
         "tokens": token_catalog,
         "poulpita_panel": catalog.get("poulpita_panel") or {},
+        "action_costs": catalog.get("action_costs") or {},
     }
 
 
@@ -549,6 +550,7 @@ def _project_state(state: dict[str, Any]) -> dict[str, Any]:
         tile_catalog["poulpita_panel"] = latest_catalog.get("poulpita_panel") or tile_catalog.get("poulpita_panel") or {}
         tile_catalog["surprise_cards"] = latest_catalog.get("surprise_cards") or tile_catalog.get("surprise_cards") or {}
         tile_catalog["surprise_decks"] = latest_catalog.get("surprise_decks") or tile_catalog.get("surprise_decks") or {}
+        tile_catalog["action_costs"] = latest_catalog.get("action_costs") or tile_catalog.get("action_costs") or {}
     except Exception:
         pass
     projected_tiles = {}
@@ -601,6 +603,21 @@ def _project_state(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _configured_action_cost(state: dict[str, Any], action_id: str) -> dict[str, int]:
+    defaults = {
+        "gain_ap": {"ap_cost": 0, "time_cost": 0},
+        "move": {"ap_cost": 1, "time_cost": 1},
+        "interact": {"ap_cost": 1, "time_cost": 2},
+        "special_power": {"ap_cost": 1, "time_cost": 0},
+    }
+    raw = ((state.get("tile_catalog") or {}).get("action_costs") or {}).get(action_id) or {}
+    fallback = defaults.get(action_id) or {"ap_cost": 0, "time_cost": 0}
+    return {
+        "ap_cost": max(0, int(raw.get("ap_cost") if raw.get("ap_cost") is not None else fallback["ap_cost"])),
+        "time_cost": max(0, int(raw.get("time_cost") if raw.get("time_cost") is not None else fallback["time_cost"])),
+    }
+
+
 def _require_active_action(service: "GameRoomService", state: dict[str, Any], command_id: str, capability_id: str, *, ap_cost: int = 0) -> dict[str, Any]:
     capability = _require_active_control(service, state, command_id, capability_id)
     if int(capability.get("pa") or 0) < ap_cost:
@@ -631,12 +648,12 @@ def _reset_night_runtime(next_state: dict[str, Any]) -> None:
         capability["actions_taken_this_control"] = 0
 
 
-def _spend_action(next_state: dict[str, Any], capability_id: str, *, ap_cost: int = 0) -> None:
+def _spend_action(next_state: dict[str, Any], capability_id: str, *, ap_cost: int = 0, time_cost: int = 0) -> None:
     capability = next_state["capabilities"][capability_id]
     capability["pa"] = int(capability.get("pa") or 0) - ap_cost
     capability["actions_taken_this_control"] = int(capability.get("actions_taken_this_control") or 0) + 1
-    if ap_cost > 0:
-        _advance_night_clock(next_state, chunks=ap_cost)
+    if time_cost > 0:
+        _advance_night_clock(next_state, chunks=time_cost)
 
 
 def _advance_night_clock(next_state: dict[str, Any], *, chunks: int = 1) -> None:
@@ -902,6 +919,25 @@ def _criteria_met(required: list[str], played: list[str]) -> bool:
         if interaction_id in remaining:
             remaining.remove(interaction_id)
     return not remaining
+
+
+def _shell_requirement_count(tile: dict[str, Any]) -> int:
+    return max(0, int(tile.get("shell_requirement_count") or 0))
+
+
+def _shell_requirement_met(state: dict[str, Any], tile: dict[str, Any]) -> bool:
+    required = _shell_requirement_count(tile)
+    if required <= 0:
+        return True
+    return int((state.get("poulpita") or {}).get("seashells") or 0) >= required
+
+
+def _spend_required_shells(next_state: dict[str, Any], tile: dict[str, Any]) -> None:
+    required = _shell_requirement_count(tile)
+    if required <= 0:
+        return
+    poulpita = next_state.setdefault("poulpita", {})
+    poulpita["seashells"] = max(0, int(poulpita.get("seashells") or 0) - required)
 
 
 def _apply_effects(next_state: dict[str, Any], effects: list[dict[str, Any]], *, node_id: str | None = None) -> None:
@@ -1320,6 +1356,7 @@ class GameRoomService:
             next_state.setdefault("tile_catalog", {})["poulpita_panel"] = latest_catalog.get("poulpita_panel") or next_state["tile_catalog"].get("poulpita_panel") or {}
             next_state.setdefault("tile_catalog", {})["surprise_cards"] = latest_catalog.get("surprise_cards") or next_state["tile_catalog"].get("surprise_cards") or {}
             next_state.setdefault("tile_catalog", {})["surprise_decks"] = latest_catalog.get("surprise_decks") or next_state["tile_catalog"].get("surprise_decks") or {}
+            next_state.setdefault("tile_catalog", {})["action_costs"] = latest_catalog.get("action_costs") or next_state["tile_catalog"].get("action_costs") or {}
         except Exception:
             return state
         return next_state
@@ -1438,7 +1475,8 @@ class GameRoomService:
                 self._reject(state, command_id, "invalid_payload", "Command payload must be an object.")
             capability_id = str(payload.get("capability_id") or "")
             target_node_id = str(payload.get("target_node_id") or "")
-            _require_active_action(self, state, command_id, capability_id, ap_cost=1)
+            action_cost = _configured_action_cost(state, "move")
+            _require_active_action(self, state, command_id, capability_id, ap_cost=action_cost["ap_cost"])
             nodes = state["map"]["nodes"]
             if target_node_id not in nodes:
                 self._reject(state, command_id, "unknown_target_node", "Target node does not exist.")
@@ -1449,7 +1487,7 @@ class GameRoomService:
             next_state["version"] = int(state["version"]) + 1
             next_state["poulpita"]["previous_node_id"] = current_node_id
             next_state["poulpita"]["node_id"] = target_node_id
-            _spend_action(next_state, capability_id, ap_cost=1)
+            _spend_action(next_state, capability_id, ap_cost=action_cost["ap_cost"], time_cost=action_cost["time_cost"])
             _apply_tile_visibility(next_state)
             _mark_game_lost_if_needed(next_state)
             event = {
@@ -1765,13 +1803,14 @@ class GameRoomService:
             if not isinstance(payload, dict):
                 self._reject(state, command_id, "invalid_payload", "Command payload must be an object.")
             capability_id = str(payload.get("capability_id") or "")
-            _require_active_action(self, state, command_id, capability_id)
+            action_cost = _configured_action_cost(state, "gain_ap")
+            _require_active_action(self, state, command_id, capability_id, ap_cost=action_cost["ap_cost"])
             amount = random.randint(1, 6)
             next_state = deepcopy(state)
             next_state["version"] = int(state["version"]) + 1
             next_capability = next_state["capabilities"][capability_id]
             next_capability["pa"] = int(next_capability.get("pa") or 0) + amount
-            next_capability["actions_taken_this_control"] = int(next_capability.get("actions_taken_this_control") or 0) + 1
+            _spend_action(next_state, capability_id, ap_cost=action_cost["ap_cost"], time_cost=action_cost["time_cost"])
             _mark_game_lost_if_needed(next_state)
             event = {
                 "event_id": f"evt_{uuid.uuid4().hex}",
@@ -1790,7 +1829,8 @@ class GameRoomService:
             if not isinstance(payload, dict):
                 self._reject(state, command_id, "invalid_payload", "Command payload must be an object.")
             capability_id = str(payload.get("capability_id") or "")
-            capability = _require_active_action(self, state, command_id, capability_id, ap_cost=1)
+            action_cost = _configured_action_cost(state, "special_power")
+            capability = _require_active_action(self, state, command_id, capability_id, ap_cost=action_cost["ap_cost"])
             discard_card_id = str(payload.get("discard_card_id") or "").strip()
             hand = capability.get("hand") or []
             hand_limit = int(capability.get("current_max_cards_in_hand") or 3)
@@ -1819,7 +1859,7 @@ class GameRoomService:
             card = next_capability["draw_pile"].pop(0)
             next_capability.setdefault("hand", []).append(card)
             _refill_draw_pile_from_discard(next_capability)
-            _spend_action(next_state, capability_id, ap_cost=1)
+            _spend_action(next_state, capability_id, ap_cost=action_cost["ap_cost"], time_cost=action_cost["time_cost"])
             next_state["version"] = int(state["version"]) + 1
             _mark_game_lost_if_needed(next_state)
             event = {
@@ -1842,7 +1882,8 @@ class GameRoomService:
             capability_id = str(payload.get("capability_id") or "")
             tile_instance_id = str(payload.get("tile_instance_id") or "")
             selected_card_ids = [str(card_id) for card_id in (payload.get("card_ids") or [])]
-            _require_active_action(self, state, command_id, capability_id)
+            action_cost = _configured_action_cost(state, "interact")
+            _require_active_action(self, state, command_id, capability_id, ap_cost=action_cost["ap_cost"])
             if state.get("interaction"):
                 self._reject(state, command_id, "interaction_already_active", "Resolve or fail the current interaction first.")
             node_id, tile_instance = _find_tile_instance(state, tile_instance_id)
@@ -1883,7 +1924,7 @@ class GameRoomService:
                 _sync_interaction_cards(next_state, capability_id, selected_card_ids)
             except ValueError as exc:
                 self._reject(state, command_id, "invalid_selected_cards", str(exc))
-            _spend_action(next_state, capability_id)
+            _spend_action(next_state, capability_id, ap_cost=action_cost["ap_cost"], time_cost=action_cost["time_cost"])
             next_state["version"] = int(state["version"]) + 1
             _mark_game_lost_if_needed(next_state)
             event = {
@@ -1963,7 +2004,7 @@ class GameRoomService:
                     except ValueError as exc:
                         self._reject(state, command_id, "invalid_selected_cards", str(exc))
                 played = _played_interactions(next_state)
-                success = _criteria_met(tile.get("interaction_ids") or [], played)
+                success = _criteria_met(tile.get("interaction_ids") or [], played) and _shell_requirement_met(next_state, tile)
                 counter_required = tile.get("counter_attack_interaction_ids") or []
                 counter_success = success and bool(counter_required) and _criteria_met(counter_required, played)
                 if not success:
@@ -1980,6 +2021,7 @@ class GameRoomService:
                     }
                     next_state.setdefault("event_log", []).append(event)
                     return next_state, [event]
+                _spend_required_shells(next_state, tile)
                 _apply_effects(next_state, tile.get("success_effects") or [], node_id=str(interaction.get("node_id") or ""))
                 if counter_success:
                     _apply_effects(next_state, tile.get("counter_attack_effects") or [], node_id=str(interaction.get("node_id") or ""))

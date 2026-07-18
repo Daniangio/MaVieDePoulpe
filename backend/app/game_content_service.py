@@ -80,6 +80,13 @@ ADMIN_CONTENT_COLLECTION_KEYS = [
     "player_boards",
     "tokens",
 ]
+ACTION_COST_KEYS = ["gain_ap", "move", "interact", "special_power"]
+DEFAULT_ACTION_COSTS = {
+    "gain_ap": {"ap_cost": 0, "time_cost": 0},
+    "move": {"ap_cost": 1, "time_cost": 1},
+    "interact": {"ap_cost": 1, "time_cost": 2},
+    "special_power": {"ap_cost": 1, "time_cost": 0},
+}
 
 
 def _slug(value: str) -> str:
@@ -99,6 +106,7 @@ def _empty_content() -> dict[str, Any]:
         "player_boards": _default_player_boards(),
         "tokens": _default_tokens(),
         "poulpita_panel": _default_poulpita_panel(),
+        "action_costs": deepcopy(DEFAULT_ACTION_COSTS),
     }
 
 
@@ -527,6 +535,7 @@ def get_content_state() -> dict[str, Any]:
         "player_boards": [dict(board) for board in content.get("player_boards", [])],
         "tokens": [_with_urls(token) for token in content.get("tokens", [])],
         "poulpita_panel": _poulpita_panel_with_urls(content.get("poulpita_panel") or _default_poulpita_panel()),
+        "action_costs": deepcopy(content.get("action_costs") or DEFAULT_ACTION_COSTS),
         "cards": _generated_cards(content),
     }
 
@@ -540,6 +549,7 @@ def export_admin_content_package(*, maps: list[dict[str, Any]]) -> dict[str, Any
             {
                 **{key: content.get(key, []) for key in ADMIN_CONTENT_COLLECTION_KEYS},
                 "poulpita_panel": content.get("poulpita_panel") or _default_poulpita_panel(),
+                "action_costs": content.get("action_costs") or DEFAULT_ACTION_COSTS,
             }
         ),
     }
@@ -552,7 +562,7 @@ def import_admin_content_package(package: dict[str, Any]) -> dict[str, Any]:
     if imported_content is None:
         imported_content = {
             key: package.get(key)
-            for key in [*ADMIN_CONTENT_COLLECTION_KEYS, "poulpita_panel"]
+            for key in [*ADMIN_CONTENT_COLLECTION_KEYS, "poulpita_panel", "action_costs"]
             if key in package
         }
     if not isinstance(imported_content, dict):
@@ -573,6 +583,12 @@ def import_admin_content_package(package: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("poulpita_panel must be a JSON object.")
         content["poulpita_panel"] = _normalize_poulpita_panel(panel)
         summary["updated"]["poulpita_panel"] = 1
+    if "action_costs" in imported_content:
+        action_costs = imported_content.get("action_costs") or {}
+        if not isinstance(action_costs, dict):
+            raise ValueError("action_costs must be a JSON object.")
+        content["action_costs"] = _normalize_action_costs(action_costs)
+        summary["updated"]["action_costs"] = 1
     _write_content(_read_content_from_value(content))
     return summary
 
@@ -586,6 +602,7 @@ def _read_content_from_value(content: dict[str, Any]) -> dict[str, Any]:
     content.setdefault("levels", [])
     content.setdefault("surprise_cards", [])
     content.setdefault("surprise_decks", [])
+    content["action_costs"] = _normalize_action_costs(content.get("action_costs") or {})
     content["player_boards"] = _normalize_player_boards(content.get("player_boards") or [])
     content["tokens"] = _normalize_tokens(content.get("tokens") or [])
     content["poulpita_panel"] = _normalize_poulpita_panel(content.get("poulpita_panel") or {})
@@ -594,6 +611,7 @@ def _read_content_from_value(content: dict[str, Any]) -> dict[str, Any]:
     for tile in content["tiles"]:
         tile["priority"] = int(tile.get("priority") or 0)
         tile.setdefault("interaction_ids", [])
+        tile["shell_requirement_count"] = max(0, int(tile.get("shell_requirement_count") or 0))
         tile.setdefault("counter_attack_interaction_ids", [])
         tile.setdefault("success_effects", [])
         tile.setdefault("counter_attack_effects", [])
@@ -602,6 +620,21 @@ def _read_content_from_value(content: dict[str, Any]) -> dict[str, Any]:
         level["objectives"] = _normalize_level_objectives(level.get("objectives") or [])
         level["starting_energy"] = max(0, min(32, int(level.get("starting_energy") or 3)))
     return content
+
+
+def _normalize_action_costs(raw_costs: dict[str, Any]) -> dict[str, dict[str, int]]:
+    normalized = deepcopy(DEFAULT_ACTION_COSTS)
+    if not isinstance(raw_costs, dict):
+        return normalized
+    for action_id in ACTION_COST_KEYS:
+        raw = raw_costs.get(action_id) or {}
+        if not isinstance(raw, dict):
+            continue
+        normalized[action_id] = {
+            "ap_cost": max(0, int(raw.get("ap_cost") if raw.get("ap_cost") is not None else normalized[action_id]["ap_cost"])),
+            "time_cost": max(0, int(raw.get("time_cost") if raw.get("time_cost") is not None else normalized[action_id]["time_cost"])),
+        }
+    return normalized
 
 
 def get_player_board_configs() -> list[dict[str, Any]]:
@@ -721,7 +754,15 @@ def get_game_content_catalog() -> dict[str, dict[str, Any]]:
         "card_categories": [dict(category) for category in content.get("categories", [])] + [dict(COUNTER_ATTACK_CATEGORY)],
         "tokens": {token["id"]: _with_urls(token) for token in content.get("tokens", [])},
         "poulpita_panel": _poulpita_panel_with_urls(content.get("poulpita_panel") or _default_poulpita_panel()),
+        "action_costs": deepcopy(content.get("action_costs") or DEFAULT_ACTION_COSTS),
     }
+
+
+def update_action_costs(action_costs: dict[str, Any]) -> dict[str, dict[str, int]]:
+    content = _read_content()
+    content["action_costs"] = _normalize_action_costs(action_costs)
+    _write_content(content)
+    return deepcopy(content["action_costs"])
 
 
 def create_category(*, name: str, compulsory_on_same_node: bool = False) -> dict[str, Any]:
@@ -985,6 +1026,7 @@ def save_tile(
     name: str,
     event_id: str,
     priority: int = 0,
+    shell_requirement_count: int = 0,
     interaction_ids: list[str],
     counter_attack_interaction_ids: list[str] | None = None,
     success_effects: list[dict[str, Any]] | None = None,
@@ -1003,6 +1045,7 @@ def save_tile(
         "name": _normalize_name(name),
         "event_id": event_id,
         "priority": int(priority or 0),
+        "shell_requirement_count": max(0, int(shell_requirement_count or 0)),
         "interaction_ids": normalized_interactions,
         "counter_attack_interaction_ids": _normalize_interaction_ids(counter_attack_interaction_ids or [], interaction_set),
         "success_effects": _normalize_effects(success_effects or [], SUCCESS_EFFECT_TYPES, "success"),

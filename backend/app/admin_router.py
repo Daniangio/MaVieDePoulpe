@@ -32,6 +32,7 @@ from .game_content_service import (
     save_player_board,
     update_token,
     update_poulpita_panel,
+    update_action_costs,
     update_category,
     update_event,
     update_interaction,
@@ -386,6 +387,17 @@ async def admin_import_content_package(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.put("/admin/content/action-costs")
+async def admin_update_action_costs(
+    action_costs_json: str = Form(...),
+    _admin: User = Depends(require_admin),
+):
+    try:
+        return update_action_costs(_json_form_object(action_costs_json, "action_costs_json"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/admin/content/categories")
 async def admin_create_category(
     name: str = Form(...),
@@ -507,6 +519,7 @@ async def admin_create_tile(
     name: str = Form(...),
     event_id: str = Form(...),
     priority: int = Form(default=0),
+    shell_requirement_count: int = Form(default=0),
     interaction_ids_json: str = Form(...),
     counter_attack_interaction_ids_json: str = Form(default="[]"),
     success_effects_json: str = Form(default="[]"),
@@ -519,6 +532,7 @@ async def admin_create_tile(
             name=name,
             event_id=event_id,
             priority=priority,
+            shell_requirement_count=shell_requirement_count,
             interaction_ids=[str(item) for item in _json_form_list(interaction_ids_json, "interaction_ids_json")],
             counter_attack_interaction_ids=[
                 str(item)
@@ -538,6 +552,7 @@ async def admin_update_tile(
     name: str = Form(...),
     event_id: str = Form(...),
     priority: int = Form(default=0),
+    shell_requirement_count: int = Form(default=0),
     interaction_ids_json: str = Form(...),
     counter_attack_interaction_ids_json: str = Form(default="[]"),
     success_effects_json: str = Form(default="[]"),
@@ -551,6 +566,7 @@ async def admin_update_tile(
             name=name,
             event_id=event_id,
             priority=priority,
+            shell_requirement_count=shell_requirement_count,
             interaction_ids=[str(item) for item in _json_form_list(interaction_ids_json, "interaction_ids_json")],
             counter_attack_interaction_ids=[
                 str(item)

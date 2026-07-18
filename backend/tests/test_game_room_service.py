@@ -475,6 +475,32 @@ def test_draw_refills_empty_deck_from_discard(monkeypatch):
     run(scenario())
 
 
+def test_configured_move_action_costs_spend_ap_and_advance_time():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        await prepare_active_capability_with_ap(service, user, room)
+        state = service._memory_states[room["id"]]
+        state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["pa"] = 3
+        state["tile_catalog"]["action_costs"] = {"move": {"ap_cost": 2, "time_cost": 4}}
+
+        result = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_costed_move",
+            expected_version=3,
+            command_type="move_poulpita",
+            payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID, "target_node_id": "1B"},
+        )
+
+        capability = result["projection"]["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]
+        assert result["ok"] is True
+        assert capability["pa"] == 1
+        assert result["projection"]["night_time_spent"] == 4
+
+    run(scenario())
+
+
 def test_state_version_conflict_is_structured_rejection():
     async def scenario():
         service, user, room, _start = await create_started_room()
@@ -549,6 +575,45 @@ def test_failed_interaction_can_move_poulpita_and_tile_to_previous_node():
         assert projection["poulpita"]["previous_node_id"] == "1B"
         assert projection["tiles"]["1B"] == []
         assert projection["tiles"]["1A"][0]["instance_id"] == "tile_crab"
+
+    run(scenario())
+
+
+def test_successful_interaction_consumes_required_poulpita_shells():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["poulpita"]["seashells"] = 3
+        state["tile_catalog"] = {
+            "tiles": {
+                "shell-threat": {
+                    "id": "shell-threat",
+                    "event_id": "crab",
+                    "interaction_ids": [],
+                    "shell_requirement_count": 2,
+                    "success_effects": [{"type": "gain_neurons", "amount": 1}],
+                    "failure_effects": [],
+                }
+            },
+            "events": {"crab": {"id": "crab", "category_id": "prey"}},
+            "interactions": {},
+        }
+        state["tiles"] = {"1A": [{"instance_id": "tile_shell", "tile_id": "shell-threat", "face_up": True}]}
+        state["interaction"] = {"tile_instance_id": "tile_shell", "tile_id": "shell-threat", "node_id": "1A", "played_cards": []}
+
+        result = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_shell_success",
+            expected_version=1,
+            command_type="resolve_interaction",
+        )
+
+        assert result["ok"] is True
+        assert result["projection"]["poulpita"]["seashells"] == 1
+        assert result["projection"]["poulpita"]["neurons"] == 1
+        assert result["projection"]["tiles"]["1A"] == []
 
     run(scenario())
 
@@ -655,6 +720,7 @@ def test_compulsory_same_node_interactions_follow_highest_priority_first():
         state = service._memory_states[room["id"]]
         state["phase"] = "night_action"
         state["active_capability_id"] = DEFAULT_ACTIVE_CAPABILITY_ID
+        state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["pa"] = 3
         state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["initiates_event_ids"] = ["shark", "crab"]
         state["tile_catalog"] = {
             "categories": {
@@ -724,6 +790,7 @@ def test_higher_priority_optional_interaction_can_precede_lower_compulsory_inter
         state = service._memory_states[room["id"]]
         state["phase"] = "night_action"
         state["active_capability_id"] = DEFAULT_ACTIVE_CAPABILITY_ID
+        state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["pa"] = 3
         state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["initiates_event_ids"] = ["shark", "crab"]
         state["tile_catalog"] = {
             "categories": {
@@ -789,6 +856,7 @@ def test_latest_tile_priority_metadata_allows_high_priority_optional_interaction
         state = service._memory_states[room["id"]]
         state["phase"] = "night_action"
         state["active_capability_id"] = DEFAULT_ACTIVE_CAPABILITY_ID
+        state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["pa"] = 1
         state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["initiates_event_ids"] = ["shark", "surprise"]
         state["tile_catalog"] = {
             "categories": {

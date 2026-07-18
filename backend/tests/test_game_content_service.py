@@ -144,6 +144,36 @@ def test_player_board_can_define_deck_exchange_upgrades(tmp_path, monkeypatch):
     ]
 
 
+def test_action_costs_and_shell_tile_requirement_are_configurable(tmp_path, monkeypatch):
+    monkeypatch.setattr(service, "CONTENT_ROOT", tmp_path)
+    monkeypatch.setattr(service, "CONTENT_IMAGES_ROOT", tmp_path / "images")
+    monkeypatch.setattr(service, "CONTENT_JSON_PATH", tmp_path / "content.json")
+
+    service._write_content(
+        {
+            "categories": [],
+            "interactions": [{"id": "charge", "name": "Charge", "image_filename": None}],
+            "events": [{"id": "crab", "name": "Crab", "category_id": "", "image_filename": None}],
+            "tiles": [],
+        }
+    )
+
+    costs = service.update_action_costs({"interact": {"ap_cost": 2, "time_cost": 3}})
+    tile = service.save_tile(
+        name="Shell threat",
+        event_id="crab",
+        priority=0,
+        shell_requirement_count=2,
+        interaction_ids=["charge"],
+    )
+
+    state = service.get_content_state()
+    assert costs["interact"] == {"ap_cost": 2, "time_cost": 3}
+    assert costs["move"] == {"ap_cost": 1, "time_cost": 1}
+    assert tile["shell_requirement_count"] == 2
+    assert state["action_costs"]["interact"]["time_cost"] == 3
+
+
 def test_level_save_validates_group_capacity_and_node_assignment(tmp_path, monkeypatch):
     monkeypatch.setattr(service, "CONTENT_ROOT", tmp_path)
     monkeypatch.setattr(service, "CONTENT_IMAGES_ROOT", tmp_path / "images")

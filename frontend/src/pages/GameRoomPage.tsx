@@ -737,7 +737,10 @@ const InteractionPanel = ({
     const index = missingCounter.indexOf(interactionId);
     if (index >= 0) missingCounter.splice(index, 1);
   });
-  const canResolve = missingSuccess.length === 0;
+  const shellRequirementCount = Math.max(0, Number(tile.shell_requirement_count || 0));
+  const carriedShells = Math.max(0, Number(projection.poulpita?.seashells || 0));
+  const missingShells = Math.max(0, shellRequirementCount - carriedShells);
+  const canResolve = missingSuccess.length === 0 && missingShells === 0;
   const canInitiate = !activeInteraction && projection.active_capability_id === selectedCapability?.id;
   const requiresFreeFailureMove = Boolean(activeInteraction && (tile.failure_effects || []).some((effect: any) => effect.type === "pulpita_move_free"));
   const currentNodeId = projection.poulpita?.node_id || "";
@@ -763,6 +766,19 @@ const InteractionPanel = ({
       {ids.length === 0 ? <span className="text-xs text-teal-200">Ready</span> : null}
     </div>
   );
+  const MissingShellIcons = () => shellRequirementCount > 0 ? (
+    <div className="mt-2 flex flex-wrap gap-1">
+      {Array.from({ length: shellRequirementCount }).map((_, index) => (
+        <span
+          className={`flex h-7 w-7 items-center justify-center rounded-full border text-[0.55rem] font-bold ${index < carriedShells ? "border-amber-300 bg-amber-100 text-amber-900" : "border-rose-400 bg-rose-950 text-rose-100"}`}
+          key={index}
+          title={index < carriedShells ? "Shell carried by Poulpita" : "Missing Poulpita shell"}
+        >
+          S
+        </span>
+      ))}
+    </div>
+  ) : null;
   return (
     <div className="absolute inset-0 z-40 flex items-center justify-center bg-slate-950/45 p-3">
       <section className={`grid max-h-full w-[min(54rem,calc(100%-1rem))] gap-3 overflow-auto rounded-lg border bg-slate-900 p-3 shadow-2xl transition-all duration-300 md:grid-cols-[16rem_1fr] ${panelTone}`}>
@@ -779,6 +795,7 @@ const InteractionPanel = ({
           <div className="mt-3 text-xs text-slate-300">
             <p className="font-semibold text-slate-200">Missing for success</p>
             <MissingIcons ids={missingSuccess} />
+            <MissingShellIcons />
             {(tile.counter_attack_interaction_ids || []).length ? (
               <>
                 <p className="mt-3 font-semibold text-slate-200">Missing for counter-attack</p>

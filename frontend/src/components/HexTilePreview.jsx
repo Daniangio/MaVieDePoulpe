@@ -54,6 +54,20 @@ const CostZone = ({ ids = [], interactionsById, counter = false }) => (
   </div>
 );
 
+const ShellRequirementZone = ({ count = 0 }) => {
+  const total = Math.max(0, Number(count || 0));
+  if (!total) return null;
+  return (
+    <div className="flex flex-wrap items-center justify-center gap-1">
+      {Array.from({ length: total }).map((_, index) => (
+        <span className="flex h-7 w-7 items-center justify-center rounded-full border border-amber-300 bg-amber-50 text-[0.55rem] font-bold text-amber-900 shadow-sm" key={index} title="Poulpita shell required">
+          S
+        </span>
+      ))}
+    </div>
+  );
+};
+
 const HexTilePreview = ({ tile, event, interactionsById = {}, className = "" }) => {
   const imageUrl = event?.image_url ? buildApiUrl(event.image_url) : "";
   return (
@@ -67,6 +81,7 @@ const HexTilePreview = ({ tile, event, interactionsById = {}, className = "" }) 
       </div>
       <div className="absolute left-[18%] right-[18%] top-[6%] flex flex-col items-center gap-1">
         <CostZone ids={tile?.interaction_ids || []} interactionsById={interactionsById} />
+        <ShellRequirementZone count={tile?.shell_requirement_count || 0} />
         {(tile?.counter_attack_interaction_ids || []).length ? <CostZone counter ids={tile.counter_attack_interaction_ids} interactionsById={interactionsById} /> : null}
       </div>
       <EffectZone className="absolute bottom-[31%] left-[4%] top-[31%] w-[22%]" effects={tile?.success_effects || []} />
