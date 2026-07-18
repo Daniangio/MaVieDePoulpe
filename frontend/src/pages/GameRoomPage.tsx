@@ -1306,12 +1306,16 @@ const PlanActionNode = ({
   option,
   projection,
   pending,
+  selected,
   onSelect,
+  onExecute,
 }: {
   option: PlanTreeOption;
   projection: GameProjection;
   pending: boolean;
+  selected: boolean;
   onSelect: (option: PlanTreeOption) => void;
+  onExecute: (option: PlanTreeOption) => void;
 }) => {
   const visual = actionVisual(option.step, projection);
   const color = abilityColor(projection, visual.actorId);
@@ -1321,17 +1325,18 @@ const PlanActionNode = ({
   return (
     <button
       className={[
-        "group flex items-center gap-2 rounded-lg border bg-slate-900/95 p-1.5 text-left shadow transition hover:-translate-y-0.5 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60",
-        option.preferred ? "border-teal-300 ring-1 ring-teal-200/60" : "border-slate-700",
+        "group flex shrink-0 items-center gap-1.5 rounded-full bg-transparent p-0.5 text-left transition hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-60",
+        selected ? "drop-shadow-[0_0_10px_rgba(45,212,191,0.75)]" : "",
       ].join(" ")}
       disabled={disabled}
       onClick={() => onSelect(option)}
+      onDoubleClick={() => onExecute(option)}
       title={visual.title}
       type="button"
     >
       <span
         className="relative flex h-12 w-12 shrink-0 items-center justify-center overflow-visible rounded-full border-[3px] bg-white text-slate-900"
-        style={{ borderColor: color }}
+        style={{ borderColor: selected ? "#2dd4bf" : color, boxShadow: selected ? `0 0 0 3px ${color}` : undefined }}
       >
         <span
           className="absolute -top-2 left-1/2 flex h-5 min-w-5 -translate-x-1/2 items-center justify-center rounded-full border border-white px-1 text-[0.56rem] font-bold text-white shadow"
@@ -1348,7 +1353,7 @@ const PlanActionNode = ({
           </span>
         )}
       </span>
-      <span className="grid w-12 shrink-0 gap-0.5 text-[0.52rem] leading-none text-slate-300">
+      <span className={["grid w-12 shrink-0 gap-0.5 rounded-md border px-1.5 py-1 text-[0.5rem] leading-none shadow", selected ? "border-cyan-200 bg-slate-950/95 text-black-100" : "border-slate-700 bg-slate-950/85 text-slate-200"].join(" ")}>
         <span>Eff {Math.round(option.avgEfficiency * 100)}%</span>
         <span>Risk {Math.round((1 - option.avgSuccess) * 100)}%</span>
         <span>Gain {Math.round(option.avgExpectedGain)}</span>
@@ -1414,26 +1419,40 @@ const PlanDetailTree = ({ plan, projection }: { plan: BotPlanSummary; projection
 
 const BotPlanTree = ({
   plans,
+  activePlanIds,
   stepIndex,
   preferredPlanId,
   pending,
-  onClear,
   onSelectOption,
+  onExecuteOption,
   projection,
 }: {
   plans: BotPlanSummary[];
+  activePlanIds: string[];
   stepIndex: number;
   preferredPlanId: string | null;
   pending: boolean;
-  onClear: () => void;
   onSelectOption: (option: PlanTreeOption) => void;
+  onExecuteOption: (option: PlanTreeOption) => void;
   projection: GameProjection;
 }) => {
   if (!plans.length) return null;
+  const activeIdSet = new Set(activePlanIds);
+  const preferredPlan = plans.find((plan) => plan.plan_id === preferredPlanId) || null;
   const maxVisibleDepth = Math.max(0, Math.min(stepIndex, Math.max(...plans.map((plan) => (plan.plan_chain || []).length), 1) - 1));
+  const planMatchesSelectedPath = (plan: BotPlanSummary, depth: number) => {
+    if (depth === 0) return true;
+    if (!preferredPlan) return !activePlanIds.length || activeIdSet.has(plan.plan_id);
+    const selectedPathDepth = Math.max(0, Math.min(depth, stepIndex));
+    for (let index = 0; index < selectedPathDepth; index += 1) {
+      if (stepKey(plan.plan_chain?.[index]) !== stepKey(preferredPlan.plan_chain?.[index])) return false;
+    }
+    return true;
+  };
   const optionsForDepth = (depth: number): PlanTreeOption[] => {
     const groups = new Map<string, { step: PlanChainStep; plans: BotPlanSummary[] }>();
-    plans.forEach((plan) => {
+    const sourcePlans = plans.filter((plan) => planMatchesSelectedPath(plan, depth));
+    sourcePlans.forEach((plan) => {
       const step = plan.plan_chain?.[depth];
       if (!step) return;
       const key = stepKey(step);
@@ -1454,24 +1473,40 @@ const BotPlanTree = ({
         preferred: entry.plans.some((plan) => plan.plan_id === preferredPlanId),
         ...metrics,
       };
-    }).sort((left, right) => Number(right.preferred) - Number(left.preferred) || right.avgPlannerScore - left.avgPlannerScore);
+    }).sort((left, right) => right.avgPlannerScore - left.avgPlannerScore);
   };
+  const selectedDepth = Math.max(0, Math.min(stepIndex - 1, maxVisibleDepth));
+  const selectedOptions = optionsForDepth(selectedDepth);
+  const selectedOption = selectedOptions.find((option) => option.preferred) || selectedOptions[0] || null;
   return (
-    <div className="absolute left-3 top-3 z-[45] max-h-[calc(100%-1.5rem)] w-[min(15rem,calc(100%-1.5rem))] overflow-auto rounded-lg border border-cyan-300/60 bg-slate-950/90 p-2 shadow-lg">
+    <div className="absolute left-3 top-3 z-[45] w-max max-w-none overflow-visible p-0">
       <div className="flex items-center justify-between gap-2">
-        <p className="text-[0.65rem] font-semibold uppercase tracking-wide text-cyan-200">Planning tree</p>
-        <button className="text-[0.65rem] text-slate-400 hover:text-white" onClick={onClear} type="button">Clear</button>
+        <p className="text-[0.65rem] font-semibold uppercase tracking-wide text-cyan-100 drop-shadow">Planning tree</p>
+        <button
+          className="rounded bg-teal-400 px-2 py-1 text-[0.62rem] font-semibold uppercase tracking-wide text-slate-950 shadow hover:bg-teal-300 disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={pending || !selectedOption?.public_command}
+          onClick={() => selectedOption && onExecuteOption(selectedOption)}
+          type="button"
+        >
+          Execute
+        </button>
       </div>
-      <p className="mt-1 text-[0.62rem] text-slate-400">Step {stepIndex + 1} - {plans.length} plan{plans.length === 1 ? "" : "s"}</p>
       <div className="mt-2 space-y-2">
         {Array.from({ length: maxVisibleDepth + 1 }).map((_, depth) => {
           const depthOptions = optionsForDepth(depth);
           return (
-            <div className="space-y-1" key={depth}>
-              <p className="text-[0.55rem] font-semibold uppercase tracking-wide text-slate-500">Step {depth + 1}</p>
-              <div className="space-y-1">
+            <div className="min-w-max" key={depth}>
+              <div className="flex min-w-max items-center gap-2">
                 {depthOptions.map((option) => (
-                  <PlanActionNode key={`${depth}:${option.key}`} onSelect={onSelectOption} option={option} pending={pending || depth < stepIndex} projection={projection} />
+                  <PlanActionNode
+                    key={`${depth}:${option.key}`}
+                    onExecute={onExecuteOption}
+                    onSelect={onSelectOption}
+                    option={option}
+                    pending={pending}
+                    projection={projection}
+                    selected={option.preferred}
+                  />
                 ))}
               </div>
             </div>
@@ -1573,7 +1608,6 @@ const GameRoomPage = () => {
     const activeIds = new Set(activePlanIds);
     return proposals.filter((plan) => activeIds.has(plan.plan_id));
   }, [activePlanIds, botPlanStatus?.proposals]);
-  const visiblePlanTreePlans = activePlanIds.length ? activePlanTreePlans : (botPlanStatus?.proposals || []);
 
   const pushBotLog = useCallback((text: string, status: string = "ok") => {
     const entry = { id: makeCommandId(), text, createdAt: Date.now(), status };
@@ -1692,7 +1726,7 @@ const GameRoomPage = () => {
     if (proposalIds.length) {
       setActivePlanIds(proposalIds);
       setPreferredPlanId(proposalIds[0] || null);
-      setPlanStepIndex(0);
+      setPlanStepIndex(1);
       return;
     }
     setActivePlanIds([]);
@@ -1700,6 +1734,19 @@ const GameRoomPage = () => {
     setPlanStepIndex(0);
     void loadBotPlans("POST");
   }, [activePlanIds.length, activePlanTreePlans.length, botPlanStatus, loadBotPlans]);
+
+  useEffect(() => {
+    if (!botModeEnabled || activePlanIds.length || !(botPlanStatus?.proposals || []).length) return;
+    const firstPlan = botPlanStatus?.proposals?.[0];
+    if (!firstPlan) return;
+    const firstKey = stepKey(firstPlan.plan_chain?.[0]);
+    const matchingPlanIds = (botPlanStatus.proposals || [])
+      .filter((plan) => stepKey(plan.plan_chain?.[0]) === firstKey)
+      .map((plan) => plan.plan_id);
+    setActivePlanIds(matchingPlanIds.length ? matchingPlanIds : [firstPlan.plan_id]);
+    setPreferredPlanId(firstPlan.plan_id);
+    setPlanStepIndex(1);
+  }, [activePlanIds.length, botModeEnabled, botPlanStatus]);
 
   useEffect(() => {
     if (!botModeEnabled || !projection || projection.phase === "setup") {
@@ -2057,12 +2104,13 @@ const GameRoomPage = () => {
     if (pending) return;
     setActivePlanIds(option.planIds);
     setPreferredPlanId((current) => option.planIds.includes(String(current || "")) ? current : option.planIds[0] || null);
-    setPlanStepIndex(option.depth);
-    if (!option.public_command) {
-      pushBotLog(`Selected branch: ${option.compactLabel}`, "ok");
-      setPlanStepIndex(option.depth + 1);
-      return;
-    }
+    setPlanStepIndex(option.depth + 1);
+  };
+
+  const executePlanTreeOption = async (option: PlanTreeOption) => {
+    if (pending || !option.public_command) return;
+    setActivePlanIds(option.planIds);
+    setPreferredPlanId((current) => option.planIds.includes(String(current || "")) ? current : option.planIds[0] || null);
     const nextCommand = option.public_command;
     const result = await submitCommand(nextCommand.type, nextCommand.payload || {}, "plan");
     if (result?.ok === false) {
@@ -2179,14 +2227,11 @@ const GameRoomPage = () => {
               <BoardView focusedCapabilityId={selectedCapabilityId} moveMode={moveMode} onInspectTile={inspectTile} onMove={movePoulpita} onMoveShellFromShelter={moveShellFromShelter} pending={pending} projection={projection} />
               {botModeEnabled ? (
                 <BotPlanTree
-                  onClear={() => {
-                    setActivePlanIds([]);
-                    setPreferredPlanId(null);
-                    setPlanStepIndex(0);
-                  }}
+                  onExecuteOption={executePlanTreeOption}
                   onSelectOption={selectPlanTreeOption}
                   pending={pending}
-                  plans={visiblePlanTreePlans}
+                  activePlanIds={activePlanIds}
+                  plans={botPlanStatus?.proposals || []}
                   preferredPlanId={preferredPlanId}
                   projection={projection}
                   stepIndex={planStepIndex}

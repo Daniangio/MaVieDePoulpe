@@ -411,6 +411,7 @@ def _build_tile_catalog() -> dict[str, Any]:
             "priority": int(octopus_token.get("priority") or 0),
             "interaction_ids": list(octopus_token.get("interaction_ids") or []),
             "counter_attack_interaction_ids": list(octopus_token.get("counter_attack_interaction_ids") or []),
+            "shell_requirement_count": int(octopus_token.get("shell_requirement_count") or 0),
             "success_effects": deepcopy(octopus_token.get("success_effects") or []),
             "counter_attack_effects": deepcopy(octopus_token.get("counter_attack_effects") or []),
             "failure_effects": deepcopy(octopus_token.get("failure_effects") or []),
@@ -588,6 +589,36 @@ def _project_state(state: dict[str, Any]) -> dict[str, Any]:
             for category_id, category in (tile_catalog.get("categories") or {}).items()
             if str(category_id).startswith("__")
         }
+        latest_tokens = latest_catalog.get("tokens") or {}
+        latest_octopus_token = latest_tokens.get(OCTOPUS_TOKEN_ID) or {}
+        if latest_octopus_token:
+            octopus_event = {
+                "id": OCTOPUS_EVENT_ID,
+                "name": latest_octopus_token.get("name") or "Octopus token",
+                "category_id": OCTOPUS_CATEGORY_ID,
+                "image_url": latest_octopus_token.get("image_url"),
+            }
+            preserved_special_events[OCTOPUS_EVENT_ID] = octopus_event
+            preserved_special_categories[OCTOPUS_CATEGORY_ID] = {
+                "id": OCTOPUS_CATEGORY_ID,
+                "name": "Threat",
+                "compulsory_on_same_node": True,
+            }
+            preserved_special_tiles[OCTOPUS_TILE_ID] = {
+                "id": OCTOPUS_TILE_ID,
+                "name": latest_octopus_token.get("name") or "Octopus token",
+                "event_id": OCTOPUS_EVENT_ID,
+                "event": octopus_event,
+                "image_url": latest_octopus_token.get("image_url"),
+                "priority": int(latest_octopus_token.get("priority") or 0),
+                "interaction_ids": list(latest_octopus_token.get("interaction_ids") or []),
+                "counter_attack_interaction_ids": list(latest_octopus_token.get("counter_attack_interaction_ids") or []),
+                "shell_requirement_count": int(latest_octopus_token.get("shell_requirement_count") or 0),
+                "success_effects": deepcopy(latest_octopus_token.get("success_effects") or []),
+                "counter_attack_effects": deepcopy(latest_octopus_token.get("counter_attack_effects") or []),
+                "failure_effects": deepcopy(latest_octopus_token.get("failure_effects") or []),
+                "token_type": OCTOPUS_TOKEN_ID,
+            }
         tile_catalog["tiles"] = {
             tile_id: _tile_public(tile, {"events": latest_events})
             for tile_id, tile in latest_tiles.items()
@@ -597,7 +628,7 @@ def _project_state(state: dict[str, Any]) -> dict[str, Any]:
         tile_catalog["events"] = {**(latest_events or {}), **preserved_special_events}
         tile_catalog["interactions"] = latest_catalog.get("interactions") or tile_catalog.get("interactions") or {}
         tile_catalog["cards"] = latest_catalog.get("cards") or tile_catalog.get("cards") or {}
-        tile_catalog["tokens"] = latest_catalog.get("tokens") or tile_catalog.get("tokens") or {}
+        tile_catalog["tokens"] = latest_tokens or tile_catalog.get("tokens") or {}
         tile_catalog["poulpita_panel"] = latest_catalog.get("poulpita_panel") or tile_catalog.get("poulpita_panel") or {}
         tile_catalog["surprise_cards"] = latest_catalog.get("surprise_cards") or tile_catalog.get("surprise_cards") or {}
         tile_catalog["surprise_decks"] = latest_catalog.get("surprise_decks") or tile_catalog.get("surprise_decks") or {}
