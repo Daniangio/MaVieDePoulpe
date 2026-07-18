@@ -85,6 +85,35 @@ export type BotRoomConfig = {
   }>;
 };
 
+export type BotPlanSummary = {
+  plan_id: string;
+  proposer_ability_id?: string | null;
+  title: string;
+  rationale: string;
+  risk_label: "low" | "moderate" | "high" | "forced" | string;
+  confidence?: number | null;
+  step_preview: string[];
+  expected_resources?: {
+    ap_by_ability?: Record<string, number>;
+    time_steps?: number;
+    control_takes_by_ability?: Record<string, number>;
+    energy_delta_expected?: number;
+    shells_delta_expected?: number;
+    neurons_delta_expected?: number;
+  };
+  objective_effect?: string | null;
+  warnings?: string[];
+  commands?: Array<Record<string, any>>;
+};
+
+export type BotPlanStatus = {
+  status: "disabled" | "idle" | "planning" | "awaiting_selection" | "executing" | "awaiting_human" | "error";
+  proposal_set_id?: string | null;
+  generated_from_version?: number;
+  proposals: BotPlanSummary[];
+  message?: string;
+};
+
 export type GameProjection = {
   room_id: string;
   projection_mode: "goldfish";

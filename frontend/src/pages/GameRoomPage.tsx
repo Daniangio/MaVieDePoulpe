@@ -5,7 +5,7 @@ import BoardView from "../components/BoardView.js";
 import CardPreview from "../components/CardPreview.jsx";
 import HexTilePreview from "../components/HexTilePreview.jsx";
 import { useStore } from "../store.js";
-import type { CapabilityProjection, CardProjection, CommandRejection, GameProjection, NodeId } from "../types/game";
+import type { BotPlanStatus, CapabilityProjection, CardProjection, CommandRejection, GameProjection, NodeId } from "../types/game";
 import { buildApiUrl, buildWsUrl } from "../utils/connection.js";
 
 const makeCommandId = () =>
@@ -967,63 +967,39 @@ const SurpriseCardPanel = ({
 };
 
 const BotPlansOverlay = ({
+  botPlanStatus,
+  executingPlanId,
+  loading,
   open,
   onClose,
+  onExecute,
   onRecalculate,
   projection,
 }: {
+  botPlanStatus: BotPlanStatus | null;
+  executingPlanId: string | null;
+  loading: boolean;
   open: boolean;
   onClose: () => void;
+  onExecute: (planId: string) => void;
   onRecalculate: () => void;
   projection: GameProjection;
 }) => {
-  const botControllers = (projection.bot_config?.controllers || []).filter((controller) => controller.controller_type === "bot");
   const activeName = projection.active_capability_id
     ? projection.capabilities?.[projection.active_capability_id]?.name || projection.active_capability_id
     : "No active ability";
-  const mockPlans = [
-    {
-      id: "mock_collect",
-      proposer: botControllers[0]?.ability_id || "camouflage",
-      title: "Build action points",
-      risk: "Low risk",
-      rationale: "A bot ability can take control and collect AP. The plan stops after the die roll because the new AP value changes planning.",
-      costs: "1 control take, 0 AP, 0 time",
-      outcome: "More AP for the proposing ability.",
-      steps: ["Take control if available", "Collect action points", "Stop and recalculate"],
-    },
-    {
-      id: "mock_move",
-      proposer: botControllers[1]?.ability_id || "force",
-      title: "Inspect an adjacent node",
-      risk: "Moderate risk",
-      rationale: "A one-step move can reveal useful information. The plan stops immediately after movement if new tiles appear.",
-      costs: "Move AP/time cost from level config",
-      outcome: "Board visibility updates through the normal reducer.",
-      steps: ["Take control if needed", "Move one adjacent step", "Stop on revealed information"],
-    },
-    {
-      id: "mock_compulsory",
-      proposer: botControllers[2]?.ability_id || "propulsion",
-      title: "Resolve blocking compulsory tile",
-      risk: "Forced",
-      rationale: "Compulsory same-node tiles should be considered before lower-priority optional plans when the reducer requires it.",
-      costs: "Interaction AP/time cost plus committed cards",
-      outcome: "Start interaction, then pause if human private cards may be needed.",
-      steps: ["Check legal initiator", "Start interaction", "Contribute bot support", "Resolve or ask human"],
-    },
-  ];
+  const plans = botPlanStatus?.proposals || [];
 
   if (!open) return null;
   return (
     <div className="absolute inset-3 z-[55] flex items-center justify-center rounded-lg bg-slate-950/55 p-3">
-      <section className="max-h-full w-[min(56rem,100%)] overflow-auto rounded-lg border border-cyan-300 bg-slate-900 p-4 shadow-2xl">
+      <section className="flex max-h-full w-[min(56rem,100%)] flex-col overflow-hidden rounded-lg border border-cyan-300 bg-slate-900 p-4 shadow-2xl">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <p className="text-xs uppercase tracking-wide text-cyan-200">Bot planning preview</p>
+            <p className="text-xs uppercase tracking-wide text-cyan-200">Bot planning</p>
             <h2 className="mt-1 text-xl font-semibold text-white">{phaseLabel(projection)}</h2>
             <p className="mt-1 text-sm text-slate-300">
-              Current initiative: {activeName}. These are mocked Phase 1 plan cards; backend proposal generation comes next.
+              Current initiative: {activeName}. Proposals are generated server-side from the current room version.
             </p>
           </div>
           <div className="flex gap-2">
@@ -1035,32 +1011,47 @@ const BotPlansOverlay = ({
             </button>
           </div>
         </div>
-        <div className="mt-4 grid gap-3 md:grid-cols-3">
-          {mockPlans.map((plan) => {
-            const proposerName = projection.capabilities?.[plan.proposer]?.name || plan.proposer;
+        <div className="mt-4 min-h-0 overflow-auto pr-2 [scrollbar-gutter:stable]">
+          {loading ? <p className="rounded-md border border-slate-700 bg-slate-950 p-4 text-sm text-slate-300">Bots are evaluating the current state...</p> : null}
+          {!loading && botPlanStatus?.message ? <p className="rounded-md border border-slate-700 bg-slate-950 p-4 text-sm text-slate-300">{botPlanStatus.message}</p> : null}
+          {!loading && plans.length ? (
+          <div className="grid gap-3 md:grid-cols-3">
+          {plans.map((plan) => {
+            const proposerName = plan.proposer_ability_id ? projection.capabilities?.[plan.proposer_ability_id]?.name || plan.proposer_ability_id : "Team";
+            const resources = plan.expected_resources || {};
+            const apCost = Object.values(resources.ap_by_ability || {}).reduce((total, value) => total + Number(value || 0), 0);
+            const controlTakes = Object.values(resources.control_takes_by_ability || {}).reduce((total, value) => total + Number(value || 0), 0);
             return (
-              <article className="flex min-h-[18rem] flex-col rounded-md border border-slate-700 bg-slate-950 p-3" key={plan.id}>
+              <article className="flex min-h-[18rem] flex-col rounded-md border border-slate-700 bg-slate-950 p-3" key={plan.plan_id}>
                 <div>
                   <p className="text-xs font-semibold uppercase tracking-wide text-cyan-200">{proposerName}</p>
                   <h3 className="mt-1 text-base font-semibold text-white">{plan.title}</h3>
-                  <p className="mt-1 text-xs text-amber-200">{plan.risk}</p>
+                  <p className="mt-1 text-xs text-amber-200">{plan.risk_label}</p>
                   <p className="mt-3 text-sm leading-5 text-slate-300">{plan.rationale}</p>
                 </div>
                 <div className="mt-3 rounded border border-slate-800 bg-slate-900 p-2 text-xs text-slate-300">
-                  <p><span className="text-slate-500">Cost:</span> {plan.costs}</p>
-                  <p className="mt-1"><span className="text-slate-500">Outcome:</span> {plan.outcome}</p>
+                  <p><span className="text-slate-500">Public cost:</span> {apCost} AP, {Number(resources.time_steps || 0)} time, {controlTakes} controls</p>
+                  {plan.objective_effect ? <p className="mt-1"><span className="text-slate-500">Objective:</span> {plan.objective_effect}</p> : null}
                 </div>
                 <ol className="mt-3 flex-1 space-y-1 text-xs text-slate-300">
-                  {plan.steps.map((step, index) => (
+                  {plan.step_preview.map((step, index) => (
                     <li key={step}>{index + 1}. {step}</li>
                   ))}
                 </ol>
-                <button className="mt-3 rounded bg-teal-400 px-3 py-2 text-sm font-semibold text-slate-950 opacity-60" disabled type="button">
-                  Execute plan
+                {(plan.warnings || []).length ? <p className="mt-3 text-xs text-amber-200">{plan.warnings?.join(" ")}</p> : null}
+                <button
+                  className="mt-3 rounded bg-teal-400 px-3 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-300 disabled:cursor-wait disabled:opacity-60"
+                  disabled={loading || Boolean(executingPlanId)}
+                  onClick={() => onExecute(plan.plan_id)}
+                  type="button"
+                >
+                  {executingPlanId === plan.plan_id ? "Executing..." : "Execute plan"}
                 </button>
               </article>
             );
           })}
+          </div>
+          ) : null}
         </div>
       </section>
     </div>
@@ -1088,6 +1079,9 @@ const GameRoomPage = () => {
   const [interactionPanelState, setInteractionPanelState] = useState<"open" | "success" | "failure" | "closing">("open");
   const [alertsVisible, setAlertsVisible] = useState(false);
   const [botPlansOpen, setBotPlansOpen] = useState(false);
+  const [botPlanStatus, setBotPlanStatus] = useState<BotPlanStatus | null>(null);
+  const [botPlansLoading, setBotPlansLoading] = useState(false);
+  const [executingBotPlanId, setExecutingBotPlanId] = useState<string | null>(null);
 
   const capabilityMap = projection?.capabilities || {};
   const capabilities = useMemo(() => {
@@ -1107,13 +1101,6 @@ const GameRoomPage = () => {
       setFocusedCapabilityId(projection.focused_capability_id || projection.capability_order?.[0] || null);
     }
   }, [focusedCapabilityId, projection]);
-
-  useEffect(() => {
-    if (!botModeEnabled || !projection || projection.phase === "setup") return;
-    if (openedBotPlansOnceRef.current) return;
-    openedBotPlansOnceRef.current = true;
-    setBotPlansOpen(true);
-  }, [botModeEnabled, projection?.phase]);
 
   useEffect(() => {
     if (!feedback && !error) {
@@ -1187,6 +1174,45 @@ const GameRoomPage = () => {
       setError(loadError.message || "Failed to load game state.");
     }
   }, [roomId, token]);
+
+  const loadBotPlans = useCallback(async (method: "GET" | "POST" = "GET") => {
+    if (!token || !roomId) return;
+    setBotPlansLoading(true);
+    try {
+      const response = await fetch(
+        buildApiUrl(`/api/game/rooms/${roomId}/bot-plans${method === "POST" ? "/recalculate" : ""}`),
+        {
+          method,
+          cache: "no-store",
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      );
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || "Failed to load bot plans.");
+      setBotPlanStatus(payload);
+      setError("");
+    } catch (plansError: any) {
+      setError(plansError.message || "Failed to load bot plans.");
+    } finally {
+      setBotPlansLoading(false);
+    }
+  }, [roomId, token]);
+
+  useEffect(() => {
+    if (!botModeEnabled || !projection || projection.phase === "setup") return;
+    if (openedBotPlansOnceRef.current) return;
+    openedBotPlansOnceRef.current = true;
+    setBotPlansOpen(true);
+    void loadBotPlans();
+  }, [botModeEnabled, loadBotPlans, projection?.phase]);
+
+  useEffect(() => {
+    if (!botModeEnabled || !projection || projection.phase === "setup") {
+      setBotPlanStatus(null);
+      return;
+    }
+    void loadBotPlans();
+  }, [botModeEnabled, loadBotPlans, projection?.phase, projection?.version]);
 
   useEffect(() => {
     void loadProjection();
@@ -1495,7 +1521,31 @@ const GameRoomPage = () => {
   };
 
   const recalculateBotPlans = () => {
-    setFeedback("Bot proposal generation is not wired yet. This Phase 1 panel is a UI skeleton.");
+    void loadBotPlans("POST");
+  };
+
+  const executeBotPlan = async (planId: string) => {
+    if (!token || !roomId || pending || executingBotPlanId) return;
+    setPending(true);
+    setExecutingBotPlanId(planId);
+    setFeedback("");
+    setError("");
+    try {
+      const response = await fetch(buildApiUrl(`/api/game/rooms/${roomId}/bot-plans/${encodeURIComponent(planId)}/execute`), {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.detail || "Failed to execute bot plan.");
+      if (result.projection) setProjection(result.projection);
+      setFeedback(result.message || "Bot plan executed.");
+      await loadBotPlans("POST");
+    } catch (executeError: any) {
+      setError(executeError.message || "Failed to execute bot plan.");
+    } finally {
+      setPending(false);
+      setExecutingBotPlanId(null);
+    }
   };
 
   return (
@@ -1598,16 +1648,23 @@ const GameRoomPage = () => {
               <BoardView focusedCapabilityId={selectedCapabilityId} moveMode={moveMode} onInspectTile={inspectTile} onMove={movePoulpita} onMoveShellFromShelter={moveShellFromShelter} pending={pending} projection={projection} />
               {botModeEnabled ? (
                 <button
-                  className="absolute right-3 top-3 z-[45] rounded-full border border-cyan-300 bg-slate-900 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-cyan-100 shadow-lg hover:bg-slate-800"
-                  onClick={() => setBotPlansOpen(true)}
+                  className="absolute right-3 top-3 z-[65] rounded-full border border-cyan-300 bg-slate-900 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-cyan-100 shadow-lg hover:bg-slate-800"
+                  onClick={() => {
+                    setBotPlansOpen((open) => !open);
+                    if (!botPlansOpen) void loadBotPlans();
+                  }}
                   type="button"
                 >
-                  Plans
+                  {botPlansOpen ? "Close plans" : "Plans"}
                 </button>
               ) : null}
               {botModeEnabled ? (
                 <BotPlansOverlay
+                  botPlanStatus={botPlanStatus}
+                  executingPlanId={executingBotPlanId}
+                  loading={botPlansLoading}
                   onClose={() => setBotPlansOpen(false)}
+                  onExecute={executeBotPlan}
                   onRecalculate={recalculateBotPlans}
                   open={botPlansOpen}
                   projection={projection}

@@ -275,6 +275,110 @@ def test_solo_with_bots_rejects_intelligence_as_human_seat():
     run(scenario())
 
 
+def test_solo_with_bots_generates_public_bot_plan_proposals():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+
+        room = await service.create_room(user=user, mode="solo_with_bots", game_type="goldfish", human_ability_id="force")
+        await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_start_bot_plans",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "goldfish",
+                "expected_version": 0,
+                "type": "start_goldfish_game",
+                "payload": {},
+            },
+        )
+
+        plans = await service.get_bot_plans(room_id=room["id"], user=user)
+
+        assert plans["status"] == "awaiting_selection"
+        assert plans["generated_from_version"] == 1
+        assert 1 <= len(plans["proposals"]) <= 5
+        assert all("_score" not in proposal for proposal in plans["proposals"])
+        assert all(proposal["proposer_ability_id"] in {"agility", "camouflage", "propulsion"} for proposal in plans["proposals"])
+        assert all("step_preview" in proposal for proposal in plans["proposals"])
+
+    run(scenario())
+
+
+def test_bot_plans_do_not_suggest_moving_before_current_compulsory_tile():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+        room = await service.create_room(user=user, mode="solo_with_bots", game_type="goldfish", human_ability_id="force")
+        await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_start_forced_plan",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "goldfish",
+                "expected_version": 0,
+                "type": "start_goldfish_game",
+                "payload": {},
+            },
+        )
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "agility"
+        state["capabilities"]["agility"]["pa"] = 2
+        state["capabilities"]["agility"]["initiates_event_ids"] = ["shark"]
+        state["tile_catalog"] = {
+            "categories": {"threat": {"id": "threat", "name": "Threat", "compulsory_on_same_node": True}},
+            "events": {"shark": {"id": "shark", "name": "Shark", "category_id": "threat"}},
+            "tiles": {"shark-tile": {"id": "shark-tile", "event_id": "shark", "priority": 9, "interaction_ids": []}},
+            "interactions": {},
+        }
+        state["tiles"] = {"1A": [{"instance_id": "tile_shark", "tile_id": "shark-tile", "face_up": True}]}
+
+        plans = await service.get_bot_plans(room_id=room["id"], user=user)
+        plan_ids = [plan["plan_id"] for plan in plans["proposals"]]
+
+        assert any(plan_id.startswith("forced_agility_tile_shark") for plan_id in plan_ids)
+        assert not any(plan_id.startswith("move_inspect_") for plan_id in plan_ids)
+        assert plans["proposals"][0]["risk_label"] == "forced"
+
+    run(scenario())
+
+
+def test_execute_bot_plan_runs_multiple_commands_through_reducer():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+        room = await service.create_room(user=user, mode="solo_with_bots", game_type="goldfish", human_ability_id="force")
+        await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_start_execute_plan",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "goldfish",
+                "expected_version": 0,
+                "type": "start_goldfish_game",
+                "payload": {},
+            },
+        )
+
+        result = await service.execute_bot_plan(room_id=room["id"], user=user, plan_id="take_control_collect_agility")
+
+        assert result["ok"] is True
+        assert result["status"] == "replan_required"
+        assert [entry["type"] for entry in result["command_results"]] == ["take_control", "collect_action_points"]
+        assert result["projection"]["active_capability_id"] == "agility"
+        assert result["projection"]["version"] == 3
+        assert result["projection"]["capabilities"]["agility"]["pa"] == 1
+
+    run(scenario())
+
+
 def test_start_goldfish_game_initializes_16_node_board():
     async def scenario():
         service, user, room, start = await create_started_room()

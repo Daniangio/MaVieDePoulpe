@@ -13,6 +13,7 @@ from typing import Any, Optional
 
 from fastapi import WebSocket
 
+from .bots.planner import generate_bot_plan_status
 from .game_content_service import get_game_content_catalog, get_level_config, get_player_board_configs
 from .map_service import get_map
 from .server_models import User
@@ -1308,6 +1309,116 @@ class GameRoomService:
 
     async def get_game_state(self, *, room_id: str, user: User, selected_tile: str | None = None) -> dict[str, Any] | None:
         return await self.get_projection(room_id=room_id, user=user)
+
+    async def get_bot_plans(self, *, room_id: str, user: User) -> dict[str, Any] | None:
+        room = await self._load_room(room_id)
+        if not room or room.get("owner_user_id") != user.id:
+            return None
+        state = await self._load_state(room_id)
+        if state is None:
+            return None
+        state = self._state_with_latest_content_metadata(state)
+        return generate_bot_plan_status(state)
+
+    async def execute_bot_plan(self, *, room_id: str, user: User, plan_id: str) -> dict[str, Any] | None:
+        room = await self._load_room(room_id)
+        if not room or room.get("owner_user_id") != user.id:
+            return None
+        state = await self._load_state(room_id)
+        if state is None:
+            return None
+        state = self._state_with_latest_content_metadata(state)
+        plans = generate_bot_plan_status(state)
+        proposal = next((entry for entry in plans.get("proposals") or [] if str(entry.get("plan_id")) == str(plan_id)), None)
+        if proposal is None:
+            return {
+                "ok": False,
+                "status": "invalidated",
+                "plan_id": plan_id,
+                "reason": "plan_not_available",
+                "message": "This plan is no longer available for the current state.",
+                "projection": _project_state(state),
+                "command_results": [],
+            }
+        command_templates = list(proposal.get("commands") or [])[:8]
+        if not command_templates:
+            return {
+                "ok": False,
+                "status": "human_input_required",
+                "plan_id": plan_id,
+                "reason": "no_executable_commands",
+                "message": "This plan needs a human decision before it can execute.",
+                "projection": _project_state(state),
+                "command_results": [],
+            }
+        command_results = []
+        projection = _project_state(state)
+        status = "completed"
+        reason = "plan_completed"
+        message = "Plan completed."
+        for index, template in enumerate(command_templates):
+            latest_state = await self._load_state(room_id)
+            if latest_state is None:
+                raise LookupError("Game state not found.")
+            command_type = str(template.get("type") or "")
+            command = {
+                "command_id": f"bot_{uuid.uuid4().hex}",
+                "room_id": room_id,
+                "actor_user_id": user.id,
+                "actor_seat_id": "bot_plan",
+                "expected_version": int(latest_state.get("version") or 0),
+                "type": command_type,
+                "payload": deepcopy(template.get("payload") or {}),
+            }
+            result = await self.enqueue_game_command(room_id=room_id, user=user, command=command)
+            command_results.append(
+                {
+                    "command_id": result.get("command_id"),
+                    "type": command_type,
+                    "ok": bool(result.get("ok")),
+                    "status": result.get("status"),
+                    "reason": result.get("reason"),
+                    "message": result.get("message"),
+                    "version": result.get("version") or result.get("revision"),
+                }
+            )
+            projection = result.get("projection") or projection
+            if not result.get("ok"):
+                status = "command_rejected"
+                reason = str(result.get("reason") or "command_rejected")
+                message = str(result.get("message") or "A bot plan command was rejected.")
+                break
+            if (projection or {}).get("phase") == PHASE_FINISHED:
+                status = "game_finished"
+                reason = "game_finished"
+                message = "The game finished during plan execution."
+                break
+            if command_type == "move_poulpita" and index < len(command_templates) - 1:
+                status = "replan_required"
+                reason = "movement_changed_visibility"
+                message = "Movement can reveal new information; choose a new plan before continuing."
+                break
+        if status == "completed" and command_results:
+            last_type = command_results[-1].get("type")
+            if last_type == "start_interaction":
+                status = "human_input_required"
+                reason = "interaction_needs_resolution"
+                message = "The interaction is open. Add required support or confirm the result."
+            elif last_type in {"collect_action_points", "draw_action_card", "move_poulpita"}:
+                status = "replan_required"
+                reason = f"{last_type}_changed_state"
+                message = "The plan reached a decision boundary. Recalculate plans."
+        return {
+            "ok": status not in {"command_rejected", "invalidated"},
+            "status": status,
+            "plan_id": plan_id,
+            "proposal_set_id": plans.get("proposal_set_id"),
+            "generated_from_version": plans.get("generated_from_version"),
+            "reason": reason,
+            "message": message,
+            "command_results": command_results,
+            "projection": projection,
+        }
 
     async def enqueue_game_command(
         self,

@@ -100,6 +100,30 @@ async def get_game_state(
     return state
 
 
+@router.get("/game/rooms/{room_id}/bot-plans")
+async def get_bot_plans(room_id: str, current_user: User = Depends(get_current_user)):
+    plans = await _service().get_bot_plans(room_id=room_id, user=current_user)
+    if plans is None:
+        raise HTTPException(status_code=404, detail="Game state not found.")
+    return plans
+
+
+@router.post("/game/rooms/{room_id}/bot-plans/recalculate")
+async def recalculate_bot_plans(room_id: str, current_user: User = Depends(get_current_user)):
+    plans = await _service().get_bot_plans(room_id=room_id, user=current_user)
+    if plans is None:
+        raise HTTPException(status_code=404, detail="Game state not found.")
+    return plans
+
+
+@router.post("/game/rooms/{room_id}/bot-plans/{plan_id}/execute")
+async def execute_bot_plan(room_id: str, plan_id: str, current_user: User = Depends(get_current_user)):
+    result = await _service().execute_bot_plan(room_id=room_id, user=current_user, plan_id=plan_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Game state not found.")
+    return result
+
+
 @router.post("/game/rooms/{room_id}/commands", response_model=GameCommandQueuedResponse)
 async def enqueue_game_command(
     room_id: str,
