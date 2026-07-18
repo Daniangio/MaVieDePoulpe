@@ -732,7 +732,8 @@ const InteractionPanel = ({
   const selectedCapabilityId = selectedCapability?.id;
   const activeOwnedPlayedCards = activePlayedCards.filter((card: CardProjection) => card.capability_id === selectedCapabilityId);
   const lockedPlayedCards = activePlayedCards.filter((card: CardProjection) => card.capability_id !== selectedCapabilityId);
-  const selectableCards = [...activeOwnedPlayedCards, ...(selectedCapability?.hand || [])];
+  const handCards = selectedCapability?.hand || [];
+  const selectableCards = [...activeOwnedPlayedCards, ...handCards];
   const selectableCardMap = new Map(selectableCards.map((card: CardProjection) => [card.card_id, card]));
   const selectedCards = selectedCardIds
     .map((cardId) => selectableCardMap.get(cardId))
@@ -837,7 +838,7 @@ const InteractionPanel = ({
           <div>
             <h3 className="text-sm font-semibold text-white">Focused hand</h3>
             <div className="mt-2 flex flex-wrap gap-2">
-              {selectableCards.map((card: CardProjection) => (
+              {handCards.map((card: CardProjection) => (
                 <CardButton
                   card={card}
                   disabled={pending || projection.active_capability_id !== selectedCapability?.id}
@@ -847,6 +848,7 @@ const InteractionPanel = ({
                   selected={selectedCardIds.includes(card.card_id)}
                 />
               ))}
+              {handCards.length === 0 ? <p className="text-sm text-slate-500">No cards in focused hand.</p> : null}
             </div>
           </div>
           <div className="flex justify-end gap-2">
