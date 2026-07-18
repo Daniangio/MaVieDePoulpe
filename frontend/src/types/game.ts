@@ -93,13 +93,31 @@ export type BotPlanSummary = {
   risk_label: "low" | "moderate" | "high" | "forced" | string;
   confidence?: number | null;
   step_preview: string[];
+  plan_chain?: Array<{
+    index?: number;
+    label: string;
+    command_type?: string | null;
+    auto_executable?: boolean;
+    decision_boundary?: boolean;
+  }>;
   expected_resources?: {
     ap_by_ability?: Record<string, number>;
     time_steps?: number;
     control_takes_by_ability?: Record<string, number>;
+    expected_ap_gain_by_ability?: Record<string, number>;
     energy_delta_expected?: number;
     shells_delta_expected?: number;
     neurons_delta_expected?: number;
+  };
+  statistics?: {
+    success_probability?: number;
+    interaction_probabilities?: Array<Record<string, any>>;
+    estimated_take_controls?: number;
+    estimated_actions?: number;
+    estimated_time_steps?: number;
+    expected_ap_roll?: number;
+    planning_depth_take_controls?: number;
+    assumptions?: string[];
   };
   objective_effect?: string | null;
   warnings?: string[];

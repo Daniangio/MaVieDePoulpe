@@ -987,6 +987,7 @@ const BotPlansOverlay = ({
   onRecalculate: () => void;
   projection: GameProjection;
 }) => {
+  const [expandedPlanId, setExpandedPlanId] = useState<string | null>(null);
   const activeName = projection.active_capability_id
     ? projection.capabilities?.[projection.active_capability_id]?.name || projection.active_capability_id
     : "No active ability";
@@ -1023,6 +1024,9 @@ const BotPlansOverlay = ({
             const resources = plan.expected_resources || {};
             const apCost = Object.values(resources.ap_by_ability || {}).reduce((total, value) => total + Number(value || 0), 0);
             const controlTakes = Object.values(resources.control_takes_by_ability || {}).reduce((total, value) => total + Number(value || 0), 0);
+            const stats = plan.statistics || {};
+            const successPercent = Math.round(Number(stats.success_probability ?? plan.confidence ?? 1) * 100);
+            const expanded = expandedPlanId === plan.plan_id;
             return (
               <article className="flex min-h-[18rem] flex-col rounded-md border border-slate-700 bg-slate-950 p-3" key={plan.plan_id}>
                 <div>
@@ -1033,6 +1037,7 @@ const BotPlansOverlay = ({
                 </div>
                 <div className="mt-3 rounded border border-slate-800 bg-slate-900 p-2 text-xs text-slate-300">
                   <p><span className="text-slate-500">Public cost:</span> {apCost} AP, {Number(resources.time_steps || 0)} time, {controlTakes} controls</p>
+                  <p className="mt-1"><span className="text-slate-500">Estimated success:</span> {successPercent}%</p>
                   {plan.objective_effect ? <p className="mt-1"><span className="text-slate-500">Objective:</span> {plan.objective_effect}</p> : null}
                 </div>
                 <ol className="mt-3 flex-1 space-y-1 text-xs text-slate-300">
@@ -1041,6 +1046,40 @@ const BotPlansOverlay = ({
                   ))}
                 </ol>
                 {(plan.warnings || []).length ? <p className="mt-3 text-xs text-amber-200">{plan.warnings?.join(" ")}</p> : null}
+                <button
+                  className="mt-3 rounded border border-slate-700 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-900"
+                  onClick={() => setExpandedPlanId(expanded ? null : plan.plan_id)}
+                  type="button"
+                >
+                  {expanded ? "Hide details" : "Details"}
+                </button>
+                {expanded ? (
+                  <div className="mt-2 max-h-56 overflow-auto rounded border border-slate-800 bg-slate-900 p-2 text-xs text-slate-300">
+                    <p>
+                      <span className="text-slate-500">Depth:</span> {Number(stats.planning_depth_take_controls || 0)} controls, {Number(stats.estimated_actions || 0)} actions, {Number(stats.estimated_time_steps || 0)} time
+                    </p>
+                    {(stats.interaction_probabilities || []).length ? (
+                      <div className="mt-2 space-y-1">
+                        {(stats.interaction_probabilities || []).map((entry: any) => (
+                          <p key={entry.tile_instance_id || entry.tile_name}>
+                            {entry.tile_name || "Tile"}: {Math.round(Number(entry.success_probability || 0) * 100)}%
+                            {entry.counter_attack_probability !== null && entry.counter_attack_probability !== undefined
+                              ? `, counter ${Math.round(Number(entry.counter_attack_probability || 0) * 100)}%`
+                              : ""}
+                          </p>
+                        ))}
+                      </div>
+                    ) : null}
+                    {(plan.plan_chain || []).length ? (
+                      <ol className="mt-2 space-y-1">
+                        {(plan.plan_chain || []).map((step, index) => (
+                          <li key={`${plan.plan_id}_detail_${index}`}>{index + 1}. {step.label}</li>
+                        ))}
+                      </ol>
+                    ) : null}
+                    {(stats.assumptions || []).length ? <p className="mt-2 text-slate-400">{(stats.assumptions || []).join(" ")}</p> : null}
+                  </div>
+                ) : null}
                 <button
                   className="mt-3 rounded bg-teal-400 px-3 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-300 disabled:cursor-wait disabled:opacity-60"
                   disabled={loading || Boolean(executingPlanId)}
@@ -1059,6 +1098,93 @@ const BotPlansOverlay = ({
     </div>
   );
 };
+
+type PlanChainStep = {
+  label: string;
+  command_type?: string | null;
+  auto_executable?: boolean;
+  decision_boundary?: boolean;
+};
+
+type BotLogEntry = {
+  id: string;
+  text: string;
+  createdAt: number;
+  status?: string;
+};
+
+const BotPlanChain = ({
+  steps,
+  activeIndex,
+}: {
+  steps: PlanChainStep[];
+  activeIndex: number;
+}) => {
+  if (!steps.length) return null;
+  return (
+    <div className="absolute left-3 top-3 z-[45] w-48 rounded-lg border border-cyan-300/60 bg-slate-950/90 p-2 shadow-lg">
+      <p className="text-[0.65rem] font-semibold uppercase tracking-wide text-cyan-200">Selected plan</p>
+      <ol className="mt-2 space-y-1.5">
+        {steps.map((step, index) => (
+          <li
+            className={[
+              "flex items-start gap-2 rounded px-2 py-1 text-[0.68rem] leading-tight",
+              index === activeIndex ? "bg-teal-300 text-slate-950" : index < activeIndex ? "bg-slate-800 text-slate-300" : "bg-slate-900 text-slate-400",
+            ].join(" ")}
+            key={`${step.label}_${index}`}
+          >
+            <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-current text-[0.55rem]">{index + 1}</span>
+            <span>{step.label}</span>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+};
+
+const BotActionLog = ({
+  entries,
+  logOpen,
+  popups,
+  onToggle,
+}: {
+  entries: BotLogEntry[];
+  logOpen: boolean;
+  popups: BotLogEntry[];
+  onToggle: () => void;
+}) => (
+  <div className="absolute right-3 top-14 z-[45] w-72">
+    <div className="pointer-events-none mb-2 flex flex-col gap-2">
+      {popups.map((entry) => (
+        <div
+          className={[
+            "rounded-md border px-3 py-2 text-xs shadow-lg transition",
+            entry.status === "ok" ? "border-teal-300 bg-teal-950/95 text-teal-100" : "border-amber-300 bg-amber-950/95 text-amber-100",
+          ].join(" ")}
+          key={entry.id}
+        >
+          {entry.text}
+        </div>
+      ))}
+    </div>
+    <button className="rounded-full border border-cyan-300 bg-slate-900 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-cyan-100 shadow-lg hover:bg-slate-800" onClick={onToggle} type="button">
+      {logOpen ? "Close log" : "Log"}
+    </button>
+    {logOpen ? (
+      <div className="mt-2 max-h-[42vh] overflow-auto rounded-lg border border-slate-700 bg-slate-950/95 p-2 text-xs text-slate-300 shadow-xl">
+        {entries.length ? (
+          entries.map((entry) => (
+            <p className="border-b border-slate-800 py-1.5 last:border-b-0" key={entry.id}>
+              {new Date(entry.createdAt).toLocaleTimeString()} - {entry.text}
+            </p>
+          ))
+        ) : (
+          <p className="py-2 text-slate-500">No bot actions yet.</p>
+        )}
+      </div>
+    ) : null}
+  </div>
+);
 
 const GameRoomPage = () => {
   const { roomId } = useParams();
@@ -1084,6 +1210,12 @@ const GameRoomPage = () => {
   const [botPlanStatus, setBotPlanStatus] = useState<BotPlanStatus | null>(null);
   const [botPlansLoading, setBotPlansLoading] = useState(false);
   const [executingBotPlanId, setExecutingBotPlanId] = useState<string | null>(null);
+  const [executionDelayMs, setExecutionDelayMs] = useState(1000);
+  const [activePlanChain, setActivePlanChain] = useState<PlanChainStep[]>([]);
+  const [activePlanStepIndex, setActivePlanStepIndex] = useState(0);
+  const [botLogEntries, setBotLogEntries] = useState<BotLogEntry[]>([]);
+  const [botLogPopups, setBotLogPopups] = useState<BotLogEntry[]>([]);
+  const [botLogOpen, setBotLogOpen] = useState(false);
 
   const capabilityMap = projection?.capabilities || {};
   const capabilities = useMemo(() => {
@@ -1097,6 +1229,15 @@ const GameRoomPage = () => {
   const selectedCapability = selectedCapabilityId ? capabilityMap[selectedCapabilityId] : null;
   const otherCapabilities = capabilities.filter((capability) => capability.id !== selectedCapabilityId);
   const botModeEnabled = projection?.mode === "solo_with_bots" && Boolean(projection?.bot_config);
+
+  const pushBotLog = useCallback((text: string, status: string = "ok") => {
+    const entry = { id: makeCommandId(), text, createdAt: Date.now(), status };
+    setBotLogEntries((entries) => [entry, ...entries].slice(0, 80));
+    setBotLogPopups((entries) => [...entries, entry].slice(-4));
+    window.setTimeout(() => {
+      setBotLogPopups((entries) => entries.filter((existing) => existing.id !== entry.id));
+    }, 5000);
+  }, []);
 
   useEffect(() => {
     if (projection && !focusedCapabilityId) {
@@ -1120,6 +1261,20 @@ const GameRoomPage = () => {
       window.clearTimeout(clearTimer);
     };
   }, [feedback, error]);
+
+  useEffect(() => {
+    if (!activePlanChain.length) return undefined;
+    setActivePlanStepIndex(0);
+    let index = 0;
+    const timer = window.setInterval(() => {
+      index += 1;
+      setActivePlanStepIndex(Math.min(index, Math.max(0, activePlanChain.length - 1)));
+      if (index >= activePlanChain.length - 1) {
+        window.clearInterval(timer);
+      }
+    }, Math.max(100, executionDelayMs));
+    return () => window.clearInterval(timer);
+  }, [activePlanChain, executionDelayMs]);
 
   useEffect(() => {
     if (projection?.phase !== "game_over" || !roomId) return undefined;
@@ -1528,6 +1683,12 @@ const GameRoomPage = () => {
 
   const executeBotPlan = async (planId: string) => {
     if (!token || !roomId || pending || executingBotPlanId) return;
+    const selectedPlan = (botPlanStatus?.proposals || []).find((plan) => plan.plan_id === planId);
+    const selectedChain = selectedPlan?.plan_chain?.length
+      ? selectedPlan.plan_chain
+      : (selectedPlan?.step_preview || []).map((label) => ({ label }));
+    setActivePlanChain(selectedChain);
+    setActivePlanStepIndex(0);
     setPending(true);
     setExecutingBotPlanId(planId);
     setFeedback("");
@@ -1541,9 +1702,15 @@ const GameRoomPage = () => {
       if (!response.ok) throw new Error(result.detail || "Failed to execute bot plan.");
       if (result.projection) setProjection(result.projection);
       setFeedback(result.message || "Bot plan executed.");
+      (result.command_results || []).forEach((entry: any, index: number) => {
+        const chainLabel = selectedChain[index]?.label || String(entry.type || "Action").replaceAll("_", " ");
+        pushBotLog(`${chainLabel}: ${entry.ok ? "done" : entry.message || entry.reason || "rejected"}`, entry.ok ? "ok" : "warn");
+      });
+      if (result.message) pushBotLog(result.message, result.status === "completed" ? "ok" : "warn");
       await loadBotPlans("POST");
     } catch (executeError: any) {
       setError(executeError.message || "Failed to execute bot plan.");
+      pushBotLog(executeError.message || "Failed to execute bot plan.", "warn");
     } finally {
       setPending(false);
       setExecutingBotPlanId(null);
@@ -1558,6 +1725,21 @@ const GameRoomPage = () => {
           <span className="ml-3 text-slate-400">v{projection?.version ?? "-"} - {phaseLabel(projection)}</span>
         </div>
         <div className="flex items-center gap-2">
+          {botModeEnabled ? (
+            <label className="flex items-center gap-1 text-[0.68rem] text-slate-400">
+              Bot delay
+              <input
+                className="h-8 w-16 rounded border border-slate-700 bg-slate-950 px-2 text-xs text-white"
+                max={5}
+                min={0.1}
+                onChange={(event) => setExecutionDelayMs(Math.max(100, Math.round(Number(event.target.value || 1) * 1000)))}
+                step={0.1}
+                type="number"
+                value={Math.round(executionDelayMs / 100) / 10}
+              />
+              s
+            </label>
+          ) : null}
           {projection?.phase === "setup" ? (
             <>
               <select
@@ -1648,6 +1830,7 @@ const GameRoomPage = () => {
           {projection ? (
             <>
               <BoardView focusedCapabilityId={selectedCapabilityId} moveMode={moveMode} onInspectTile={inspectTile} onMove={movePoulpita} onMoveShellFromShelter={moveShellFromShelter} pending={pending} projection={projection} />
+              {botModeEnabled ? <BotPlanChain activeIndex={activePlanStepIndex} steps={activePlanChain} /> : null}
               {botModeEnabled ? (
                 <button
                   className="absolute right-3 top-3 z-[65] rounded-full border border-cyan-300 bg-slate-900 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-cyan-100 shadow-lg hover:bg-slate-800"
@@ -1659,6 +1842,14 @@ const GameRoomPage = () => {
                 >
                   {botPlansOpen ? "Close plans" : "Plans"}
                 </button>
+              ) : null}
+              {botModeEnabled ? (
+                <BotActionLog
+                  entries={botLogEntries}
+                  logOpen={botLogOpen}
+                  onToggle={() => setBotLogOpen((open) => !open)}
+                  popups={botLogPopups}
+                />
               ) : null}
               {botModeEnabled ? (
                 <BotPlansOverlay

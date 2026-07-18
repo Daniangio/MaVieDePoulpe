@@ -601,6 +601,7 @@ def _project_state(state: dict[str, Any]) -> dict[str, Any]:
         tile_catalog["surprise_cards"] = latest_catalog.get("surprise_cards") or tile_catalog.get("surprise_cards") or {}
         tile_catalog["surprise_decks"] = latest_catalog.get("surprise_decks") or tile_catalog.get("surprise_decks") or {}
         tile_catalog["action_costs"] = latest_catalog.get("action_costs") or tile_catalog.get("action_costs") or {}
+        tile_catalog["bot_settings"] = latest_catalog.get("bot_settings") or tile_catalog.get("bot_settings") or {}
     except Exception:
         pass
     projected_tiles = {}
@@ -1393,6 +1394,11 @@ class GameRoomService:
                 reason = "game_finished"
                 message = "The game finished during plan execution."
                 break
+            if (projection or {}).get("pending_surprise"):
+                status = "human_input_required"
+                reason = "surprise_resolution_required"
+                message = "A surprise card was drawn. Resolve it before continuing the plan."
+                break
             if command_type == "move_poulpita" and index < len(command_templates) - 1:
                 status = "replan_required"
                 reason = "movement_changed_visibility"
@@ -1533,6 +1539,7 @@ class GameRoomService:
             next_state.setdefault("tile_catalog", {})["surprise_cards"] = latest_catalog.get("surprise_cards") or next_state["tile_catalog"].get("surprise_cards") or {}
             next_state.setdefault("tile_catalog", {})["surprise_decks"] = latest_catalog.get("surprise_decks") or next_state["tile_catalog"].get("surprise_decks") or {}
             next_state.setdefault("tile_catalog", {})["action_costs"] = latest_catalog.get("action_costs") or next_state["tile_catalog"].get("action_costs") or {}
+            next_state.setdefault("tile_catalog", {})["bot_settings"] = latest_catalog.get("bot_settings") or next_state["tile_catalog"].get("bot_settings") or {}
         except Exception:
             return state
         return next_state

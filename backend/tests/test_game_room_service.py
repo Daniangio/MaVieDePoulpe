@@ -379,6 +379,38 @@ def test_execute_bot_plan_runs_multiple_commands_through_reducer():
     run(scenario())
 
 
+def test_bot_collect_plan_uses_configured_expected_ap_roll():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+        room = await service.create_room(user=user, mode="solo_with_bots", game_type="goldfish", human_ability_id="force")
+        await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_start_expected_roll_plan",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "goldfish",
+                "expected_version": 0,
+                "type": "start_goldfish_game",
+                "payload": {},
+            },
+        )
+        state = service._memory_states[room["id"]]
+        state["tile_catalog"]["bot_settings"] = {"expected_ap_roll": 5}
+
+        plans = await service.get_bot_plans(room_id=room["id"], user=user)
+        collect_plan = next(plan for plan in plans["proposals"] if plan["plan_id"] == "take_control_collect_agility")
+
+        assert collect_plan["statistics"]["expected_ap_roll"] == 5
+        assert collect_plan["expected_resources"]["expected_ap_gain_by_ability"] == {"agility": 5}
+        assert "average AP roll of 5" in collect_plan["rationale"]
+        assert len(collect_plan["plan_chain"]) > 2
+
+    run(scenario())
+
+
 def test_bot_plans_offer_surprise_resolution_without_public_card_ids():
     async def scenario():
         service = GameRoomService()
@@ -537,6 +569,56 @@ def test_forced_current_tile_reports_manual_blocker_instead_of_empty_plans():
         assert plans["status"] == "awaiting_selection"
         assert plans["proposals"][0]["plan_id"] == "forced_tile_needs_manual_resolution"
         assert plans["proposals"][0]["risk_label"] == "forced"
+
+    run(scenario())
+
+
+def test_bot_plans_support_open_interaction_with_public_statistics():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+        room = await service.create_room(user=user, mode="solo_with_bots", game_type="goldfish", human_ability_id="force")
+        await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_start_open_support_plan",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "goldfish",
+                "expected_version": 0,
+                "type": "start_goldfish_game",
+                "payload": {},
+            },
+        )
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "force"
+        state["tile_catalog"] = {
+            "categories": {"threat": {"id": "threat", "name": "Threat", "compulsory_on_same_node": True}},
+            "events": {"moray": {"id": "moray", "name": "Moray", "category_id": "threat"}},
+            "tiles": {"moray-tile": {"id": "moray-tile", "event_id": "moray", "priority": 10, "interaction_ids": ["hide"]}},
+            "interactions": {"hide": {"id": "hide", "name": "Hide"}},
+        }
+        state["interaction"] = {
+            "tile_instance_id": "tile_moray",
+            "tile_id": "moray-tile",
+            "node_id": "1A",
+            "initiator_capability_id": "force",
+            "played_cards": [],
+        }
+        state["capabilities"]["camouflage"]["hand"] = [
+            {"card_id": "private_hide_card", "interaction_id": "hide", "interaction_ids": ["hide"], "owner_capability_id": "camouflage"}
+        ]
+
+        plans = await service.get_bot_plans(room_id=room["id"], user=user)
+        proposal = next(plan for plan in plans["proposals"] if plan["plan_id"] == "support_interaction_camouflage_tile_moray")
+
+        assert "commands" not in proposal
+        assert "private_hide_card" not in str(plans)
+        assert proposal["statistics"]["success_probability"] >= 0.9
+        assert proposal["statistics"]["interaction_probabilities"][0]["tile_name"] == "Moray"
+        assert proposal["plan_chain"]
 
     run(scenario())
 

@@ -33,6 +33,7 @@ from .game_content_service import (
     update_token,
     update_poulpita_panel,
     update_action_costs,
+    update_bot_settings,
     update_category,
     update_event,
     update_interaction,
@@ -394,6 +395,17 @@ async def admin_update_action_costs(
 ):
     try:
         return update_action_costs(_json_form_object(action_costs_json, "action_costs_json"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/admin/content/bot-settings")
+async def admin_update_bot_settings(
+    bot_settings_json: str = Form(...),
+    _admin: User = Depends(require_admin),
+):
+    try:
+        return update_bot_settings(_json_form_object(bot_settings_json, "bot_settings_json"))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

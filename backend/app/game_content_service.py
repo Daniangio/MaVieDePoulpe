@@ -87,6 +87,9 @@ DEFAULT_ACTION_COSTS = {
     "interact": {"ap_cost": 1, "time_cost": 2},
     "special_power": {"ap_cost": 1, "time_cost": 0},
 }
+DEFAULT_BOT_SETTINGS = {
+    "expected_ap_roll": 3,
+}
 
 
 def _slug(value: str) -> str:
@@ -107,6 +110,7 @@ def _empty_content() -> dict[str, Any]:
         "tokens": _default_tokens(),
         "poulpita_panel": _default_poulpita_panel(),
         "action_costs": deepcopy(DEFAULT_ACTION_COSTS),
+        "bot_settings": deepcopy(DEFAULT_BOT_SETTINGS),
     }
 
 
@@ -181,6 +185,7 @@ def _read_content() -> dict[str, Any]:
     content["player_boards"] = _normalize_player_boards(content.get("player_boards") or [])
     content["tokens"] = _normalize_tokens(content.get("tokens") or [])
     content["poulpita_panel"] = _normalize_poulpita_panel(content.get("poulpita_panel") or {})
+    content["bot_settings"] = _normalize_bot_settings(content.get("bot_settings") or {})
     for tile in content["tiles"]:
         tile["priority"] = int(tile.get("priority") or 0)
         tile.setdefault("interaction_ids", [])
@@ -537,6 +542,7 @@ def get_content_state() -> dict[str, Any]:
         "tokens": [_with_urls(token) for token in content.get("tokens", [])],
         "poulpita_panel": _poulpita_panel_with_urls(content.get("poulpita_panel") or _default_poulpita_panel()),
         "action_costs": deepcopy(content.get("action_costs") or DEFAULT_ACTION_COSTS),
+        "bot_settings": deepcopy(content.get("bot_settings") or DEFAULT_BOT_SETTINGS),
         "cards": _generated_cards(content),
     }
 
@@ -551,6 +557,7 @@ def export_admin_content_package(*, maps: list[dict[str, Any]]) -> dict[str, Any
                 **{key: content.get(key, []) for key in ADMIN_CONTENT_COLLECTION_KEYS},
                 "poulpita_panel": content.get("poulpita_panel") or _default_poulpita_panel(),
                 "action_costs": content.get("action_costs") or DEFAULT_ACTION_COSTS,
+                "bot_settings": content.get("bot_settings") or DEFAULT_BOT_SETTINGS,
             }
         ),
     }
@@ -563,7 +570,7 @@ def import_admin_content_package(package: dict[str, Any]) -> dict[str, Any]:
     if imported_content is None:
         imported_content = {
             key: package.get(key)
-            for key in [*ADMIN_CONTENT_COLLECTION_KEYS, "poulpita_panel", "action_costs"]
+            for key in [*ADMIN_CONTENT_COLLECTION_KEYS, "poulpita_panel", "action_costs", "bot_settings"]
             if key in package
         }
     if not isinstance(imported_content, dict):
@@ -590,6 +597,12 @@ def import_admin_content_package(package: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("action_costs must be a JSON object.")
         content["action_costs"] = _normalize_action_costs(action_costs)
         summary["updated"]["action_costs"] = 1
+    if "bot_settings" in imported_content:
+        bot_settings = imported_content.get("bot_settings") or {}
+        if not isinstance(bot_settings, dict):
+            raise ValueError("bot_settings must be a JSON object.")
+        content["bot_settings"] = _normalize_bot_settings(bot_settings)
+        summary["updated"]["bot_settings"] = 1
     _write_content(_read_content_from_value(content))
     return summary
 
@@ -604,6 +617,7 @@ def _read_content_from_value(content: dict[str, Any]) -> dict[str, Any]:
     content.setdefault("surprise_cards", [])
     content.setdefault("surprise_decks", [])
     content["action_costs"] = _normalize_action_costs(content.get("action_costs") or {})
+    content["bot_settings"] = _normalize_bot_settings(content.get("bot_settings") or {})
     content["player_boards"] = _normalize_player_boards(content.get("player_boards") or [])
     content["tokens"] = _normalize_tokens(content.get("tokens") or [])
     content["poulpita_panel"] = _normalize_poulpita_panel(content.get("poulpita_panel") or {})
@@ -640,6 +654,14 @@ def _normalize_action_costs(raw_costs: dict[str, Any]) -> dict[str, dict[str, in
             "ap_cost": max(0, int(raw.get("ap_cost") if raw.get("ap_cost") is not None else normalized[action_id]["ap_cost"])),
             "time_cost": max(0, int(raw.get("time_cost") if raw.get("time_cost") is not None else normalized[action_id]["time_cost"])),
         }
+    return normalized
+
+
+def _normalize_bot_settings(raw_settings: dict[str, Any]) -> dict[str, Any]:
+    normalized = deepcopy(DEFAULT_BOT_SETTINGS)
+    if not isinstance(raw_settings, dict):
+        return normalized
+    normalized["expected_ap_roll"] = max(1, min(6, int(raw_settings.get("expected_ap_roll") if raw_settings.get("expected_ap_roll") is not None else normalized["expected_ap_roll"])))
     return normalized
 
 
@@ -761,6 +783,7 @@ def get_game_content_catalog() -> dict[str, dict[str, Any]]:
         "tokens": {token["id"]: _with_urls(token) for token in content.get("tokens", [])},
         "poulpita_panel": _poulpita_panel_with_urls(content.get("poulpita_panel") or _default_poulpita_panel()),
         "action_costs": deepcopy(content.get("action_costs") or DEFAULT_ACTION_COSTS),
+        "bot_settings": deepcopy(content.get("bot_settings") or DEFAULT_BOT_SETTINGS),
     }
 
 
@@ -769,6 +792,13 @@ def update_action_costs(action_costs: dict[str, Any]) -> dict[str, dict[str, int
     content["action_costs"] = _normalize_action_costs(action_costs)
     _write_content(content)
     return deepcopy(content["action_costs"])
+
+
+def update_bot_settings(bot_settings: dict[str, Any]) -> dict[str, Any]:
+    content = _read_content()
+    content["bot_settings"] = _normalize_bot_settings(bot_settings)
+    _write_content(content)
+    return deepcopy(content["bot_settings"])
 
 
 def create_category(*, name: str, compulsory_on_same_node: bool = False) -> dict[str, Any]:

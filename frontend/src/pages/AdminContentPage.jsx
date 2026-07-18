@@ -88,6 +88,7 @@ const contentTabs = [
   ["tiles", "Tiles"],
   ["cards", "Cards"],
   ["action_costs", "Action Costs"],
+  ["bot_settings", "Bot"],
   ["surprise_cards", "Surprise Cards"],
   ["surprise_decks", "Surprise Decks"],
   ["player_boards", "Player Boards"],
@@ -113,6 +114,7 @@ const importSummaryLabels = {
   player_boards: "Player Boards",
   tokens: "Tokens",
   action_costs: "Action Costs",
+  bot_settings: "Bot Settings",
   poulpita_panel: "Poulpita Panel",
 };
 
@@ -128,6 +130,10 @@ const defaultActionCosts = {
   move: { ap_cost: 1, time_cost: 1 },
   interact: { ap_cost: 1, time_cost: 2 },
   special_power: { ap_cost: 1, time_cost: 0 },
+};
+
+const defaultBotSettings = {
+  expected_ap_roll: 3,
 };
 
 const formatImportSummary = (result) => {
@@ -147,7 +153,7 @@ const formatImportSummary = (result) => {
 
 const AdminContentPage = () => {
   const { token, user } = useStore();
-  const [content, setContent] = useState({ categories: [], card_categories: [], interactions: [], events: [], tiles: [], levels: [], surprise_cards: [], surprise_decks: [], player_boards: [], tokens: [], poulpita_panel: null, action_costs: defaultActionCosts, cards: [] });
+  const [content, setContent] = useState({ categories: [], card_categories: [], interactions: [], events: [], tiles: [], levels: [], surprise_cards: [], surprise_decks: [], player_boards: [], tokens: [], poulpita_panel: null, action_costs: defaultActionCosts, bot_settings: defaultBotSettings, cards: [] });
   const [categoryName, setCategoryName] = useState("");
   const [categoryCompulsory, setCategoryCompulsory] = useState(false);
   const [interactionDraft, setInteractionDraft] = useState(emptyInteraction);
@@ -465,6 +471,23 @@ const AdminContentPage = () => {
     }
   };
 
+  const saveBotSettings = async (botSettings) => {
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const form = new FormData();
+      form.set("bot_settings_json", JSON.stringify(botSettings || {}));
+      await request("/api/admin/content/bot-settings", { method: "PUT", body: form });
+      setNotice("Bot settings saved.");
+      await loadContent();
+    } catch (saveError) {
+      setError(saveError.message || "Failed to save bot settings.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const saveToken = async (tokenId, tokenConfig = {}) => {
     setBusy(true);
     setError("");
@@ -750,6 +773,14 @@ const AdminContentPage = () => {
         />
       ) : null}
 
+      {activeTab === "bot_settings" ? (
+        <BotSettingsEditor
+          botSettings={content.bot_settings || defaultBotSettings}
+          busy={busy}
+          onSave={saveBotSettings}
+        />
+      ) : null}
+
       {activeTab === "surprise_cards" ? (
         <SurpriseCardEditor
           busy={busy}
@@ -1011,6 +1042,41 @@ const ActionCostEditor = ({ actionCosts, onSave, busy }) => {
             </div>
           </article>
         ))}
+      </div>
+    </section>
+  );
+};
+
+const BotSettingsEditor = ({ botSettings, onSave, busy }) => {
+  const [draft, setDraft] = useState({ ...defaultBotSettings, ...(botSettings || {}) });
+
+  useEffect(() => {
+    setDraft({ ...defaultBotSettings, ...(botSettings || {}) });
+  }, [botSettings]);
+
+  return (
+    <section className={panel}>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="font-semibold text-teal-950">Bot Planning</h2>
+          <p className="mt-1 text-xs text-slate-500">These values affect bot plan evaluation only. They do not change the real dice roll.</p>
+        </div>
+        <button className={primaryButton} disabled={busy} onClick={() => onSave(draft)} type="button">Save bot settings</button>
+      </div>
+      <div className="mt-4 grid gap-3 md:grid-cols-2">
+        <label className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3 text-sm">
+          <span className="font-semibold text-teal-950">Expected AP roll</span>
+          <span className="mt-1 block text-xs text-slate-500">Used by optimistic plans after Collect AP. Default is 3.</span>
+          <input
+            className={`${input} mt-3`}
+            max="6"
+            min="1"
+            step="1"
+            type="number"
+            value={Number(draft.expected_ap_roll || 3)}
+            onChange={(event) => setDraft((current) => ({ ...current, expected_ap_roll: Math.max(1, Math.min(6, Number(event.target.value || 3))) }))}
+          />
+        </label>
       </div>
     </section>
   );
