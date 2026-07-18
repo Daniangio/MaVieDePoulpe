@@ -32,6 +32,7 @@ NIGHT_OVERRUN_CHUNKS = 24
 DEFAULT_FOCUSED_CAPABILITY_ID = "agility"
 DEFAULT_ACTIVE_CAPABILITY_ID = DEFAULT_FOCUSED_CAPABILITY_ID
 CAPABILITY_ORDER = ["agility", "camouflage", "force", "propulsion", "intelligence"]
+BOT_SEAT_CAPABILITY_IDS = ["agility", "camouflage", "force", "propulsion"]
 CAPABILITY_NAMES = {
     "agility": "Agilite",
     "camouflage": "Camouflage",
@@ -121,6 +122,49 @@ def _public_room(room: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _bot_room_config(*, mode: str, human_ability_id: str | None = None) -> dict[str, Any] | None:
+    normalized_mode = str(mode or "solo").strip() or "solo"
+    if normalized_mode != "solo_with_bots":
+        return None
+    human_id = str(human_ability_id or "").strip() or DEFAULT_FOCUSED_CAPABILITY_ID
+    if human_id not in BOT_SEAT_CAPABILITY_IDS:
+        raise ValueError("human_ability_id must be one of agility, camouflage, force, or propulsion.")
+    controllers = []
+    for capability_id in BOT_SEAT_CAPABILITY_IDS:
+        controller_type = "human" if capability_id == human_id else "bot"
+        controllers.append(
+            {
+                "ability_id": capability_id,
+                "controller_type": controller_type,
+                "seat_id": "human" if controller_type == "human" else f"bot_{capability_id}",
+            }
+        )
+    controllers.append({"ability_id": "intelligence", "controller_type": "shared", "seat_id": "shared_intelligence"})
+    return {
+        "mode": "solo_with_bots",
+        "human_ability_id": human_id,
+        "privacy_mode": "solo_faithful",
+        "controllers": controllers,
+    }
+
+
+def _apply_controller_metadata(capabilities: dict[str, dict[str, Any]], bot_config: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    controller_by_ability = {
+        str(controller.get("ability_id")): controller
+        for controller in (bot_config or {}).get("controllers", []) or []
+        if controller.get("ability_id")
+    }
+    for capability_id, capability in capabilities.items():
+        controller = controller_by_ability.get(capability_id)
+        controller_type = str((controller or {}).get("controller_type") or "human")
+        capability["controller_type"] = controller_type
+        capability["controller_seat_id"] = (controller or {}).get("seat_id") or capability_id
+        capability["is_human_controlled"] = controller_type == "human"
+        capability["is_bot_controlled"] = controller_type == "bot"
+        capability["is_shared_controlled"] = controller_type == "shared"
+    return capabilities
+
+
 def _validate_map_config(config: dict[str, Any]) -> None:
     nodes = config.get("nodes") or {}
     starting_node_id = str(config.get("starting_node_id") or "")
@@ -182,13 +226,14 @@ class CommandRejection(Exception):
         return data
 
 
-def _setup_state(room_id: str, *, level_id: str | None = None) -> dict[str, Any]:
+def _setup_state(room_id: str, *, level_id: str | None = None, mode: str = "goldfish", bot_config: dict[str, Any] | None = None) -> dict[str, Any]:
     level_config = get_level_config(level_id)
     map_config = get_map(level_config["map_id"])
     _validate_map_config(map_config)
     return {
         "room_id": room_id,
-        "mode": "goldfish",
+        "mode": mode,
+        "bot_config": deepcopy(bot_config),
         "version": 0,
         "phase": PHASE_SETUP,
         "level_id": level_config["id"],
@@ -199,10 +244,10 @@ def _setup_state(room_id: str, *, level_id: str | None = None) -> dict[str, Any]
         "selected_map_id": map_config["id"],
         "active_capability_id": None,
         "last_active_capability_id": None,
-        "focused_capability_id": DEFAULT_FOCUSED_CAPABILITY_ID,
+        "focused_capability_id": str((bot_config or {}).get("human_ability_id") or DEFAULT_FOCUSED_CAPABILITY_ID),
         "map": _map_projection(map_config),
         "poulpita": {"node_id": None, "previous_node_id": None, "energy": 0, "neurons": 0, "seashells": 0, "size_index": 0, "size_upgraded_today": False},
-        "capabilities": _initial_capabilities(),
+        "capabilities": _apply_controller_metadata(_initial_capabilities(), bot_config),
         "tiles": {},
         "shelters": {},
         "objectives": deepcopy(level_config.get("objectives") or []),
@@ -455,7 +500,7 @@ def _apply_tile_visibility(state: dict[str, Any]) -> None:
                 revealed += 1
 
 
-def _goldfish_state(room_id: str, *, level_id: str | None = None) -> dict[str, Any]:
+def _goldfish_state(room_id: str, *, level_id: str | None = None, mode: str = "goldfish", bot_config: dict[str, Any] | None = None) -> dict[str, Any]:
     level_config = get_level_config(level_id)
     map_config = get_map(level_config["map_id"])
     _validate_map_config(map_config)
@@ -467,7 +512,8 @@ def _goldfish_state(room_id: str, *, level_id: str | None = None) -> dict[str, A
     random.shuffle(surprise_draw_pile)
     state = {
         "room_id": room_id,
-        "mode": "goldfish",
+        "mode": mode,
+        "bot_config": deepcopy(bot_config),
         "version": 1,
         "phase": PHASE_NIGHT_IDLE,
         "level_id": level_config["id"],
@@ -478,7 +524,7 @@ def _goldfish_state(room_id: str, *, level_id: str | None = None) -> dict[str, A
         "selected_map_id": map_config["id"],
         "active_capability_id": None,
         "last_active_capability_id": None,
-        "focused_capability_id": DEFAULT_FOCUSED_CAPABILITY_ID,
+        "focused_capability_id": str((bot_config or {}).get("human_ability_id") or DEFAULT_FOCUSED_CAPABILITY_ID),
         "map": _map_projection(map_config),
         "poulpita": {
             "node_id": str(level_config.get("poulpita_starting_node_id") or map_config["starting_node_id"]),
@@ -489,7 +535,7 @@ def _goldfish_state(room_id: str, *, level_id: str | None = None) -> dict[str, A
             "size_index": 0,
             "size_upgraded_today": False,
         },
-        "capabilities": _initial_capabilities(deal_hands=True),
+        "capabilities": _apply_controller_metadata(_initial_capabilities(deal_hands=True), bot_config),
         "tiles": _level_tiles(level_config, tile_catalog),
         "shelters": _level_shelters(level_config),
         "surprise_deck_id": surprise_deck_id,
@@ -516,7 +562,8 @@ def _goldfish_state(room_id: str, *, level_id: str | None = None) -> dict[str, A
 
 
 def _project_state(state: dict[str, Any]) -> dict[str, Any]:
-    capabilities = deepcopy(state.get("capabilities") or {})
+    bot_config = deepcopy(state.get("bot_config"))
+    capabilities = _apply_controller_metadata(deepcopy(state.get("capabilities") or {}), bot_config)
     capability_order = list(CAPABILITY_ORDER)
     player_boards = [capabilities[capability_id] for capability_id in capability_order if capability_id in capabilities]
     tile_catalog = deepcopy(state.get("tile_catalog") or {})
@@ -568,6 +615,7 @@ def _project_state(state: dict[str, Any]) -> dict[str, Any]:
         "projection_mode": "goldfish",
         "privacy_enforced": False,
         "mode": state["mode"],
+        "bot_config": bot_config,
         "version": int(state["version"]),
         "phase": state["phase"],
         "level_id": state["level_id"],
@@ -587,6 +635,8 @@ def _project_state(state: dict[str, Any]) -> dict[str, Any]:
                 "id": capability_id,
                 "seat_id": capability_id,
                 "display_name": capabilities.get(capability_id, {}).get("name", CAPABILITY_NAMES.get(capability_id, capability_id)),
+                "controller_type": capabilities.get(capability_id, {}).get("controller_type", "human"),
+                "controller_seat_id": capabilities.get(capability_id, {}).get("controller_seat_id", capability_id),
             }
             for capability_id in capability_order
             if capability_id in capabilities
@@ -1198,8 +1248,19 @@ class GameRoomService:
         self._memory_results[room_id] = deepcopy(result)
         await self._redis_set_json(_result_key(room_id), result)
 
-    async def create_room(self, *, user: User, game_type: str = "goldfish", map_id: str | None = None, level_id: str | None = None) -> dict[str, Any]:
+    async def create_room(
+        self,
+        *,
+        user: User,
+        mode: str = "goldfish",
+        game_type: str = "goldfish",
+        map_id: str | None = None,
+        level_id: str | None = None,
+        human_ability_id: str | None = None,
+    ) -> dict[str, Any]:
         normalized_game_type = str(game_type or "goldfish").strip() or "goldfish"
+        bot_config = _bot_room_config(mode=mode, human_ability_id=human_ability_id)
+        normalized_mode = "solo_with_bots" if bot_config else "goldfish"
         selected_level = get_level_config(level_id)
         selected_map = get_map(selected_level["map_id"])
         room_id = f"room_{uuid.uuid4().hex[:16]}"
@@ -1208,7 +1269,7 @@ class GameRoomService:
             "id": room_id,
             "owner_user_id": user.id,
             "owner_username": user.username or user.email or user.id,
-            "mode": "goldfish",
+            "mode": normalized_mode,
             "game_type": normalized_game_type,
             "state": ROOM_STATE_SETUP,
             "created_at": now,
@@ -1217,9 +1278,10 @@ class GameRoomService:
             "result_id": "",
             "map_id": selected_map["id"],
             "level_id": selected_level["id"],
+            "bot_config": deepcopy(bot_config),
         }
         await self._save_room(room)
-        await self._save_state(room_id, _setup_state(room_id, level_id=selected_level["id"]))
+        await self._save_state(room_id, _setup_state(room_id, level_id=selected_level["id"], mode=normalized_mode, bot_config=bot_config))
         self._room_locks[room_id] = asyncio.Lock()
         return _public_room(room)
 
@@ -1433,7 +1495,12 @@ class GameRoomService:
         if command_type == "start_goldfish_game":
             if state["phase"] != PHASE_SETUP:
                 self._reject(state, command_id, "game_already_started", "This goldfish game has already started.")
-            next_state = _goldfish_state(room_id, level_id=room.get("level_id") or state.get("selected_level_id"))
+            next_state = _goldfish_state(
+                room_id,
+                level_id=room.get("level_id") or state.get("selected_level_id"),
+                mode=str(room.get("mode") or state.get("mode") or "goldfish"),
+                bot_config=deepcopy(room.get("bot_config") or state.get("bot_config")),
+            )
             event = next_state["event_log"][0]
             return next_state, [event]
 

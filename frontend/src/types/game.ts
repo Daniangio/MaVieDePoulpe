@@ -39,6 +39,11 @@ export type CardProjection = {
 export type CapabilityProjection = {
   id: string;
   name: string;
+  controller_type?: "human" | "bot" | "shared";
+  controller_seat_id?: string;
+  is_human_controlled?: boolean;
+  is_bot_controlled?: boolean;
+  is_shared_controlled?: boolean;
   pa: number;
   control_takes_this_night: number;
   actions_taken_this_control: number;
@@ -65,13 +70,27 @@ export type PlayerProjection = {
   id: string;
   seat_id: string;
   display_name: string;
+  controller_type?: "human" | "bot" | "shared";
+  controller_seat_id?: string;
+};
+
+export type BotRoomConfig = {
+  mode: "solo_with_bots";
+  human_ability_id: string;
+  privacy_mode: "solo_faithful" | "omniscient_debug";
+  controllers: Array<{
+    ability_id: string;
+    controller_type: "human" | "bot" | "shared";
+    seat_id?: string | null;
+  }>;
 };
 
 export type GameProjection = {
   room_id: string;
   projection_mode: "goldfish";
   privacy_enforced: false;
-  mode: "goldfish";
+  mode: "goldfish" | "solo_with_bots";
+  bot_config?: BotRoomConfig | null;
   version: number;
   phase: "setup" | "night_idle" | "night_action" | "day" | "game_over";
   level_id: string;

@@ -237,7 +237,7 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
         <button className="rounded-md border border-cyan-300 bg-white px-3 py-2 text-sm text-teal-900 hover:bg-cyan-50" onClick={startNewLevel} type="button">New level</button>
       </div>
 
-      <div className="mt-4 grid gap-4 xl:grid-cols-[16rem_1fr]">
+      <div className="mt-4 grid gap-4 xl:grid-cols-[8rem_1fr]">
         <aside className="space-y-2">
           {(content.levels || []).map((level) => (
             <div className="flex items-center justify-between gap-2 rounded-md border border-cyan-100 bg-cyan-50/70 p-2" key={level.id}>

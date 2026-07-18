@@ -36,9 +36,18 @@ async def create_game_room(
     current_user: User = Depends(get_current_user),
 ):
     try:
-        return await _service().create_room(user=current_user, game_type=payload.game_type, map_id=payload.map_id, level_id=payload.level_id)
+        return await _service().create_room(
+            user=current_user,
+            mode=payload.mode,
+            game_type=payload.game_type,
+            map_id=payload.map_id,
+            level_id=payload.level_id,
+            human_ability_id=payload.human_ability_id,
+        )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/game/maps")

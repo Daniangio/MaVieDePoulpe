@@ -188,6 +188,8 @@ const CapabilityBoard = ({
   const purchasedUpgrades = new Set((capability.purchased_hand_size_upgrade_indices || []).map((index) => Number(index)));
   const sharedNeurons = Number(projection?.poulpita?.neurons || 0);
   const ArticleTag = compact ? "button" : "article";
+  const controllerType = capability.controller_type || "human";
+  const controllerLabel = controllerType === "bot" ? "Bot" : controllerType === "shared" ? "Shared" : "Human";
   return (
   <ArticleTag
     className={[
@@ -203,6 +205,18 @@ const CapabilityBoard = ({
       <div className="min-w-0">
         <div className="flex min-w-0 items-center gap-2">
           <h3 className="truncate text-sm font-semibold text-white">{capability.name}</h3>
+          <span
+            className={[
+              "shrink-0 rounded-full border px-1.5 py-0.5 text-[0.55rem] font-bold uppercase tracking-wide",
+              controllerType === "bot"
+                ? "border-cyan-300 bg-cyan-950 text-cyan-100"
+                : controllerType === "shared"
+                  ? "border-violet-300 bg-violet-950 text-violet-100"
+                  : "border-amber-300 bg-amber-950 text-amber-100",
+            ].join(" ")}
+          >
+            {controllerLabel}
+          </span>
           {active ? (
             <span className="shrink-0 rounded-full border border-teal-200 bg-teal-300 px-2 py-0.5 text-[0.6rem] font-bold uppercase tracking-wide text-teal-950">
               Initiative
@@ -952,11 +966,113 @@ const SurpriseCardPanel = ({
   );
 };
 
+const BotPlansOverlay = ({
+  open,
+  onClose,
+  onRecalculate,
+  projection,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onRecalculate: () => void;
+  projection: GameProjection;
+}) => {
+  const botControllers = (projection.bot_config?.controllers || []).filter((controller) => controller.controller_type === "bot");
+  const activeName = projection.active_capability_id
+    ? projection.capabilities?.[projection.active_capability_id]?.name || projection.active_capability_id
+    : "No active ability";
+  const mockPlans = [
+    {
+      id: "mock_collect",
+      proposer: botControllers[0]?.ability_id || "camouflage",
+      title: "Build action points",
+      risk: "Low risk",
+      rationale: "A bot ability can take control and collect AP. The plan stops after the die roll because the new AP value changes planning.",
+      costs: "1 control take, 0 AP, 0 time",
+      outcome: "More AP for the proposing ability.",
+      steps: ["Take control if available", "Collect action points", "Stop and recalculate"],
+    },
+    {
+      id: "mock_move",
+      proposer: botControllers[1]?.ability_id || "force",
+      title: "Inspect an adjacent node",
+      risk: "Moderate risk",
+      rationale: "A one-step move can reveal useful information. The plan stops immediately after movement if new tiles appear.",
+      costs: "Move AP/time cost from level config",
+      outcome: "Board visibility updates through the normal reducer.",
+      steps: ["Take control if needed", "Move one adjacent step", "Stop on revealed information"],
+    },
+    {
+      id: "mock_compulsory",
+      proposer: botControllers[2]?.ability_id || "propulsion",
+      title: "Resolve blocking compulsory tile",
+      risk: "Forced",
+      rationale: "Compulsory same-node tiles should be considered before lower-priority optional plans when the reducer requires it.",
+      costs: "Interaction AP/time cost plus committed cards",
+      outcome: "Start interaction, then pause if human private cards may be needed.",
+      steps: ["Check legal initiator", "Start interaction", "Contribute bot support", "Resolve or ask human"],
+    },
+  ];
+
+  if (!open) return null;
+  return (
+    <div className="absolute inset-3 z-[55] flex items-center justify-center rounded-lg bg-slate-950/55 p-3">
+      <section className="max-h-full w-[min(56rem,100%)] overflow-auto rounded-lg border border-cyan-300 bg-slate-900 p-4 shadow-2xl">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="text-xs uppercase tracking-wide text-cyan-200">Bot planning preview</p>
+            <h2 className="mt-1 text-xl font-semibold text-white">{phaseLabel(projection)}</h2>
+            <p className="mt-1 text-sm text-slate-300">
+              Current initiative: {activeName}. These are mocked Phase 1 plan cards; backend proposal generation comes next.
+            </p>
+          </div>
+          <div className="flex gap-2">
+            <button className="rounded border border-slate-600 px-3 py-2 text-xs text-slate-100 hover:bg-slate-800" onClick={onRecalculate} type="button">
+              Recalculate plans
+            </button>
+            <button className="rounded border border-slate-600 px-3 py-2 text-xs text-slate-100 hover:bg-slate-800" onClick={onClose} type="button">
+              Close
+            </button>
+          </div>
+        </div>
+        <div className="mt-4 grid gap-3 md:grid-cols-3">
+          {mockPlans.map((plan) => {
+            const proposerName = projection.capabilities?.[plan.proposer]?.name || plan.proposer;
+            return (
+              <article className="flex min-h-[18rem] flex-col rounded-md border border-slate-700 bg-slate-950 p-3" key={plan.id}>
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-cyan-200">{proposerName}</p>
+                  <h3 className="mt-1 text-base font-semibold text-white">{plan.title}</h3>
+                  <p className="mt-1 text-xs text-amber-200">{plan.risk}</p>
+                  <p className="mt-3 text-sm leading-5 text-slate-300">{plan.rationale}</p>
+                </div>
+                <div className="mt-3 rounded border border-slate-800 bg-slate-900 p-2 text-xs text-slate-300">
+                  <p><span className="text-slate-500">Cost:</span> {plan.costs}</p>
+                  <p className="mt-1"><span className="text-slate-500">Outcome:</span> {plan.outcome}</p>
+                </div>
+                <ol className="mt-3 flex-1 space-y-1 text-xs text-slate-300">
+                  {plan.steps.map((step, index) => (
+                    <li key={step}>{index + 1}. {step}</li>
+                  ))}
+                </ol>
+                <button className="mt-3 rounded bg-teal-400 px-3 py-2 text-sm font-semibold text-slate-950 opacity-60" disabled type="button">
+                  Execute plan
+                </button>
+              </article>
+            );
+          })}
+        </div>
+      </section>
+    </div>
+  );
+};
+
 const GameRoomPage = () => {
   const { roomId } = useParams();
   const { token, user } = useStore();
   const navigate = useNavigate();
   const socketRef = useRef<WebSocket | null>(null);
+  const openedBotPlansOnceRef = useRef(false);
   const [projection, setProjection] = useState<GameProjection | null>(null);
   const [levels, setLevels] = useState<Array<any>>([]);
   const [focusedCapabilityId, setFocusedCapabilityId] = useState<string | null>(null);
@@ -971,6 +1087,7 @@ const GameRoomPage = () => {
   const [failMoveTargetNodeId, setFailMoveTargetNodeId] = useState("");
   const [interactionPanelState, setInteractionPanelState] = useState<"open" | "success" | "failure" | "closing">("open");
   const [alertsVisible, setAlertsVisible] = useState(false);
+  const [botPlansOpen, setBotPlansOpen] = useState(false);
 
   const capabilityMap = projection?.capabilities || {};
   const capabilities = useMemo(() => {
@@ -983,12 +1100,20 @@ const GameRoomPage = () => {
   const selectedCapabilityId = focusedCapabilityId || projection?.focused_capability_id || capabilities[0]?.id || "";
   const selectedCapability = selectedCapabilityId ? capabilityMap[selectedCapabilityId] : null;
   const otherCapabilities = capabilities.filter((capability) => capability.id !== selectedCapabilityId);
+  const botModeEnabled = projection?.mode === "solo_with_bots" && Boolean(projection?.bot_config);
 
   useEffect(() => {
     if (projection && !focusedCapabilityId) {
       setFocusedCapabilityId(projection.focused_capability_id || projection.capability_order?.[0] || null);
     }
   }, [focusedCapabilityId, projection]);
+
+  useEffect(() => {
+    if (!botModeEnabled || !projection || projection.phase === "setup") return;
+    if (openedBotPlansOnceRef.current) return;
+    openedBotPlansOnceRef.current = true;
+    setBotPlansOpen(true);
+  }, [botModeEnabled, projection?.phase]);
 
   useEffect(() => {
     if (!feedback && !error) {
@@ -1369,6 +1494,10 @@ const GameRoomPage = () => {
     }
   };
 
+  const recalculateBotPlans = () => {
+    setFeedback("Bot proposal generation is not wired yet. This Phase 1 panel is a UI skeleton.");
+  };
+
   return (
     <main className="h-screen overflow-hidden bg-slate-950 text-slate-100">
       <header className="flex h-[5vh] min-h-10 items-center justify-between border-b border-slate-800 bg-slate-900 px-4">
@@ -1467,6 +1596,23 @@ const GameRoomPage = () => {
           {projection ? (
             <>
               <BoardView focusedCapabilityId={selectedCapabilityId} moveMode={moveMode} onInspectTile={inspectTile} onMove={movePoulpita} onMoveShellFromShelter={moveShellFromShelter} pending={pending} projection={projection} />
+              {botModeEnabled ? (
+                <button
+                  className="absolute right-3 top-3 z-[45] rounded-full border border-cyan-300 bg-slate-900 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-cyan-100 shadow-lg hover:bg-slate-800"
+                  onClick={() => setBotPlansOpen(true)}
+                  type="button"
+                >
+                  Plans
+                </button>
+              ) : null}
+              {botModeEnabled ? (
+                <BotPlansOverlay
+                  onClose={() => setBotPlansOpen(false)}
+                  onRecalculate={recalculateBotPlans}
+                  open={botPlansOpen}
+                  projection={projection}
+                />
+              ) : null}
               <InteractionPanel
                 failMoveTargetNodeId={failMoveTargetNodeId}
                 onFail={failInteraction}

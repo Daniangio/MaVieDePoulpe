@@ -65,6 +65,7 @@ class GameRoomCreateRequest(BaseModel):
     game_type: str = "goldfish"
     map_id: Optional[str] = None
     level_id: Optional[str] = None
+    human_ability_id: Optional[str] = None
 
 
 class GameRoomResponse(BaseModel):
@@ -118,6 +119,7 @@ class GameStateResponse(BaseModel):
     projection_mode: str = "goldfish"
     privacy_enforced: bool = False
     mode: str = "goldfish"
+    bot_config: Optional[Dict[str, Any]] = None
     level_id: str
     selected_level_id: Optional[str] = None
     day_index: int = 1

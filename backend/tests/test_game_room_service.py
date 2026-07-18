@@ -226,6 +226,55 @@ def test_goldfish_join_seat_is_stable_for_owner():
     run(scenario())
 
 
+def test_solo_with_bots_assigns_one_human_three_bots_and_shared_intelligence():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+
+        room = await service.create_room(user=user, mode="solo_with_bots", game_type="goldfish", human_ability_id="force")
+        setup_projection = await service.get_projection(room_id=room["id"], user=user)
+        start = await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_start_bots",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "goldfish",
+                "expected_version": 0,
+                "type": "start_goldfish_game",
+                "payload": {},
+            },
+        )
+
+        projection = start["projection"]
+        assert room["mode"] == "solo_with_bots"
+        assert setup_projection["mode"] == "solo_with_bots"
+        assert setup_projection["bot_config"]["human_ability_id"] == "force"
+        assert projection["mode"] == "solo_with_bots"
+        assert projection["focused_capability_id"] == "force"
+        assert projection["capabilities"]["force"]["controller_type"] == "human"
+        assert projection["capabilities"]["intelligence"]["controller_type"] == "shared"
+        assert {
+            capability_id
+            for capability_id, capability in projection["capabilities"].items()
+            if capability.get("controller_type") == "bot"
+        } == {"agility", "camouflage", "propulsion"}
+
+    run(scenario())
+
+
+def test_solo_with_bots_rejects_intelligence_as_human_seat():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+
+        with pytest.raises(ValueError):
+            await service.create_room(user=user, mode="solo_with_bots", game_type="goldfish", human_ability_id="intelligence")
+
+    run(scenario())
+
+
 def test_start_goldfish_game_initializes_16_node_board():
     async def scenario():
         service, user, room, start = await create_started_room()
