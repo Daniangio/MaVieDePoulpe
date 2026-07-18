@@ -174,6 +174,42 @@ def test_action_costs_and_shell_tile_requirement_are_configurable(tmp_path, monk
     assert state["action_costs"]["interact"]["time_cost"] == 3
 
 
+def test_bot_settings_include_efficiency_weights_and_ability_colors(tmp_path, monkeypatch):
+    monkeypatch.setattr(service, "CONTENT_ROOT", tmp_path)
+    monkeypatch.setattr(service, "CONTENT_IMAGES_ROOT", tmp_path / "images")
+    monkeypatch.setattr(service, "CONTENT_JSON_PATH", tmp_path / "content.json")
+
+    service._write_content(
+        {
+            "categories": [],
+            "interactions": [],
+            "events": [],
+            "tiles": [],
+            "player_boards": [],
+        }
+    )
+
+    settings = service.update_bot_settings(
+        {
+            "expected_ap_roll": 4,
+            "planning_depth_take_controls": 5,
+            "max_plans": 12,
+            "weights": {"efficiency": 50, "confidence": 25, "expected_gain": 25},
+            "resource_weights": {"energy": 10, "neurons": 7},
+            "ability_colors": {"force": "#aa0000", "agility": "not-a-color"},
+        }
+    )
+
+    assert settings["expected_ap_roll"] == 4
+    assert settings["planning_depth_take_controls"] == 5
+    assert settings["max_plans"] == 12
+    assert settings["weights"]["efficiency"] == 50
+    assert settings["resource_weights"]["energy"] == 10
+    assert settings["resource_weights"]["neurons"] == 7
+    assert settings["ability_colors"]["force"] == "#aa0000"
+    assert settings["ability_colors"]["agility"] == service.DEFAULT_BOT_SETTINGS["ability_colors"]["agility"]
+
+
 def test_level_save_validates_group_capacity_and_node_assignment(tmp_path, monkeypatch):
     monkeypatch.setattr(service, "CONTENT_ROOT", tmp_path)
     monkeypatch.setattr(service, "CONTENT_IMAGES_ROOT", tmp_path / "images")

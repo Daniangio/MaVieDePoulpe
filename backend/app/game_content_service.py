@@ -89,6 +89,29 @@ DEFAULT_ACTION_COSTS = {
 }
 DEFAULT_BOT_SETTINGS = {
     "expected_ap_roll": 3,
+    "planning_depth_take_controls": 3,
+    "max_plans": 8,
+    "weights": {
+        "efficiency": 35,
+        "confidence": 35,
+        "expected_gain": 30,
+    },
+    "resource_weights": {
+        "energy": 8,
+        "neurons": 5,
+        "seashells": 4,
+        "ap": 1,
+        "shelters": 18,
+        "surprise_cards": 6,
+        "removed_tiles": 3,
+    },
+    "ability_colors": {
+        "agility": "#0ea5e9",
+        "camouflage": "#16a34a",
+        "force": "#dc2626",
+        "propulsion": "#7c3aed",
+        "intelligence": "#f59e0b",
+    },
 }
 
 
@@ -662,6 +685,20 @@ def _normalize_bot_settings(raw_settings: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(raw_settings, dict):
         return normalized
     normalized["expected_ap_roll"] = max(1, min(6, int(raw_settings.get("expected_ap_roll") if raw_settings.get("expected_ap_roll") is not None else normalized["expected_ap_roll"])))
+    normalized["planning_depth_take_controls"] = max(1, min(8, int(raw_settings.get("planning_depth_take_controls") if raw_settings.get("planning_depth_take_controls") is not None else normalized["planning_depth_take_controls"])))
+    normalized["max_plans"] = max(3, min(16, int(raw_settings.get("max_plans") if raw_settings.get("max_plans") is not None else normalized["max_plans"])))
+    raw_weights = raw_settings.get("weights") if isinstance(raw_settings.get("weights"), dict) else {}
+    for key, fallback in DEFAULT_BOT_SETTINGS["weights"].items():
+        normalized["weights"][key] = max(0.0, float(raw_weights.get(key) if raw_weights.get(key) is not None else fallback))
+    raw_resource_weights = raw_settings.get("resource_weights") if isinstance(raw_settings.get("resource_weights"), dict) else {}
+    for key, fallback in DEFAULT_BOT_SETTINGS["resource_weights"].items():
+        normalized["resource_weights"][key] = float(raw_resource_weights.get(key) if raw_resource_weights.get(key) is not None else fallback)
+    raw_colors = raw_settings.get("ability_colors") if isinstance(raw_settings.get("ability_colors"), dict) else {}
+    for ability_id, fallback in DEFAULT_BOT_SETTINGS["ability_colors"].items():
+        color = str(raw_colors.get(ability_id) or fallback).strip()
+        if not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+            color = fallback
+        normalized["ability_colors"][ability_id] = color
     return normalized
 
 

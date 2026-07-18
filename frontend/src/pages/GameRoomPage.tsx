@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { Check, CirclePlus, Hand, Moon, MoveRight, RefreshCw, Sparkles, Swords, X } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
 import BoardView from "../components/BoardView.js";
 import CardPreview from "../components/CardPreview.jsx";
@@ -973,7 +974,6 @@ const BotPlansOverlay = ({
   loading,
   open,
   onClose,
-  onSelectPlan,
   onRecalculate,
   projection,
 }: {
@@ -981,7 +981,6 @@ const BotPlansOverlay = ({
   loading: boolean;
   open: boolean;
   onClose: () => void;
-  onSelectPlan: (planId: string) => void;
   onRecalculate: () => void;
   projection: GameProjection;
 }) => {
@@ -1063,6 +1062,15 @@ const BotPlansOverlay = ({
                     <p>
                       <span className="text-slate-500">Depth:</span> {Number(stats.planning_depth_take_controls || 0)} controls, {Number(stats.estimated_actions || 0)} actions, {Number(stats.estimated_time_steps || 0)} time
                     </p>
+                    <div className="mt-2 grid gap-1 sm:grid-cols-3">
+                      <p className="rounded bg-slate-950 px-2 py-1"><span className="text-slate-500">Efficiency:</span> {Math.round(Number(stats.efficiency ?? 1) * 100)}%</p>
+                      <p className="rounded bg-slate-950 px-2 py-1"><span className="text-slate-500">Confidence:</span> {Math.round(Number(stats.confidence_score ?? successPercent / 100) * 100)}%</p>
+                      <p className="rounded bg-slate-950 px-2 py-1"><span className="text-slate-500">Gain:</span> {Math.round(Number(stats.expected_gain_score || 0))}</p>
+                    </div>
+                    <p className="mt-1 text-[0.68rem] text-slate-400">
+                      Planner score {Number(stats.planner_score || 0).toFixed(1)}
+                      {Number(stats.wasted_current_actions || 0) > 0 ? `; ${Number(stats.wasted_current_actions || 0)} current action(s) would be left unused by switching initiative` : ""}
+                    </p>
                     {stats.distance_to_closest_known_shelter !== undefined ? (
                       <p className="mt-1"><span className="text-slate-500">Shelter distance:</span> {stats.distance_to_closest_known_shelter}</p>
                     ) : null}
@@ -1095,23 +1103,11 @@ const BotPlansOverlay = ({
                       </div>
                     ) : null}
                     {(plan.plan_chain || []).length ? (
-                      <ol className="mt-2 space-y-1">
-                        {(plan.plan_chain || []).map((step, index) => (
-                          <li key={`${plan.plan_id}_detail_${index}`}>{index + 1}. {step.label}</li>
-                        ))}
-                      </ol>
+                      <PlanDetailTree plan={plan} projection={projection} />
                     ) : null}
                     {(stats.assumptions || []).length ? <p className="mt-2 text-slate-400">{(stats.assumptions || []).join(" ")}</p> : null}
                   </div>
                 ) : null}
-                <button
-                  className="mt-3 rounded bg-teal-400 px-3 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-300 disabled:cursor-wait disabled:opacity-60"
-                  disabled={loading}
-                  onClick={() => onSelectPlan(plan.plan_id)}
-                  type="button"
-                >
-                  Use plan
-                </button>
               </article>
             );
           })}
@@ -1132,6 +1128,7 @@ type PlanChainStep = {
   } | null;
   auto_executable?: boolean;
   decision_boundary?: boolean;
+  statistics?: Record<string, any>;
 };
 
 type BotLogEntry = {
@@ -1145,6 +1142,8 @@ type PlanTreeOption = {
   key: string;
   label: string;
   compactLabel: string;
+  step: PlanChainStep;
+  depth: number;
   public_command?: {
     type: string;
     payload?: Record<string, unknown>;
@@ -1152,6 +1151,9 @@ type PlanTreeOption = {
   planIds: string[];
   proposerIds: string[];
   avgSuccess: number;
+  avgEfficiency: number;
+  avgPlannerScore: number;
+  avgExpectedGain: number;
   expectedDelta: Record<string, number>;
   preferred: boolean;
 };
@@ -1183,10 +1185,21 @@ const mergePlanDeltas = (plans: BotPlanSummary[]) => {
   return delta;
 };
 
-const planOptionMetrics = (optionPlans: BotPlanSummary[]) => {
-  const successValues = optionPlans.map((plan) => Number(plan.statistics?.success_probability ?? plan.confidence ?? 1));
+const stepStatistics = (plan: BotPlanSummary, stepIndex: number) => plan.plan_chain?.[stepIndex]?.statistics || plan.statistics || {};
+
+const planOptionMetrics = (optionPlans: BotPlanSummary[], stepIndex: number) => {
+  const successValues = optionPlans.map((plan) => Number(stepStatistics(plan, stepIndex)?.confidence_score ?? plan.statistics?.success_probability ?? plan.confidence ?? 1));
   const avgSuccess = successValues.reduce((total, value) => total + value, 0) / Math.max(1, successValues.length);
-  return { avgSuccess, expectedDelta: mergePlanDeltas(optionPlans) };
+  const efficiencyValues = optionPlans.map((plan) => Number(stepStatistics(plan, stepIndex)?.efficiency ?? 1));
+  const plannerScoreValues = optionPlans.map((plan) => Number(plan.statistics?.planner_score ?? 0));
+  const expectedGainValues = optionPlans.map((plan) => Number(stepStatistics(plan, stepIndex)?.expected_gain_score ?? plan.statistics?.expected_gain_score ?? 0));
+  return {
+    avgSuccess,
+    avgEfficiency: efficiencyValues.reduce((total, value) => total + value, 0) / Math.max(1, efficiencyValues.length),
+    avgPlannerScore: plannerScoreValues.reduce((total, value) => total + value, 0) / Math.max(1, plannerScoreValues.length),
+    avgExpectedGain: expectedGainValues.reduce((total, value) => total + value, 0) / Math.max(1, expectedGainValues.length),
+    expectedDelta: mergePlanDeltas(optionPlans),
+  };
 };
 
 const deltaText = (delta: Record<string, number>) =>
@@ -1201,16 +1214,58 @@ const abilityInitial = (projection: GameProjection, abilityId?: unknown) => {
   return String(name).trim().slice(0, 1).toUpperCase() || "?";
 };
 
-const tileNameForInstance = (projection: GameProjection, tileInstanceId?: unknown) => {
+const tileForInstance = (projection: GameProjection, tileInstanceId?: unknown) => {
   const instanceId = typeof tileInstanceId === "string" ? tileInstanceId : "";
-  if (!instanceId) return "tile";
+  if (!instanceId) return null;
   for (const nodeTiles of Object.values(projection.tiles || {})) {
     const instance = (nodeTiles || []).find((entry: any) => entry?.instance_id === instanceId);
     if (!instance?.tile_id) continue;
-    const tile = projection.tile_catalog?.tiles?.[instance.tile_id];
-    return tile?.event?.name || tile?.name || tile?.id || "tile";
+    return projection.tile_catalog?.tiles?.[instance.tile_id] || null;
   }
+  return null;
+};
+
+const tileNameForInstance = (projection: GameProjection, tileInstanceId?: unknown) => {
+  const tile = tileForInstance(projection, tileInstanceId);
+  if (tile) return tile?.event?.name || tile?.name || tile?.id || "tile";
   return "tile";
+};
+
+const abilityColor = (projection: GameProjection, abilityId?: unknown) => {
+  const id = typeof abilityId === "string" ? abilityId : "";
+  const colors = projection.tile_catalog?.bot_settings?.ability_colors || {};
+  const fallback: Record<string, string> = {
+    agility: "#0ea5e9",
+    camouflage: "#16a34a",
+    force: "#dc2626",
+    propulsion: "#7c3aed",
+    intelligence: "#f59e0b",
+  };
+  return String(colors[id] || fallback[id] || "#0891b2");
+};
+
+const actionVisual = (step: PlanChainStep, projection: GameProjection) => {
+  const command = step.public_command;
+  const payload = command?.payload || {};
+  const actorId = typeof payload.capability_id === "string" ? payload.capability_id : "";
+  const type = command?.type || step.command_type || "";
+  const tile = type === "start_interaction" ? tileForInstance(projection, payload.tile_instance_id) : null;
+  const tileImage = tile?.event?.image_url || tile?.image_url;
+  if (type === "start_interaction" && tileImage) {
+    return { actorId, imageUrl: buildApiUrl(tileImage), text: "", Icon: Swords, title: `Interact ${tileNameForInstance(projection, payload.tile_instance_id)}` };
+  }
+  if (type === "take_control") return { actorId, text: "Take", Icon: Hand, title: "Take initiative" };
+  if (type === "collect_action_points") return { actorId, text: "AP", Icon: CirclePlus, title: "Collect AP" };
+  if (type === "move_poulpita") return { actorId, text: String(payload.target_node_id || ""), Icon: MoveRight, title: `Move ${payload.target_node_id || ""}` };
+  if (type === "draw_action_card") return { actorId, text: "Draw", Icon: Sparkles, title: "Draw card" };
+  if (type === "start_interaction") return { actorId, text: "Fight", Icon: Swords, title: `Interact ${tileNameForInstance(projection, payload.tile_instance_id)}` };
+  if (type === "resolve_interaction") return { actorId, text: "OK", Icon: Check, title: "Commit cards" };
+  if (type === "fail_interaction") return { actorId, text: "Fail", Icon: X, title: "Fail interaction" };
+  if (type === "resolve_surprise_card") return { actorId, text: payload.accept === false ? "Skip" : "Surp", Icon: Sparkles, title: payload.accept === false ? "Skip surprise" : "Resolve surprise" };
+  if (type === "end_night") return { actorId, text: "Night", Icon: Moon, title: "End night" };
+  if (type === "end_day") return { actorId, text: "Day", Icon: Moon, title: "End day" };
+  if (type === "move_seashell_to_shelter" || type === "move_seashell_from_shelter") return { actorId, text: "Shell", Icon: RefreshCw, title: compactPlanStepLabel(step, projection) };
+  return { actorId, text: "Plan", Icon: RefreshCw, title: compactPlanStepLabel(step, projection) };
 };
 
 const compactPlanStepLabel = (step: PlanChainStep, projection: GameProjection) => {
@@ -1247,6 +1302,116 @@ const compactPlanStepLabel = (step: PlanChainStep, projection: GameProjection) =
   }
 };
 
+const PlanActionNode = ({
+  option,
+  projection,
+  pending,
+  onSelect,
+}: {
+  option: PlanTreeOption;
+  projection: GameProjection;
+  pending: boolean;
+  onSelect: (option: PlanTreeOption) => void;
+}) => {
+  const visual = actionVisual(option.step, projection);
+  const color = abilityColor(projection, visual.actorId);
+  const Icon = visual.Icon;
+  const initials = option.proposerIds.length ? option.proposerIds.map((id) => abilityInitial(projection, id)).join("") : abilityInitial(projection, visual.actorId);
+  const disabled = pending || (!option.public_command && option.planIds.length === 0);
+  return (
+    <button
+      className={[
+        "group flex items-center gap-2 rounded-lg border bg-slate-900/95 p-1.5 text-left shadow transition hover:-translate-y-0.5 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60",
+        option.preferred ? "border-teal-300 ring-1 ring-teal-200/60" : "border-slate-700",
+      ].join(" ")}
+      disabled={disabled}
+      onClick={() => onSelect(option)}
+      title={visual.title}
+      type="button"
+    >
+      <span
+        className="relative flex h-12 w-12 shrink-0 items-center justify-center overflow-visible rounded-full border-[3px] bg-white text-slate-900"
+        style={{ borderColor: color }}
+      >
+        <span
+          className="absolute -top-2 left-1/2 flex h-5 min-w-5 -translate-x-1/2 items-center justify-center rounded-full border border-white px-1 text-[0.56rem] font-bold text-white shadow"
+          style={{ backgroundColor: color }}
+        >
+          {initials.slice(0, 3)}
+        </span>
+        {visual.imageUrl ? (
+          <img alt="" className="h-full w-full rounded-full object-cover" src={visual.imageUrl} />
+        ) : (
+          <span className="flex h-full w-full flex-col items-center justify-center gap-0.5 rounded-full bg-cyan-50 px-1 text-center">
+            <Icon className="h-5 w-5" aria-hidden />
+            <span className="max-w-[2.5rem] truncate text-[0.52rem] font-bold leading-none">{visual.text}</span>
+          </span>
+        )}
+      </span>
+      <span className="grid w-12 shrink-0 gap-0.5 text-[0.52rem] leading-none text-slate-300">
+        <span>Eff {Math.round(option.avgEfficiency * 100)}%</span>
+        <span>Risk {Math.round((1 - option.avgSuccess) * 100)}%</span>
+        <span>Gain {Math.round(option.avgExpectedGain)}</span>
+      </span>
+    </button>
+  );
+};
+
+const PlanDetailTree = ({ plan, projection }: { plan: BotPlanSummary; projection: GameProjection }) => {
+  const resources = plan.expected_resources || {};
+  const expectedDelta = resources.expected_resource_delta || plan.statistics?.expected_resource_delta || {};
+  return (
+    <div className="mt-3 space-y-2">
+      <p className="text-[0.65rem] font-semibold uppercase tracking-wide text-slate-400">Computed tree</p>
+      <div className="space-y-1.5">
+        {(plan.plan_chain || []).map((step, index) => {
+          const visual = actionVisual(step, projection);
+          const color = abilityColor(projection, visual.actorId);
+          const Icon = visual.Icon;
+          const stats = step.statistics || {};
+          const efficiency = Math.round(Number(stats.efficiency ?? 1) * 100);
+          const risk = Math.round(Number(stats.risk_score ?? 1 - Number(stats.confidence_score ?? plan.statistics?.success_probability ?? 1)) * 100);
+          const gain = Math.round(Number(stats.expected_gain_score ?? plan.statistics?.expected_gain_score ?? 0));
+          return (
+            <div className="group relative flex items-center gap-2 rounded-md border border-slate-800 bg-slate-950 p-1.5" key={`${plan.plan_id}_tree_${index}`}>
+              <span
+                className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-full border-[3px] bg-white text-slate-900"
+                style={{ borderColor: color }}
+              >
+                <span className="absolute -top-2 left-1/2 flex h-4 min-w-4 -translate-x-1/2 items-center justify-center rounded-full border border-white px-1 text-[0.5rem] font-bold text-white" style={{ backgroundColor: color }}>
+                  {abilityInitial(projection, visual.actorId)}
+                </span>
+                {visual.imageUrl ? (
+                  <img alt="" className="h-full w-full rounded-full object-cover" src={visual.imageUrl} />
+                ) : (
+                  <span className="flex h-full w-full flex-col items-center justify-center rounded-full bg-cyan-50">
+                    <Icon className="h-4 w-4" aria-hidden />
+                    <span className="max-w-[2rem] truncate text-[0.48rem] font-bold leading-none">{visual.text}</span>
+                  </span>
+                )}
+              </span>
+              <span className="grid w-12 shrink-0 gap-0.5 text-[0.5rem] leading-none text-slate-300">
+                <span>Eff {efficiency}%</span>
+                <span>Risk {risk}%</span>
+                <span>Gain {gain}</span>
+              </span>
+              <span className="truncate text-[0.65rem] text-slate-300">{index + 1}. {compactPlanStepLabel(step, projection)}</span>
+              <div className="pointer-events-none absolute left-16 top-9 z-[80] hidden w-64 rounded-md border border-cyan-300 bg-slate-950 p-2 text-[0.65rem] text-slate-300 shadow-xl group-hover:block">
+                <p className="font-semibold text-white">{compactPlanStepLabel(step, projection)}</p>
+                <p className="mt-1 text-slate-400">{step.label}</p>
+                <p className="mt-2">Efficiency {efficiency}% - Risk {risk}% - Gain {gain}</p>
+                <p className="mt-1">Used {Number(stats.planned_actions_used || 0)} / {Number(stats.planned_action_capacity || 0)} planned actions.</p>
+                {Number(stats.wasted_current_actions || 0) > 0 ? <p className="mt-1 text-amber-200">{Number(stats.wasted_current_actions || 0)} current action(s) left unused by initiative switch.</p> : null}
+                {deltaText(expectedDelta) ? <p className="mt-1">EV: {deltaText(expectedDelta)}</p> : null}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
 const BotPlanTree = ({
   plans,
   stepIndex,
@@ -1265,66 +1430,54 @@ const BotPlanTree = ({
   projection: GameProjection;
 }) => {
   if (!plans.length) return null;
-  const groups = new Map<string, { step: PlanChainStep; plans: BotPlanSummary[] }>();
-  plans.forEach((plan) => {
-    const step = plan.plan_chain?.[stepIndex];
-    if (!step) return;
-    const key = stepKey(step);
-    if (!groups.has(key)) groups.set(key, { step, plans: [] });
-    groups.get(key)?.plans.push(plan);
-  });
-  const options: PlanTreeOption[] = Array.from(groups.entries()).map(([key, entry]) => {
-    const metrics = planOptionMetrics(entry.plans);
-    return {
-      key,
-      label: entry.step.label,
-      compactLabel: compactPlanStepLabel(entry.step, projection),
-      public_command: entry.step.public_command || null,
-      planIds: entry.plans.map((plan) => plan.plan_id),
-      proposerIds: Array.from(new Set(entry.plans.map((plan) => plan.proposer_ability_id).filter(Boolean) as string[])),
-      preferred: entry.plans.some((plan) => plan.plan_id === preferredPlanId),
-      ...metrics,
-    };
-  }).sort((left, right) => Number(right.preferred) - Number(left.preferred) || right.avgSuccess - left.avgSuccess);
-  const previewPlan = plans.find((plan) => plan.plan_id === preferredPlanId) || plans[0];
-  const futureSteps = previewPlan?.plan_chain?.slice(stepIndex + 1, stepIndex + 4) || [];
+  const maxVisibleDepth = Math.max(0, Math.min(stepIndex, Math.max(...plans.map((plan) => (plan.plan_chain || []).length), 1) - 1));
+  const optionsForDepth = (depth: number): PlanTreeOption[] => {
+    const groups = new Map<string, { step: PlanChainStep; plans: BotPlanSummary[] }>();
+    plans.forEach((plan) => {
+      const step = plan.plan_chain?.[depth];
+      if (!step) return;
+      const key = stepKey(step);
+      if (!groups.has(key)) groups.set(key, { step, plans: [] });
+      groups.get(key)?.plans.push(plan);
+    });
+    return Array.from(groups.entries()).map(([key, entry]) => {
+      const metrics = planOptionMetrics(entry.plans, depth);
+      return {
+        key,
+        label: entry.step.label,
+        compactLabel: compactPlanStepLabel(entry.step, projection),
+        step: entry.step,
+        depth,
+        public_command: entry.step.public_command || null,
+        planIds: entry.plans.map((plan) => plan.plan_id),
+        proposerIds: Array.from(new Set(entry.plans.map((plan) => plan.proposer_ability_id).filter(Boolean) as string[])),
+        preferred: entry.plans.some((plan) => plan.plan_id === preferredPlanId),
+        ...metrics,
+      };
+    }).sort((left, right) => Number(right.preferred) - Number(left.preferred) || right.avgPlannerScore - left.avgPlannerScore);
+  };
   return (
-    <div className="absolute left-3 top-3 z-[45] w-60 rounded-lg border border-cyan-300/60 bg-slate-950/90 p-2 shadow-lg">
+    <div className="absolute left-3 top-3 z-[45] max-h-[calc(100%-1.5rem)] w-[min(15rem,calc(100%-1.5rem))] overflow-auto rounded-lg border border-cyan-300/60 bg-slate-950/90 p-2 shadow-lg">
       <div className="flex items-center justify-between gap-2">
         <p className="text-[0.65rem] font-semibold uppercase tracking-wide text-cyan-200">Planning tree</p>
         <button className="text-[0.65rem] text-slate-400 hover:text-white" onClick={onClear} type="button">Clear</button>
       </div>
       <p className="mt-1 text-[0.62rem] text-slate-400">Step {stepIndex + 1} - {plans.length} plan{plans.length === 1 ? "" : "s"}</p>
-      <div className="mt-2 space-y-1.5">
-        {options.map((option) => (
-          <article className={["rounded border p-1.5 text-xs", option.preferred ? "border-teal-300 bg-teal-950/80" : "border-slate-800 bg-slate-900"].join(" ")} key={option.key}>
-            <div className="flex items-start justify-between gap-2">
-              <strong className="min-w-0 leading-tight text-slate-100">{option.compactLabel}</strong>
-              <span className="shrink-0 text-[0.65rem] text-cyan-200">{Math.round(option.avgSuccess * 100)}%</span>
+      <div className="mt-2 space-y-2">
+        {Array.from({ length: maxVisibleDepth + 1 }).map((_, depth) => {
+          const depthOptions = optionsForDepth(depth);
+          return (
+            <div className="space-y-1" key={depth}>
+              <p className="text-[0.55rem] font-semibold uppercase tracking-wide text-slate-500">Step {depth + 1}</p>
+              <div className="space-y-1">
+                {depthOptions.map((option) => (
+                  <PlanActionNode key={`${depth}:${option.key}`} onSelect={onSelectOption} option={option} pending={pending || depth < stepIndex} projection={projection} />
+                ))}
+              </div>
             </div>
-            <div className="mt-1 flex items-center justify-between gap-2 text-[0.6rem] text-slate-400">
-              <span>{option.proposerIds.length ? `Plans: ${option.proposerIds.map((id) => abilityInitial(projection, id)).join(" ")}` : "Team"}</span>
-              {deltaText(option.expectedDelta) ? <span className="truncate text-slate-300">EV {deltaText(option.expectedDelta)}</span> : null}
-            </div>
-            <button
-              className="mt-1.5 w-full rounded bg-teal-400 px-2 py-1 text-[0.65rem] font-semibold text-slate-950 hover:bg-teal-300 disabled:cursor-not-allowed disabled:opacity-60"
-              disabled={pending || (!option.public_command && option.planIds.length === plans.length)}
-              onClick={() => onSelectOption(option)}
-              type="button"
-            >
-              {option.public_command ? "Execute" : "Choose"}
-            </button>
-          </article>
-        ))}
+          );
+        })}
       </div>
-      {futureSteps.length ? (
-        <div className="mt-2 rounded border border-slate-800 bg-slate-900 p-1.5 text-[0.62rem] text-slate-400">
-          <p className="font-semibold uppercase tracking-wide text-slate-300">Preferred continuation</p>
-          <ol className="mt-1 space-y-1">
-            {futureSteps.map((step, index) => <li key={`${step.label}_${index}`}>{stepIndex + index + 2}. {compactPlanStepLabel(step, projection)}</li>)}
-          </ol>
-        </div>
-      ) : null}
     </div>
   );
 };
@@ -1420,6 +1573,7 @@ const GameRoomPage = () => {
     const activeIds = new Set(activePlanIds);
     return proposals.filter((plan) => activeIds.has(plan.plan_id));
   }, [activePlanIds, botPlanStatus?.proposals]);
+  const visiblePlanTreePlans = activePlanIds.length ? activePlanTreePlans : (botPlanStatus?.proposals || []);
 
   const pushBotLog = useCallback((text: string, status: string = "ok") => {
     const entry = { id: makeCommandId(), text, createdAt: Date.now(), status };
@@ -1899,21 +2053,14 @@ const GameRoomPage = () => {
     void loadBotPlans("POST");
   };
 
-  const selectBotPlan = (planId: string) => {
-    const selectedPlan = (botPlanStatus?.proposals || []).find((plan) => plan.plan_id === planId);
-    setActivePlanIds((botPlanStatus?.proposals || []).map((plan) => plan.plan_id));
-    setPlanStepIndex(0);
-    setPreferredPlanId(planId);
-    setBotPlansOpen(false);
-    pushBotLog(`Selected plan: ${selectedPlan?.title || planId}`, "ok");
-  };
-
   const selectPlanTreeOption = async (option: PlanTreeOption) => {
     if (pending) return;
     setActivePlanIds(option.planIds);
     setPreferredPlanId((current) => option.planIds.includes(String(current || "")) ? current : option.planIds[0] || null);
+    setPlanStepIndex(option.depth);
     if (!option.public_command) {
       pushBotLog(`Selected branch: ${option.compactLabel}`, "ok");
+      setPlanStepIndex(option.depth + 1);
       return;
     }
     const nextCommand = option.public_command;
@@ -1925,11 +2072,12 @@ const GameRoomPage = () => {
       void loadBotPlans("POST");
       return;
     }
+    setPlanStepIndex(option.depth + 1);
     pushBotLog(`Planned action done: ${option.compactLabel}`, "ok");
     void loadBotPlans("POST");
   };
 
-  const hasAvailableBotPlans = Boolean(botModeEnabled && !botPlansOpen && !activePlanIds.length && (botPlanStatus?.proposals || []).length);
+  const hasAvailableBotPlans = Boolean(botModeEnabled && !botPlansOpen && (botPlanStatus?.proposals || []).length);
 
   return (
     <main className="h-screen overflow-hidden bg-slate-950 text-slate-100">
@@ -2038,7 +2186,7 @@ const GameRoomPage = () => {
                   }}
                   onSelectOption={selectPlanTreeOption}
                   pending={pending}
-                  plans={activePlanTreePlans}
+                  plans={visiblePlanTreePlans}
                   preferredPlanId={preferredPlanId}
                   projection={projection}
                   stepIndex={planStepIndex}
@@ -2072,7 +2220,6 @@ const GameRoomPage = () => {
                   botPlanStatus={botPlanStatus}
                   loading={botPlansLoading}
                   onClose={() => setBotPlansOpen(false)}
-                  onSelectPlan={selectBotPlan}
                   onRecalculate={recalculateBotPlans}
                   open={botPlansOpen}
                   projection={projection}

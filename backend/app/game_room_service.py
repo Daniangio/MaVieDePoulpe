@@ -431,6 +431,7 @@ def _build_tile_catalog() -> dict[str, Any]:
         "tokens": token_catalog,
         "poulpita_panel": catalog.get("poulpita_panel") or {},
         "action_costs": catalog.get("action_costs") or {},
+        "bot_settings": catalog.get("bot_settings") or {},
     }
 
 

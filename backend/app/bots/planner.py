@@ -167,6 +167,46 @@ def _expected_ap_roll(state: dict[str, Any]) -> int:
     return max(1, min(6, int(_bot_settings(state).get("expected_ap_roll") or 3)))
 
 
+def _planning_depth_take_controls(state: dict[str, Any]) -> int:
+    return max(1, min(8, int(_bot_settings(state).get("planning_depth_take_controls") or DEFAULT_PLANNING_TAKE_CONTROL_DEPTH)))
+
+
+def _max_public_plans(state: dict[str, Any]) -> int:
+    return max(3, min(16, int(_bot_settings(state).get("max_plans") or 8)))
+
+
+def _planner_weight(state: dict[str, Any], key: str, fallback: float) -> float:
+    weights = _bot_settings(state).get("weights") or {}
+    try:
+        return max(0.0, float(weights.get(key) if weights.get(key) is not None else fallback))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _resource_weight(state: dict[str, Any], key: str, fallback: float) -> float:
+    weights = _bot_settings(state).get("resource_weights") or {}
+    try:
+        return float(weights.get(key) if weights.get(key) is not None else fallback)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _weighted_expected_gain(state: dict[str, Any], delta: dict[str, Any]) -> float:
+    defaults = {
+        "energy": 8.0,
+        "neurons": 5.0,
+        "seashells": 4.0,
+        "ap": 1.0,
+        "shelters": 18.0,
+        "surprise_cards": 6.0,
+        "removed_tiles": 3.0,
+    }
+    score = 0.0
+    for key, fallback in defaults.items():
+        score += float(delta.get(key) or 0) * _resource_weight(state, key, fallback)
+    return round(score, 2)
+
+
 def _tile_category(state: dict[str, Any], tile: dict[str, Any]) -> dict[str, Any]:
     catalog = state.get("tile_catalog") or {}
     event = (catalog.get("events") or {}).get(tile.get("event_id")) or {}
@@ -623,9 +663,180 @@ def _plan_statistics(
         "expected_ap_roll": _expected_ap_roll(state),
         "expected_resource_delta": expected_resource_delta,
         "interaction_summaries": interaction_summaries,
-        "planning_depth_take_controls": int(((state.get("bot_config") or {}).get("planning_depth_take_controls") or DEFAULT_PLANNING_TAKE_CONTROL_DEPTH)),
+        "planning_depth_take_controls": _planning_depth_take_controls(state),
         "assumptions": assumptions or ["Surprise cards are modeled optimistically as no-op until one is actually drawn."],
     }
+
+
+def _is_action_command(command_type: str) -> bool:
+    return command_type in {
+        "collect_action_points",
+        "draw_action_card",
+        "move_poulpita",
+        "start_interaction",
+    }
+
+
+def _command_capability_id(command: dict[str, Any]) -> str:
+    payload = command.get("payload") or {}
+    return str(payload.get("capability_id") or "")
+
+
+def _proposal_command_key(command: dict[str, Any]) -> str:
+    command_type = str(command.get("type") or "")
+    payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
+    return f"{command_type}:{sorted((payload or {}).items())}"
+
+
+def _proposal_efficiency_commands(proposal: dict[str, Any]) -> list[dict[str, Any]]:
+    commands: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for command in proposal.get("commands") or []:
+        if not isinstance(command, dict):
+            continue
+        key = _proposal_command_key(command)
+        if key not in seen:
+            commands.append(command)
+            seen.add(key)
+    for step in proposal.get("plan_chain") or []:
+        public_command = (step or {}).get("public_command")
+        if not isinstance(public_command, dict):
+            continue
+        key = _proposal_command_key(public_command)
+        if key not in seen:
+            commands.append(public_command)
+            seen.add(key)
+    return commands
+
+
+def _efficiency_metrics(state: dict[str, Any], commands: list[dict[str, Any]]) -> dict[str, Any]:
+    phase = str(state.get("phase") or "")
+    active_id = str(state.get("active_capability_id") or "")
+    current_active = _capability(state, active_id) if active_id else {}
+    switched_to = ""
+    wasted_current_actions = 0
+    if phase == "night_action" and active_id and current_active:
+        first_take_control = next((command for command in commands if str(command.get("type") or "") == "take_control"), None)
+        if first_take_control:
+            switched_to = _command_capability_id(first_take_control)
+            if switched_to and switched_to != active_id:
+                wasted_current_actions = max(0, _action_slots_left(current_active))
+
+    action_capacity_by_ability: dict[str, int] = {}
+    actions_used_by_ability: dict[str, int] = {}
+    active_control_by_ability: dict[str, bool] = {}
+    if phase == "night_action" and active_id:
+        action_capacity_by_ability[active_id] = max(0, _action_slots_left(current_active))
+        active_control_by_ability[active_id] = True
+    for command in commands:
+        command_type = str(command.get("type") or "")
+        ability_id = _command_capability_id(command)
+        if command_type == "take_control" and ability_id:
+            capability = _capability(state, ability_id)
+            action_capacity_by_ability[ability_id] = int(capability.get("max_actions_per_control") or 0)
+            active_control_by_ability[ability_id] = True
+        elif _is_action_command(command_type) and ability_id:
+            capability = _capability(state, ability_id)
+            action_capacity_by_ability.setdefault(
+                ability_id,
+                max(0, _action_slots_left(capability)) if ability_id == active_id else int(capability.get("max_actions_per_control") or 0),
+            )
+            actions_used_by_ability[ability_id] = actions_used_by_ability.get(ability_id, 0) + 1
+
+    used_actions = sum(actions_used_by_ability.values())
+    planned_capacity = sum(
+        capacity
+        for ability_id, capacity in action_capacity_by_ability.items()
+        if active_control_by_ability.get(ability_id) and (actions_used_by_ability.get(ability_id, 0) > 0 or ability_id == switched_to or ability_id == active_id)
+    )
+    if used_actions <= 0:
+        efficiency = 1.0
+    else:
+        utilization = min(1.0, used_actions / max(1, planned_capacity))
+        switch_penalty = min(1.0, wasted_current_actions / max(1, int(current_active.get("max_actions_per_control") or 1))) if wasted_current_actions else 0.0
+        efficiency = max(0.0, round(utilization - 0.35 * switch_penalty, 2))
+    return {
+        "efficiency": round(efficiency, 2),
+        "planned_action_capacity": planned_capacity,
+        "planned_actions_used": used_actions,
+        "wasted_current_actions": wasted_current_actions,
+        "initiative_switch_penalty": round(min(1.0, wasted_current_actions / max(1, int(current_active.get("max_actions_per_control") or 1))) if wasted_current_actions else 0.0, 2),
+        "actions_used_by_ability": actions_used_by_ability,
+    }
+
+
+def _attach_plan_metrics(state: dict[str, Any], proposal: dict[str, Any]) -> dict[str, Any]:
+    statistics = dict(proposal.get("statistics") or {})
+    commands = _proposal_efficiency_commands(proposal)
+    efficiency = _efficiency_metrics(state, commands)
+    expected_delta = statistics.get("expected_resource_delta") or (proposal.get("expected_resources") or {}).get("expected_resource_delta") or {}
+    expected_gain_score = _weighted_expected_gain(state, expected_delta)
+    confidence = max(0.0, min(1.0, float(statistics.get("success_probability") if statistics.get("success_probability") is not None else proposal.get("confidence") if proposal.get("confidence") is not None else 1.0)))
+    efficiency_score = float(efficiency["efficiency"])
+    aggregate_score = round(
+        _planner_weight(state, "efficiency", 35.0) * efficiency_score
+        + _planner_weight(state, "confidence", 35.0) * confidence
+        + _planner_weight(state, "expected_gain", 30.0) * (expected_gain_score / 20.0),
+        2,
+    )
+    statistics.update(
+        {
+            **efficiency,
+            "confidence_score": round(confidence, 2),
+            "expected_gain_score": expected_gain_score,
+            "planner_score": aggregate_score,
+            "pareto_axes": {
+                "efficiency": round(efficiency_score, 2),
+                "confidence": round(confidence, 2),
+                "expected_gain": expected_gain_score,
+            },
+        }
+    )
+    proposal["statistics"] = statistics
+    proposal["plan_chain"] = _attach_step_metrics(state, proposal, confidence=confidence, expected_gain_score=expected_gain_score)
+    proposal["_score"] = aggregate_score
+    return proposal
+
+
+def _attach_step_metrics(
+    state: dict[str, Any],
+    proposal: dict[str, Any],
+    *,
+    confidence: float,
+    expected_gain_score: float,
+) -> list[dict[str, Any]]:
+    chain = [dict(step) for step in (proposal.get("plan_chain") or [])]
+    active_id = str(state.get("active_capability_id") or "")
+    active_capability = _capability(state, active_id) if active_id else {}
+    active_capacity = int(active_capability.get("max_actions_per_control") or 0)
+    prefix_commands: list[dict[str, Any]] = []
+    for index, step in enumerate(chain):
+        public_command = step.get("public_command")
+        if isinstance(public_command, dict):
+            prefix_commands.append(public_command)
+        prefix_before = prefix_commands[:-1] if isinstance(public_command, dict) else prefix_commands
+        prefix_metrics = _efficiency_metrics(state, prefix_commands)
+        step_efficiency = float(prefix_metrics.get("efficiency") or 1)
+        command_type = str((public_command or {}).get("type") or step.get("command_type") or "")
+        command_ability_id = _command_capability_id(public_command or {})
+        if command_type == "take_control" and active_id and command_ability_id and command_ability_id != active_id and active_capacity > 0:
+            used_before_switch = sum(
+                1
+                for command in prefix_before
+                if _is_action_command(str(command.get("type") or "")) and _command_capability_id(command) == active_id
+            )
+            step_efficiency = round(min(1.0, max(0.0, used_before_switch / max(1, active_capacity))), 2)
+        elif _is_action_command(command_type) and command_ability_id == active_id:
+            step_efficiency = 1.0
+        step["statistics"] = {
+            **prefix_metrics,
+            "efficiency": round(step_efficiency, 2),
+            "confidence_score": round(confidence, 2),
+            "risk_score": round(1.0 - confidence, 2),
+            "expected_gain_score": expected_gain_score,
+            "step_index": index,
+        }
+    return chain
 
 
 def _legal_active_actor(state: dict[str, Any]) -> str | None:
@@ -1413,7 +1624,7 @@ def generate_bot_plan_status(state: dict[str, Any]) -> dict[str, Any]:
             proposals = _day_proposals(state)
         else:
             proposals = []
-    proposals = _select_diverse_proposals(proposals, limit=5)
+    proposals = _select_pareto_proposals(state, proposals, limit=_max_public_plans(state))
     return {
         "status": "awaiting_selection" if proposals else "idle",
         "proposal_set_id": f"plans_{state.get('room_id')}_{int(state.get('version') or 0)}",
@@ -1432,26 +1643,32 @@ def public_bot_plan_status(status: dict[str, Any]) -> dict[str, Any]:
     return public_status
 
 
-def _select_diverse_proposals(proposals: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
-    ranked = sorted(proposals, key=lambda proposal: float(proposal.get("_score") or 0), reverse=True)
-    selected: list[dict[str, Any]] = []
-    seen_groups: set[str] = set()
-    for proposal in ranked:
-        group = str(proposal.get("_plan_group") or proposal.get("plan_id") or "")
-        if group in seen_groups:
-            continue
-        selected.append(proposal)
-        seen_groups.add(group)
-        if len(selected) >= limit:
-            break
-    if len(selected) < limit:
-        selected_ids = {proposal.get("plan_id") for proposal in selected}
-        for proposal in ranked:
-            if proposal.get("plan_id") in selected_ids:
-                continue
-            selected.append(proposal)
-            if len(selected) >= limit:
-                break
+def _pareto_axes(proposal: dict[str, Any]) -> dict[str, float]:
+    axes = ((proposal.get("statistics") or {}).get("pareto_axes") or {})
+    return {
+        "efficiency": float(axes.get("efficiency") or 0),
+        "confidence": float(axes.get("confidence") or 0),
+        "expected_gain": float(axes.get("expected_gain") or 0),
+    }
+
+
+def _dominates(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_axes = _pareto_axes(left)
+    right_axes = _pareto_axes(right)
+    at_least_equal = all(left_axes[key] >= right_axes[key] - 0.0001 for key in left_axes)
+    strictly_better = any(left_axes[key] > right_axes[key] + 0.0001 for key in left_axes)
+    return at_least_equal and strictly_better
+
+
+def _select_pareto_proposals(state: dict[str, Any], proposals: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    measured = [_attach_plan_metrics(state, proposal) for proposal in proposals]
+    frontier = [
+        proposal
+        for index, proposal in enumerate(measured)
+        if not any(other_index != index and _dominates(other, proposal) for other_index, other in enumerate(measured))
+    ]
+    selected = sorted(frontier, key=lambda proposal: float(proposal.get("_score") or 0), reverse=True)[:limit]
     for proposal in selected:
         proposal.pop("_score", None)
+        proposal.pop("_plan_group", None)
     return selected

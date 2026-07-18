@@ -132,8 +132,55 @@ const defaultActionCosts = {
   special_power: { ap_cost: 1, time_cost: 0 },
 };
 
+const botAbilityOptions = [
+  ["agility", "Agility"],
+  ["camouflage", "Camouflage"],
+  ["force", "Force"],
+  ["propulsion", "Propulsion"],
+  ["intelligence", "Intelligence"],
+];
+
 const defaultBotSettings = {
   expected_ap_roll: 3,
+  planning_depth_take_controls: 3,
+  max_plans: 8,
+  weights: {
+    efficiency: 35,
+    confidence: 35,
+    expected_gain: 30,
+  },
+  resource_weights: {
+    energy: 8,
+    neurons: 5,
+    seashells: 4,
+    ap: 1,
+    shelters: 18,
+    surprise_cards: 6,
+    removed_tiles: 3,
+  },
+  ability_colors: {
+    agility: "#0ea5e9",
+    camouflage: "#16a34a",
+    force: "#dc2626",
+    propulsion: "#7c3aed",
+    intelligence: "#f59e0b",
+  },
+};
+
+const botPlannerWeightLabels = {
+  efficiency: "Efficiency",
+  confidence: "Confidence",
+  expected_gain: "Expected gain",
+};
+
+const botResourceWeightLabels = {
+  energy: "Energy",
+  neurons: "Neurons",
+  seashells: "Seashells",
+  ap: "Action points",
+  shelters: "Shelters",
+  surprise_cards: "Surprise cards",
+  removed_tiles: "Removed tiles",
 };
 
 const formatImportSummary = (result) => {
@@ -1047,12 +1094,30 @@ const ActionCostEditor = ({ actionCosts, onSave, busy }) => {
   );
 };
 
+const mergeBotSettings = (settings = {}) => ({
+  ...defaultBotSettings,
+  ...(settings || {}),
+  weights: { ...defaultBotSettings.weights, ...((settings || {}).weights || {}) },
+  resource_weights: { ...defaultBotSettings.resource_weights, ...((settings || {}).resource_weights || {}) },
+  ability_colors: { ...defaultBotSettings.ability_colors, ...((settings || {}).ability_colors || {}) },
+});
+
 const BotSettingsEditor = ({ botSettings, onSave, busy }) => {
-  const [draft, setDraft] = useState({ ...defaultBotSettings, ...(botSettings || {}) });
+  const [draft, setDraft] = useState(mergeBotSettings(botSettings));
 
   useEffect(() => {
-    setDraft({ ...defaultBotSettings, ...(botSettings || {}) });
+    setDraft(mergeBotSettings(botSettings));
   }, [botSettings]);
+
+  const updateNested = (section, key, value) => {
+    setDraft((current) => ({
+      ...current,
+      [section]: {
+        ...(current[section] || {}),
+        [key]: value,
+      },
+    }));
+  };
 
   return (
     <section className={panel}>
@@ -1063,7 +1128,7 @@ const BotSettingsEditor = ({ botSettings, onSave, busy }) => {
         </div>
         <button className={primaryButton} disabled={busy} onClick={() => onSave(draft)} type="button">Save bot settings</button>
       </div>
-      <div className="mt-4 grid gap-3 md:grid-cols-2">
+      <div className="mt-4 grid gap-3 lg:grid-cols-3">
         <label className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3 text-sm">
           <span className="font-semibold text-teal-950">Expected AP roll</span>
           <span className="mt-1 block text-xs text-slate-500">Used by optimistic plans after Collect AP. Default is 3.</span>
@@ -1077,6 +1142,86 @@ const BotSettingsEditor = ({ botSettings, onSave, busy }) => {
             onChange={(event) => setDraft((current) => ({ ...current, expected_ap_roll: Math.max(1, Math.min(6, Number(event.target.value || 3))) }))}
           />
         </label>
+        <label className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3 text-sm">
+          <span className="font-semibold text-teal-950">Planning depth</span>
+          <span className="mt-1 block text-xs text-slate-500">How many take-control windows bots estimate. Default is 3.</span>
+          <input
+            className={`${input} mt-3`}
+            max="8"
+            min="1"
+            step="1"
+            type="number"
+            value={Number(draft.planning_depth_take_controls || 3)}
+            onChange={(event) => setDraft((current) => ({ ...current, planning_depth_take_controls: Math.max(1, Math.min(8, Number(event.target.value || 3))) }))}
+          />
+        </label>
+        <label className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3 text-sm">
+          <span className="font-semibold text-teal-950">Max plans shown</span>
+          <span className="mt-1 block text-xs text-slate-500">Upper bound after Pareto pruning. Default is 8.</span>
+          <input
+            className={`${input} mt-3`}
+            max="16"
+            min="3"
+            step="1"
+            type="number"
+            value={Number(draft.max_plans || 8)}
+            onChange={(event) => setDraft((current) => ({ ...current, max_plans: Math.max(3, Math.min(16, Number(event.target.value || 8))) }))}
+          />
+        </label>
+      </div>
+      <div className="mt-4 grid gap-4 xl:grid-cols-3">
+        <div className="rounded-md border border-cyan-100 bg-white p-3">
+          <h3 className="text-sm font-semibold text-teal-950">Pareto scoring weights</h3>
+          <div className="mt-3 space-y-2">
+            {Object.entries(botPlannerWeightLabels).map(([key, label]) => (
+              <label className="grid grid-cols-[1fr_5rem] items-center gap-2 text-xs" key={key}>
+                <span className="text-slate-600">{label}</span>
+                <input
+                  className={input}
+                  min="0"
+                  step="1"
+                  type="number"
+                  value={Number(draft.weights?.[key] ?? defaultBotSettings.weights[key])}
+                  onChange={(event) => updateNested("weights", key, Math.max(0, Number(event.target.value || 0)))}
+                />
+              </label>
+            ))}
+          </div>
+        </div>
+        <div className="rounded-md border border-cyan-100 bg-white p-3">
+          <h3 className="text-sm font-semibold text-teal-950">Expected-gain resource weights</h3>
+          <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-1">
+            {Object.entries(botResourceWeightLabels).map(([key, label]) => (
+              <label className="grid grid-cols-[1fr_5rem] items-center gap-2 text-xs" key={key}>
+                <span className="text-slate-600">{label}</span>
+                <input
+                  className={input}
+                  step="0.5"
+                  type="number"
+                  value={Number(draft.resource_weights?.[key] ?? defaultBotSettings.resource_weights[key])}
+                  onChange={(event) => updateNested("resource_weights", key, Number(event.target.value || 0))}
+                />
+              </label>
+            ))}
+          </div>
+        </div>
+        <div className="rounded-md border border-cyan-100 bg-white p-3">
+          <h3 className="text-sm font-semibold text-teal-950">Ability colors</h3>
+          <div className="mt-3 space-y-2">
+            {botAbilityOptions.map(([abilityId, label]) => (
+              <label className="grid grid-cols-[1fr_5rem_2.5rem] items-center gap-2 text-xs" key={abilityId}>
+                <span className="text-slate-600">{label}</span>
+                <input
+                  className="h-9 w-full rounded border border-cyan-200 bg-white p-1"
+                  type="color"
+                  value={draft.ability_colors?.[abilityId] || defaultBotSettings.ability_colors[abilityId]}
+                  onChange={(event) => updateNested("ability_colors", abilityId, event.target.value)}
+                />
+                <span className="h-7 w-7 rounded-full border border-cyan-200" style={{ backgroundColor: draft.ability_colors?.[abilityId] || defaultBotSettings.ability_colors[abilityId] }} />
+              </label>
+            ))}
+          </div>
+        </div>
       </div>
     </section>
   );

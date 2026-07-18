@@ -103,6 +103,18 @@ export type BotPlanSummary = {
     } | null;
     auto_executable?: boolean;
     decision_boundary?: boolean;
+    statistics?: {
+      efficiency?: number;
+      confidence_score?: number;
+      risk_score?: number;
+      expected_gain_score?: number;
+      planned_action_capacity?: number;
+      planned_actions_used?: number;
+      wasted_current_actions?: number;
+      initiative_switch_penalty?: number;
+      actions_used_by_ability?: Record<string, number>;
+      step_index?: number;
+    };
   }>;
   expected_resources?: {
     ap_by_ability?: Record<string, number>;
@@ -123,6 +135,16 @@ export type BotPlanSummary = {
     estimated_take_controls?: number;
     estimated_actions?: number;
     estimated_time_steps?: number;
+    efficiency?: number;
+    confidence_score?: number;
+    expected_gain_score?: number;
+    planner_score?: number;
+    planned_action_capacity?: number;
+    planned_actions_used?: number;
+    wasted_current_actions?: number;
+    initiative_switch_penalty?: number;
+    actions_used_by_ability?: Record<string, number>;
+    pareto_axes?: Record<string, number>;
     expected_ap_roll?: number;
     planning_depth_take_controls?: number;
     assumptions?: string[];
@@ -176,6 +198,7 @@ export type GameProjection = {
     card_categories?: Array<Record<string, any>>;
     tokens?: Record<string, any>;
     poulpita_panel?: Record<string, any>;
+    bot_settings?: Record<string, any>;
   };
   interaction?: any;
   pending_surprise?: any;
