@@ -1441,7 +1441,7 @@ const BotPlanTree = ({
   if (!plans.length) return null;
   const activeIdSet = new Set(activePlanIds);
   const preferredPlan = plans.find((plan) => plan.plan_id === preferredPlanId) || null;
-  const maxVisibleDepth = Math.max(0, Math.min(stepIndex, Math.max(...plans.map((plan) => (plan.plan_chain || []).length), 1) - 1));
+  const maxVisibleDepth = Math.max(0, Math.min(7, Math.max(...plans.map((plan) => (plan.plan_chain || []).length), 1) - 1));
   const planMatchesSelectedPath = (plan: BotPlanSummary, depth: number) => {
     if (depth === 0) return true;
     if (!preferredPlan) return !activePlanIds.length || activeIdSet.has(plan.plan_id);
