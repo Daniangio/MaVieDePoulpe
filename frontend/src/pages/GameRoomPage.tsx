@@ -1087,6 +1087,30 @@ const BotPlansOverlay = ({
                     {stats.distance_to_closest_known_shelter !== undefined ? (
                       <p className="mt-1"><span className="text-slate-500">Shelter distance:</span> {stats.distance_to_closest_known_shelter}</p>
                     ) : null}
+                    {stats.surprise_card ? (
+                      <div className="mt-2 rounded border border-slate-800 bg-slate-950 p-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <strong className="text-slate-100">{stats.surprise_card?.name || "Surprise"}</strong>
+                          <span className="text-cyan-200">{stats.surprise_resolution || "resolve"}</span>
+                        </div>
+                        {(stats.surprise_costs || []).length ? <p className="mt-1"><span className="text-slate-500">Cost:</span> {(stats.surprise_costs || []).join("; ")}</p> : null}
+                        {(stats.surprise_effects || []).length ? <p className="mt-1"><span className="text-slate-500">Effects:</span> {(stats.surprise_effects || []).join(", ")}</p> : null}
+                        {Object.keys(stats.surprise_delta || {}).length ? <p className="mt-1"><span className="text-slate-500">Projected:</span> {Object.entries(stats.surprise_delta || {}).map(([key, value]) => `${Number(value) > 0 ? "+" : ""}${Number(value)} ${String(key).replaceAll("_", " ")}`).join(", ")}</p> : null}
+                      </div>
+                    ) : null}
+                    {stats.support_estimate ? (
+                      <div className="mt-2 rounded border border-slate-800 bg-slate-950 p-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <strong className="text-slate-100">{stats.support_estimate.ability_name || "Support"}</strong>
+                          <span className="text-cyan-200">{Math.round(Number(stats.support_estimate.probability || 0) * 100)}%</span>
+                        </div>
+                        {(stats.support_estimate.missing_requirements || []).length ? <p className="mt-1"><span className="text-slate-500">Missing:</span> {(stats.support_estimate.missing_requirements || []).join(", ")}</p> : null}
+                        <p className="mt-1">
+                          <span className="text-slate-500">Coverage:</span> {Number(stats.support_estimate.hand_matches || 0)} in hand, {Number(stats.support_estimate.known_future_matches || 0)} in deck/discard
+                          {stats.support_estimate.is_human ? ", human-controlled" : ""}
+                        </p>
+                      </div>
+                    ) : null}
                     {(stats.interaction_summaries || []).length ? (
                       <div className="mt-2 space-y-2">
                         {(stats.interaction_summaries || []).map((entry: any) => (
