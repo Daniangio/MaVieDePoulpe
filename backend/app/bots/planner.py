@@ -2301,6 +2301,39 @@ def _active_night_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
         return [_forced_blocker_plan(state, current_compulsory)]
     active_id = _legal_active_actor(state)
     if not active_id:
+        if not current_compulsory and not state.get("interaction"):
+            move_cost = _action_cost(state, "move")
+            adjacent = list(((state.get("map") or {}).get("adjacency") or {}).get(current_node_id) or [])
+            for ability_id in _controller_ids(state, "bot"):
+                capability = _capability(state, ability_id)
+                if ability_id == str(state.get("active_capability_id") or "") or not _has_control_take_left(capability):
+                    continue
+                proposals.extend(
+                    _collect_plan_variants(
+                        state,
+                        ability_id=ability_id,
+                        include_take_control=True,
+                        base_score=32,
+                        rationale="The current initiative has no actions left. This bot can take initiative and continue the team plan.",
+                    )
+                )
+                if int(capability.get("pa") or 0) >= move_cost["ap_cost"]:
+                    scored_nodes = []
+                    for adjacent_node_id in adjacent:
+                        node_score, _node_entries, _shelter_distance = _node_followup_score(state, str(adjacent_node_id), ability_id)
+                        scored_nodes.append((node_score, str(adjacent_node_id)))
+                    scored_nodes.sort(key=lambda item: item[0], reverse=True)
+                    for _score, target_node_id in scored_nodes[:3]:
+                        proposals.append(
+                            _move_plan(
+                                state,
+                                ability_id=ability_id,
+                                target_node_id=target_node_id,
+                                include_take_control=True,
+                                base_score=26,
+                                rationale="The current initiative has no actions left. This bot can take initiative and move as an alternative branch.",
+                            )
+                        )
         return proposals
     capability = _capability(state, active_id)
     name = capability.get("name") or active_id

@@ -1385,7 +1385,7 @@ const PlanActionNode = ({
     <button
       className={[
         "group flex shrink-0 items-center gap-1.5 rounded-full bg-transparent p-0.5 text-left transition hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-60",
-        selected ? "drop-shadow-[0_0_10px_rgba(45,212,191,0.75)]" : "",
+        selected ? "rounded-xl bg-amber-200/40 drop-shadow-[0_0_16px_rgba(251,191,36,0.95)] ring-4 ring-amber-300/80" : "",
       ].join(" ")}
       disabled={disabled}
       onClick={() => onSelect(option)}
@@ -1395,7 +1395,7 @@ const PlanActionNode = ({
     >
       <span
         className="relative flex h-12 w-12 shrink-0 items-center justify-center overflow-visible rounded-full border-[3px] bg-white text-slate-900"
-        style={{ borderColor: selected ? "#2dd4bf" : color, boxShadow: selected ? `0 0 0 3px ${color}` : undefined }}
+        style={{ borderColor: selected ? "#f59e0b" : color, boxShadow: selected ? `0 0 0 4px ${color}, 0 0 18px rgba(245,158,11,0.95)` : undefined }}
       >
         <span
           className="absolute -top-2 left-1/2 flex h-5 min-w-5 -translate-x-1/2 items-center justify-center rounded-full border border-white px-1 text-[0.56rem] font-bold text-white shadow"
@@ -1412,7 +1412,7 @@ const PlanActionNode = ({
           </span>
         )}
       </span>
-      <span className={["grid w-12 shrink-0 gap-0.5 rounded-md border px-1.5 py-1 text-[0.5rem] leading-none shadow", selected ? "border-cyan-200 bg-slate-950/95 text-black-100" : "border-slate-700 bg-slate-950/85 text-slate-200"].join(" ")}>
+      <span className={["grid w-12 shrink-0 gap-0.5 rounded-md border px-1.5 py-1 text-[0.5rem] leading-none shadow", selected ? "border-amber-300 bg-white text-slate-950 ring-2 ring-amber-200" : "border-slate-700 bg-slate-950/85 text-slate-200"].join(" ")}>
         <span>Eff {Math.round(option.avgEfficiency * 100)}%</span>
         <span>Risk {Math.round((1 - option.avgSuccess) * 100)}%</span>
         <span>Score {Math.round(option.avgExpectedGain)}</span>
@@ -1485,18 +1485,22 @@ const PlanDetailTree = ({ plan, projection }: { plan: BotPlanSummary; projection
 const BotPlanTree = ({
   plans,
   activePlanIds,
+  collapsed,
   stepIndex,
   preferredPlanId,
   pending,
+  onToggleCollapsed,
   onSelectOption,
   onExecuteOption,
   projection,
 }: {
   plans: BotPlanSummary[];
   activePlanIds: string[];
+  collapsed: boolean;
   stepIndex: number;
   preferredPlanId: string | null;
   pending: boolean;
+  onToggleCollapsed: () => void;
   onSelectOption: (option: PlanTreeOption) => void;
   onExecuteOption: (option: PlanTreeOption) => void;
   projection: GameProjection;
@@ -1546,16 +1550,21 @@ const BotPlanTree = ({
   return (
     <div className="absolute left-3 top-3 z-[45] w-max max-w-none overflow-visible p-0">
       <div className="flex items-center justify-between gap-2">
-        <p className="text-[0.65rem] font-semibold uppercase tracking-wide text-black-100 drop-shadow">Planning tree</p>
-        <button
-          className="rounded bg-teal-400 px-2 py-1 text-[0.62rem] font-semibold uppercase tracking-wide text-slate-950 shadow hover:bg-teal-300 disabled:cursor-not-allowed disabled:opacity-50"
-          disabled={pending || !selectedOption?.public_command}
-          onClick={() => selectedOption && onExecuteOption(selectedOption)}
-          type="button"
-        >
-          Execute
+        <button className="rounded bg-white/90 px-2 py-1 text-[0.65rem] font-semibold uppercase tracking-wide text-slate-950 shadow hover:bg-cyan-50" onClick={onToggleCollapsed} type="button">
+          Planning tree
         </button>
+        {!collapsed ? (
+          <button
+            className="rounded bg-teal-400 px-2 py-1 text-[0.62rem] font-semibold uppercase tracking-wide text-slate-950 shadow hover:bg-teal-300 disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={pending || !selectedOption?.public_command}
+            onClick={() => selectedOption && onExecuteOption(selectedOption)}
+            type="button"
+          >
+            Execute
+          </button>
+        ) : null}
       </div>
+      {collapsed ? null : (
       <div className="mt-2 space-y-2">
         {Array.from({ length: maxVisibleDepth + 1 }).map((_, depth) => {
           const depthOptions = optionsForDepth(depth);
@@ -1578,6 +1587,7 @@ const BotPlanTree = ({
           );
         })}
       </div>
+      )}
     </div>
   );
 };
@@ -1631,6 +1641,7 @@ const GameRoomPage = () => {
   const { token, user } = useStore();
   const navigate = useNavigate();
   const socketRef = useRef<WebSocket | null>(null);
+  const pendingPlanContinuationRef = useRef<{ expectedCommand: { type: string; payload?: Record<string, unknown> } | null; previousPlanIds: string[] } | null>(null);
   const [projection, setProjection] = useState<GameProjection | null>(null);
   const [levels, setLevels] = useState<Array<any>>([]);
   const [focusedCapabilityId, setFocusedCapabilityId] = useState<string | null>(null);
@@ -1646,6 +1657,7 @@ const GameRoomPage = () => {
   const [interactionPanelState, setInteractionPanelState] = useState<"open" | "success" | "failure" | "closing">("open");
   const [alertsVisible, setAlertsVisible] = useState(false);
   const [botPlansOpen, setBotPlansOpen] = useState(false);
+  const [botPlanTreeCollapsed, setBotPlanTreeCollapsed] = useState(false);
   const [botPlanStatus, setBotPlanStatus] = useState<BotPlanStatus | null>(null);
   const [botPlansLoading, setBotPlansLoading] = useState(false);
   const [activePlanIds, setActivePlanIds] = useState<string[]>([]);
@@ -1777,6 +1789,29 @@ const GameRoomPage = () => {
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.detail || "Failed to load bot plans.");
       setBotPlanStatus(payload);
+      const continuation = pendingPlanContinuationRef.current;
+      if (continuation) {
+        pendingPlanContinuationRef.current = null;
+        const proposals = payload.proposals || [];
+        const expectedCommand = continuation.expectedCommand;
+        if (expectedCommand) {
+          const matchingPlans = proposals.filter((plan: BotPlanSummary) => plannedCommandMatches(plan.plan_chain?.[0], expectedCommand.type, expectedCommand.payload || {}));
+          if (matchingPlans.length) {
+            setActivePlanIds(matchingPlans.map((plan: BotPlanSummary) => plan.plan_id));
+            setPreferredPlanId((current) => matchingPlans.some((plan: BotPlanSummary) => plan.plan_id === current) ? current : matchingPlans[0]?.plan_id || null);
+            setPlanStepIndex(1);
+          } else {
+            setActivePlanIds([]);
+            setPreferredPlanId(null);
+            setPlanStepIndex(0);
+            pushBotLog("Planned branch changed after new information; choose the next plan manually.", "warn");
+          }
+        } else {
+          setActivePlanIds([]);
+          setPreferredPlanId(null);
+          setPlanStepIndex(0);
+        }
+      }
       setError("");
     } catch (plansError: any) {
       setError(plansError.message || "Failed to load bot plans.");
@@ -2177,6 +2212,10 @@ const GameRoomPage = () => {
     setActivePlanIds(option.planIds);
     setPreferredPlanId((current) => option.planIds.includes(String(current || "")) ? current : option.planIds[0] || null);
     const nextCommand = option.public_command;
+    const selectedPlans = (botPlanStatus?.proposals || []).filter((plan) => option.planIds.includes(plan.plan_id));
+    const expectedNextCommand = selectedPlans
+      .map((plan) => plan.plan_chain?.[option.depth + 1]?.public_command)
+      .find(Boolean) || null;
     const result = await submitCommand(nextCommand.type, nextCommand.payload || {}, "plan");
     if (result?.ok === false) {
       setActivePlanIds([]);
@@ -2187,6 +2226,7 @@ const GameRoomPage = () => {
     }
     setPlanStepIndex(option.depth + 1);
     pushBotLog(`Planned action done: ${option.compactLabel}`, "ok");
+    pendingPlanContinuationRef.current = { expectedCommand: expectedNextCommand, previousPlanIds: option.planIds };
     void loadBotPlans("POST");
   };
 
@@ -2294,8 +2334,10 @@ const GameRoomPage = () => {
                 <BotPlanTree
                   onExecuteOption={executePlanTreeOption}
                   onSelectOption={selectPlanTreeOption}
+                  onToggleCollapsed={() => setBotPlanTreeCollapsed((collapsed) => !collapsed)}
                   pending={pending}
                   activePlanIds={activePlanIds}
+                  collapsed={botPlanTreeCollapsed}
                   plans={botPlanStatus?.proposals || []}
                   preferredPlanId={preferredPlanId}
                   projection={projection}
