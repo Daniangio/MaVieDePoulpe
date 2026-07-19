@@ -1265,41 +1265,7 @@ def _rollout_next_commands(state: dict[str, Any], ability_id: str) -> tuple[list
     if _action_slots_left(capability) <= 0:
         return [], [], "control exhausted"
     if state.get("interaction"):
-        entry = _open_interaction_entry(state)
-        if not entry:
-            return [], [], "interaction pending"
-        missing = _missing_interaction_ids_for_open_interaction(state)
-        tile = entry.get("tile") or {}
-        shell_ready = max(0, int((state.get("poulpita") or {}).get("seashells") or 0)) >= max(0, int(tile.get("shell_requirement_count") or 0))
-        if shell_ready and (not missing or _selected_cards_for_requirements(capability, missing) is not None):
-            return [
-                {
-                    "type": "resolve_interaction",
-                    "payload": {"capability_id": ability_id, "auto_select_cards": True},
-                }
-            ], [entry], f"complete {_tile_display_name(state, tile)}"
-        draw_cost = _action_cost(state, "special_power")
-        hand_count = len(capability.get("hand") or [])
-        hand_limit = int(capability.get("current_max_cards_in_hand") or 3)
-        known_support_cards = (capability.get("draw_pile") or []) + (capability.get("discard") or [])
-        if (
-            missing
-            and shell_ready
-            and int(capability.get("pa") or 0) >= draw_cost["ap_cost"]
-            and hand_count < hand_limit
-            and _matched_requirement_count(known_support_cards, missing) > 0
-        ):
-            return [{"type": "draw_action_card", "payload": {"capability_id": ability_id}}], [entry], f"draw for {_tile_display_name(state, tile)}"
-        if (
-            missing
-            and shell_ready
-            and int(capability.get("pa") or 0) < draw_cost["ap_cost"]
-            and int(capability.get("pa") or 0) >= collect_cost["ap_cost"]
-            and hand_count < hand_limit
-            and _matched_requirement_count(known_support_cards, missing) > 0
-        ):
-            return [{"type": "collect_action_points", "payload": {"capability_id": ability_id}}], [entry], f"AP for {_tile_display_name(state, tile)}"
-        return [], [], "interaction pending"
+        return _next_interaction_support_command(state, ability_id)
     current_compulsory = _compulsory_choices_on_node(state, current_node_id)
     if int(capability.get("pa") or 0) >= interact_cost["ap_cost"]:
         forced_entry = _best_rollout_interaction(state, ability_id, current_compulsory)
@@ -1374,7 +1340,8 @@ def _choose_next_rollout_control(simulated: dict[str, Any], current_ability_id: 
             _delta_score(_interaction_resolution_summary(candidate_state, entry, preferred_ability_id=candidate_id).get("expected_delta") or {})
             for entry in interactions
         )
-        choices.append((interaction_gain + len(commands), candidate_id))
+        support_gain = _interaction_support_score(candidate_state, candidate_id) if candidate_state.get("interaction") else 0
+        choices.append((interaction_gain + support_gain + len(commands), candidate_id))
     if not choices:
         return None
     choices.sort(key=lambda item: item[0], reverse=True)
@@ -1395,12 +1362,15 @@ def _optimistic_followup_from_state(
     interactions: list[dict[str, Any]] = []
     controls_used = 0
     max_controls = _planning_depth_take_controls(state)
+    stop_reason = "max steps reached"
     while len(commands_out) < max_steps:
         if not ability_id or _action_slots_left(_capability(simulated, ability_id)) <= 0:
             if controls_used >= max_controls:
+                stop_reason = "planning depth controls exhausted"
                 break
             next_ability_id = _choose_next_rollout_control(simulated, ability_id)
             if not next_ability_id:
+                stop_reason = "no eligible next control after action slots exhausted"
                 break
             command = {"type": "take_control", "payload": {"capability_id": next_ability_id}}
             steps.append(_rollout_command_label(simulated, command))
@@ -1412,9 +1382,11 @@ def _optimistic_followup_from_state(
         next_commands, next_interactions, _label = _rollout_next_commands(simulated, ability_id)
         if not next_commands:
             if controls_used >= max_controls:
+                stop_reason = "planning depth controls exhausted"
                 break
             next_ability_id = _choose_next_rollout_control(simulated, ability_id)
             if not next_ability_id:
+                stop_reason = _rollout_next_commands(simulated, ability_id)[2] or "no rollout command available"
                 break
             command = {"type": "take_control", "payload": {"capability_id": next_ability_id}}
             steps.append(_rollout_command_label(simulated, command))
@@ -1439,7 +1411,16 @@ def _optimistic_followup_from_state(
         if instance_id:
             seen_interaction_ids.add(instance_id)
         unique_interactions.append(entry)
-    return {"steps": steps, "public_commands": commands_out, "interactions": unique_interactions}
+    return {
+        "steps": steps,
+        "public_commands": commands_out,
+        "interactions": unique_interactions,
+        "debug": {
+            "stop_reason": stop_reason,
+            "controls_used": controls_used,
+            "followup_action_count": len(commands_out),
+        },
+    }
 
 
 def _selected_cards_for_requirements(capability: dict[str, Any], required_interaction_ids: list[str]) -> list[str] | None:
@@ -1687,6 +1668,51 @@ def _missing_interaction_ids_for_open_interaction(state: dict[str, Any]) -> list
     return missing
 
 
+def _interaction_support_score(state: dict[str, Any], ability_id: str) -> float:
+    entry = _open_interaction_entry(state)
+    if not entry:
+        return 0.0
+    missing = _missing_interaction_ids_for_open_interaction(state)
+    tile = entry.get("tile") or {}
+    capability = _capability(state, ability_id)
+    shell_ready = max(0, int((state.get("poulpita") or {}).get("seashells") or 0)) >= max(0, int(tile.get("shell_requirement_count") or 0))
+    if shell_ready and (not missing or _selected_cards_for_requirements(capability, missing) is not None):
+        return 100.0
+    hand_matches = _matched_requirement_count(capability.get("hand") or [], missing)
+    deck_matches = _matched_requirement_count((capability.get("draw_pile") or []) + (capability.get("discard") or []), missing)
+    if not shell_ready:
+        return 0.0
+    return hand_matches * 20.0 + deck_matches * 6.0 + min(3, int(capability.get("pa") or 0))
+
+
+def _next_interaction_support_command(state: dict[str, Any], ability_id: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
+    entry = _open_interaction_entry(state)
+    if not entry:
+        return [], [], "interaction pending"
+    capability = _capability(state, ability_id)
+    missing = _missing_interaction_ids_for_open_interaction(state)
+    tile = entry.get("tile") or {}
+    shell_ready = max(0, int((state.get("poulpita") or {}).get("seashells") or 0)) >= max(0, int(tile.get("shell_requirement_count") or 0))
+    if shell_ready and (not missing or _selected_cards_for_requirements(capability, missing) is not None):
+        return [{"type": "resolve_interaction", "payload": {"capability_id": ability_id, "auto_select_cards": True}}], [entry], f"complete {_tile_display_name(state, tile)}"
+    draw_cost = _action_cost(state, "special_power")
+    collect_cost = _action_cost(state, "gain_ap")
+    hand_count = len(capability.get("hand") or [])
+    hand_limit = int(capability.get("current_max_cards_in_hand") or 3)
+    known_support_cards = (capability.get("draw_pile") or []) + (capability.get("discard") or [])
+    if (
+        missing
+        and shell_ready
+        and hand_count < hand_limit
+        and _matched_requirement_count(known_support_cards, missing) > 0
+    ):
+        if int(capability.get("pa") or 0) >= draw_cost["ap_cost"]:
+            return [{"type": "draw_action_card", "payload": {"capability_id": ability_id}}], [entry], f"draw for {_tile_display_name(state, tile)}"
+        if int(capability.get("pa") or 0) >= collect_cost["ap_cost"]:
+            return [{"type": "collect_action_points", "payload": {"capability_id": ability_id}}], [entry], f"AP for {_tile_display_name(state, tile)}"
+    return [], [], "interaction pending"
+
+
 def _interaction_support_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
     entry = _open_interaction_entry(state)
     if not entry:
@@ -1815,6 +1841,7 @@ def _optimistic_collect_followup(state: dict[str, Any], ability_id: str, *, incl
     shelter_distance = _distance_to_closest_shelter(simulated, current_node_id)
     controls_used = 1
     max_controls = _planning_depth_take_controls(state)
+    stop_reason = "max follow-up actions reached"
 
     def choose_next_control(current_ability_id: str) -> str | None:
         choices = []
@@ -1840,7 +1867,8 @@ def _optimistic_collect_followup(state: dict[str, Any], ability_id: str, *, incl
             if not commands:
                 continue
             interaction_gain = sum(_delta_score(_interaction_resolution_summary(candidate_state, entry, preferred_ability_id=candidate_id).get("expected_delta") or {}) for entry in interactions)
-            choices.append((interaction_gain + len(commands), candidate_id))
+            support_gain = _interaction_support_score(candidate_state, candidate_id) if candidate_state.get("interaction") else 0
+            choices.append((interaction_gain + support_gain + len(commands), candidate_id))
         if not choices:
             return None
         choices.sort(key=lambda item: item[0], reverse=True)
@@ -1849,9 +1877,11 @@ def _optimistic_collect_followup(state: dict[str, Any], ability_id: str, *, incl
     for _index in range(max_followup_actions):
         if _action_slots_left(_capability(simulated, ability_id)) <= 0:
             if controls_used >= max_controls:
+                stop_reason = "planning depth controls exhausted"
                 break
             next_ability_id = choose_next_control(ability_id)
             if not next_ability_id:
+                stop_reason = "no eligible next control after action slots exhausted"
                 break
             take_control_command = {"type": "take_control", "payload": {"capability_id": next_ability_id}}
             followup_steps.append(f"{(_capability(simulated, next_ability_id).get('name') or next_ability_id)} takes control")
@@ -1875,6 +1905,7 @@ def _optimistic_collect_followup(state: dict[str, Any], ability_id: str, *, incl
                     continue
             if len(followup_steps) == 1:
                 followup_steps.append("Recalculate with the real dice result")
+            stop_reason = label or "no rollout command available"
             break
         for command in commands:
             command_type = str(command.get("type") or "")
@@ -1918,6 +1949,9 @@ def _optimistic_collect_followup(state: dict[str, Any], ability_id: str, *, incl
         "label": followup_label,
         "score_bonus": score_bonus,
         "shelter_distance": shelter_distance,
+        "stop_reason": stop_reason,
+        "controls_used": controls_used,
+        "followup_action_count": len(followup_public_commands),
     }
 
 
@@ -1977,6 +2011,12 @@ def _collect_plan(
         statistics["expected_resource_delta"] = expected_delta
     if followup.get("shelter_distance") is not None:
         statistics["distance_to_closest_known_shelter"] = followup["shelter_distance"]
+    statistics["rollout_debug"] = {
+        "stop_reason": followup.get("stop_reason"),
+        "controls_used": followup.get("controls_used"),
+        "followup_action_count": followup.get("followup_action_count"),
+        "followup_label": followup.get("label"),
+    }
     return _public_plan(
         plan_id=f"{'take_control_' if include_take_control else ''}collect_{ability_id}",
         proposer_ability_id=ability_id,
@@ -2075,6 +2115,8 @@ def _night_idle_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
     proposals = []
     current_node_id = str((state.get("poulpita") or {}).get("node_id") or "")
     compulsory = _compulsory_choices_on_node(state, current_node_id)
+    move_cost = _action_cost(state, "move")
+    adjacent = list(((state.get("map") or {}).get("adjacency") or {}).get(current_node_id) or [])
     for ability_id in _controller_ids(state, "bot"):
         capability = _capability(state, ability_id)
         if not _has_control_take_left(capability):
@@ -2086,6 +2128,23 @@ def _night_idle_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
                     break
             continue
         proposals.append(_collect_plan(state, ability_id=ability_id, include_take_control=True, base_score=35, rationale="This bot ability can legally take control and collect AP."))
+        if int(capability.get("pa") or 0) >= move_cost["ap_cost"]:
+            scored_nodes = []
+            for adjacent_node_id in adjacent:
+                node_score, _node_entries, _shelter_distance = _node_followup_score(state, str(adjacent_node_id), ability_id)
+                scored_nodes.append((node_score, str(adjacent_node_id)))
+            scored_nodes.sort(key=lambda item: item[0], reverse=True)
+            for _score, target_node_id in scored_nodes[:2]:
+                proposals.append(
+                    _move_plan(
+                        state,
+                        ability_id=ability_id,
+                        target_node_id=target_node_id,
+                        include_take_control=True,
+                        base_score=28,
+                        rationale="This bot can take initiative and move as an alternative branch; later known interactions are planned optimistically.",
+                    )
+                )
     return proposals
 
 
@@ -2109,7 +2168,7 @@ def _active_night_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
                     )
                     break
         if proposals:
-            return sorted(proposals, key=lambda proposal: float(proposal.get("_score") or 0), reverse=True)[:3]
+            return proposals
         return [_forced_blocker_plan(state, current_compulsory)]
     active_id = _legal_active_actor(state)
     if not active_id:
@@ -2220,7 +2279,12 @@ def _active_night_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
                 )
             )
             if int(bot_capability.get("pa") or 0) >= move_cost["ap_cost"]:
-                for target_node_id in adjacent[:2]:
+                scored_nodes = []
+                for adjacent_node_id in adjacent:
+                    node_score, _node_entries, _shelter_distance = _node_followup_score(state, str(adjacent_node_id), ability_id)
+                    scored_nodes.append((node_score, str(adjacent_node_id)))
+                scored_nodes.sort(key=lambda item: item[0], reverse=True)
+                for _score, target_node_id in scored_nodes[:3]:
                     proposals.append(
                         _move_plan(
                             state,
@@ -2301,13 +2365,16 @@ def generate_bot_plan_status(state: dict[str, Any]) -> dict[str, Any]:
             proposals = _day_proposals(state)
         else:
             proposals = []
-    proposals = _select_pareto_proposals(state, proposals, limit=_max_public_plans(state))
+    generated_count = len(proposals)
+    proposals, debug = _select_pareto_proposals(state, proposals, limit=_max_public_plans(state))
+    debug["raw_generated_count"] = generated_count
     return {
         "status": "awaiting_selection" if proposals else "idle",
         "proposal_set_id": f"plans_{state.get('room_id')}_{int(state.get('version') or 0)}",
         "generated_from_version": int(state.get("version") or 0),
         "proposals": proposals,
         "message": "" if proposals else "No bot proposals are available for the current state.",
+        "debug": debug,
     }
 
 
@@ -2337,7 +2404,40 @@ def _dominates(left: dict[str, Any], right: dict[str, Any]) -> bool:
     return at_least_equal and strictly_better
 
 
-def _select_pareto_proposals(state: dict[str, Any], proposals: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+def _proposal_count_by_key(proposals: list[dict[str, Any]], key: str, fallback: str = "team") -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for proposal in proposals:
+        value = str(proposal.get(key) or fallback)
+        counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
+def _proposal_depth_buckets(proposals: list[dict[str, Any]]) -> dict[str, int]:
+    buckets: dict[str, int] = {}
+    for proposal in proposals:
+        depth = len(proposal.get("plan_chain") or [])
+        label = str(depth)
+        buckets[label] = buckets.get(label, 0) + 1
+    return buckets
+
+
+def _proposal_debug_summary(proposal: dict[str, Any]) -> dict[str, Any]:
+    statistics = proposal.get("statistics") or {}
+    rollout_debug = statistics.get("rollout_debug") or {}
+    chain = proposal.get("plan_chain") or []
+    return {
+        "plan_id": proposal.get("plan_id"),
+        "proposer_ability_id": proposal.get("proposer_ability_id") or "team",
+        "title": proposal.get("title"),
+        "depth": len(chain),
+        "last_step": (chain[-1] or {}).get("label") if chain else None,
+        "rollout_stop_reason": rollout_debug.get("stop_reason"),
+        "score": round(float(proposal.get("_score") or 0), 2),
+        "pareto_axes": statistics.get("pareto_axes") or {},
+    }
+
+
+def _select_pareto_proposals(state: dict[str, Any], proposals: list[dict[str, Any]], *, limit: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     measured = [_attach_plan_metrics(state, proposal) for proposal in proposals]
     frontier = [
         proposal
@@ -2374,7 +2474,25 @@ def _select_pareto_proposals(state: dict[str, Any], proposals: list[dict[str, An
             if len(selected) >= minimum_options:
                 break
     selected = selected[:limit]
+    selected_plan_ids = {proposal.get("plan_id") for proposal in selected}
+    debug = {
+        "phase": state.get("phase"),
+        "active_capability_id": state.get("active_capability_id"),
+        "planning_depth_take_controls": _planning_depth_take_controls(state),
+        "max_plans_per_proposer": _max_plans_per_proposer(state),
+        "max_public_plans": limit,
+        "generated_count": len(proposals),
+        "measured_count": len(measured),
+        "frontier_count": len(frontier),
+        "selected_count": len(selected),
+        "generated_by_proposer": _proposal_count_by_key(measured, "proposer_ability_id"),
+        "selected_by_proposer": _proposal_count_by_key(selected, "proposer_ability_id"),
+        "generated_depths": _proposal_depth_buckets(measured),
+        "selected_depths": _proposal_depth_buckets(selected),
+        "selected": [_proposal_debug_summary(proposal) for proposal in selected],
+        "pruned": [_proposal_debug_summary(proposal) for proposal in measured if proposal.get("plan_id") not in selected_plan_ids][:12],
+    }
     for proposal in selected:
         proposal.pop("_score", None)
         proposal.pop("_plan_group", None)
-    return selected
+    return selected, debug
