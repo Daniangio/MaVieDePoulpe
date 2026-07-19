@@ -2,6 +2,7 @@ node_modules/
 secrets/
 backend/data/maps/
 backend/data/content/
+*.pdf
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
