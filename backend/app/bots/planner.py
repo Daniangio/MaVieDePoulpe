@@ -76,7 +76,7 @@ def _safe_public_command(command: dict[str, Any]) -> dict[str, Any] | None:
         "take_control": {"capability_id"},
         "collect_action_points": {"capability_id"},
         "move_poulpita": {"capability_id", "target_node_id"},
-        "draw_action_card": {"capability_id"},
+        "draw_action_card": {"capability_id", "auto_discard_card"},
         "start_interaction": {"capability_id", "tile_instance_id", "auto_select_cards"},
         "resolve_interaction": {"capability_id", "auto_select_cards"},
         "fail_interaction": {"target_node_id"},
@@ -1091,6 +1091,22 @@ def _simulate_play_cards_for_requirements(state: dict[str, Any], ability_id: str
         played_cards.append({**card, "interaction_id": match, "interaction_ids": _card_interaction_options(card), "capability_id": ability_id})
 
 
+def _simulate_auto_discard_for_draw(state: dict[str, Any], capability: dict[str, Any]) -> None:
+    hand = capability.get("hand") or []
+    if not hand:
+        return
+    required = _missing_support_ids_for_open_interaction(state) if state.get("interaction") else []
+    discard_index = 0
+    if required:
+        for index, card in enumerate(hand):
+            if not any(interaction_id in required for interaction_id in _card_interaction_options(card)):
+                discard_index = index
+                break
+    discarded = hand[discard_index]
+    capability["hand"] = [card for index, card in enumerate(hand) if index != discard_index]
+    capability.setdefault("discard", []).append(discarded)
+
+
 def _simulate_remove_tiles_by_category(state: dict[str, Any], node_id: str, category_id: str) -> int:
     catalog_tiles = (state.get("tile_catalog") or {}).get("tiles") or {}
     catalog_events = (state.get("tile_catalog") or {}).get("events") or {}
@@ -1324,7 +1340,10 @@ def _simulate_public_command(state: dict[str, Any], command: dict[str, Any]) -> 
         capability["pa"] = max(0, int(capability.get("pa") or 0) - cost["ap_cost"])
         capability["actions_taken_this_control"] = int(capability.get("actions_taken_this_control") or 0) + 1
         _simulate_advance_time(state, cost["time_cost"])
-        missing = _missing_interaction_ids_for_open_interaction(state) if state.get("interaction") else []
+        hand_limit = int(capability.get("current_max_cards_in_hand") or 3)
+        if len(capability.get("hand") or []) >= hand_limit and payload.get("auto_discard_card"):
+            _simulate_auto_discard_for_draw(state, capability)
+        missing = _missing_support_ids_for_open_interaction(state) if state.get("interaction") else []
         candidate_zones = ["draw_pile", "discard"]
         drawn_card = None
         drawn_zone = ""
@@ -1377,7 +1396,7 @@ def _simulate_public_command(state: dict[str, Any], command: dict[str, Any]) -> 
         interaction = state.get("interaction") or {}
         entry = _simulated_tile_entry(state, str(interaction.get("tile_instance_id") or ""))
         if payload.get("auto_select_cards") and entry:
-            _simulate_play_cards_for_requirements(state, ability_id, _missing_interaction_ids_for_open_interaction(state))
+            _simulate_play_cards_for_requirements(state, ability_id, _missing_support_ids_for_open_interaction(state))
         if entry:
             _apply_success_effects_to_simulation(state, entry)
             node_id = str(entry.get("node_id") or "")
@@ -1899,14 +1918,17 @@ def _played_interactions(state: dict[str, Any]) -> list[str]:
     return [str(card.get("interaction_id") or "") for card in ((state.get("interaction") or {}).get("played_cards") or []) if card.get("interaction_id")]
 
 
-def _missing_interaction_ids_for_open_interaction(state: dict[str, Any]) -> list[str]:
+def _missing_interaction_ids_for_open_interaction(state: dict[str, Any], *, include_counter_attack: bool = False) -> list[str]:
     entry = _open_interaction_entry(state)
     if not entry:
         return []
     tile = entry["tile"]
     missing = []
     played = list(_played_interactions(state))
-    for required_id in [str(interaction_id) for interaction_id in (tile.get("interaction_ids") or []) if interaction_id]:
+    required_ids = [str(interaction_id) for interaction_id in (tile.get("interaction_ids") or []) if interaction_id]
+    if include_counter_attack:
+        required_ids.extend(str(interaction_id) for interaction_id in (tile.get("counter_attack_interaction_ids") or []) if interaction_id)
+    for required_id in required_ids:
         if required_id in played:
             played.remove(required_id)
         else:
@@ -1914,11 +1936,26 @@ def _missing_interaction_ids_for_open_interaction(state: dict[str, Any]) -> list
     return missing
 
 
+def _missing_support_ids_for_open_interaction(state: dict[str, Any]) -> list[str]:
+    full_missing = _missing_interaction_ids_for_open_interaction(state, include_counter_attack=True)
+    normal_missing = _missing_interaction_ids_for_open_interaction(state)
+    if full_missing == normal_missing:
+        return normal_missing
+    full_coverage_score = max(
+        (
+            _matched_requirement_count((_capability(state, ability_id).get("hand") or []) + (_capability(state, ability_id).get("draw_pile") or []) + (_capability(state, ability_id).get("discard") or []), full_missing)
+            for ability_id in _playable_ability_ids(state)
+        ),
+        default=0,
+    )
+    return full_missing if full_coverage_score > 0 else normal_missing
+
+
 def _interaction_support_score(state: dict[str, Any], ability_id: str) -> float:
     entry = _open_interaction_entry(state)
     if not entry:
         return 0.0
-    missing = _missing_interaction_ids_for_open_interaction(state)
+    missing = _missing_support_ids_for_open_interaction(state)
     tile = entry.get("tile") or {}
     capability = _capability(state, ability_id)
     shell_ready = max(0, int((state.get("poulpita") or {}).get("seashells") or 0)) >= max(0, int(tile.get("shell_requirement_count") or 0))
@@ -1939,7 +1976,7 @@ def _support_candidate_estimate(state: dict[str, Any], ability_id: str, missing:
     known_future_matches = _matched_requirement_count((capability.get("draw_pile") or []) + (capability.get("discard") or []), missing)
     total_missing = max(1, len(missing))
     has_required_in_hand = shell_ready and hand_matches >= len(missing)
-    can_improve_by_drawing = shell_ready and known_future_matches > 0 and len(capability.get("hand") or []) < int(capability.get("current_max_cards_in_hand") or 3)
+    can_improve_by_drawing = shell_ready and known_future_matches > 0
     is_human = bool(capability.get("is_human_controlled") or str(capability.get("controller_type") or "") == "human")
     if has_required_in_hand:
         probability = 0.95
@@ -1965,7 +2002,7 @@ def _next_interaction_support_command(state: dict[str, Any], ability_id: str) ->
     if not entry:
         return [], [], "interaction pending"
     capability = _capability(state, ability_id)
-    missing = _missing_interaction_ids_for_open_interaction(state)
+    missing = _missing_support_ids_for_open_interaction(state)
     tile = entry.get("tile") or {}
     shell_ready = max(0, int((state.get("poulpita") or {}).get("seashells") or 0)) >= max(0, int(tile.get("shell_requirement_count") or 0))
     if shell_ready and (not missing or _selected_cards_for_requirements(capability, missing) is not None):
@@ -1978,11 +2015,13 @@ def _next_interaction_support_command(state: dict[str, Any], ability_id: str) ->
     if (
         missing
         and shell_ready
-        and hand_count < hand_limit
         and _matched_requirement_count(known_support_cards, missing) > 0
     ):
         if int(capability.get("pa") or 0) >= draw_cost["ap_cost"]:
-            return [{"type": "draw_action_card", "payload": {"capability_id": ability_id}}], [entry], f"draw for {_tile_display_name(state, tile)}"
+            payload = {"capability_id": ability_id}
+            if hand_count >= hand_limit:
+                payload["auto_discard_card"] = True
+            return [{"type": "draw_action_card", "payload": payload}], [entry], f"draw for {_tile_display_name(state, tile)}"
         if int(capability.get("pa") or 0) >= collect_cost["ap_cost"]:
             return [{"type": "collect_action_points", "payload": {"capability_id": ability_id}}], [entry], f"AP for {_tile_display_name(state, tile)}"
     return [], [], "interaction pending"
@@ -1999,7 +2038,7 @@ def _support_candidate_plan(
     capability = _capability(state, ability_id)
     if not capability:
         return None
-    missing = _missing_interaction_ids_for_open_interaction(state)
+    missing = _missing_support_ids_for_open_interaction(state)
     selected = _selected_cards_for_requirements(capability, missing)
     title_name = _tile_display_name(state, entry.get("tile") or {})
     name = capability.get("name") or ability_id
@@ -2016,8 +2055,13 @@ def _support_candidate_plan(
         labels.append(f"{name} plays support cards")
     elif estimate.get("can_improve_by_drawing") and has_action_slot:
         if int(capability.get("pa") or 0) >= draw_cost["ap_cost"]:
-            commands.append({"type": "draw_action_card", "payload": {"capability_id": ability_id}})
-            labels.append(f"{name} draws for {title_name}")
+            draw_payload = {"capability_id": ability_id}
+            if len(capability.get("hand") or []) >= int(capability.get("current_max_cards_in_hand") or 3):
+                draw_payload["auto_discard_card"] = True
+                labels.append(f"{name} swaps a card for {title_name}")
+            else:
+                labels.append(f"{name} draws for {title_name}")
+            commands.append({"type": "draw_action_card", "payload": draw_payload})
         elif int(capability.get("pa") or 0) >= collect_cost["ap_cost"]:
             commands.append({"type": "collect_action_points", "payload": {"capability_id": ability_id}})
             labels.append(f"{name} collects AP to draw")
@@ -2071,7 +2115,7 @@ def _interaction_support_proposals(state: dict[str, Any]) -> list[dict[str, Any]
     entry = _open_interaction_entry(state)
     if not entry:
         return []
-    missing = _missing_interaction_ids_for_open_interaction(state)
+    missing = _missing_support_ids_for_open_interaction(state)
     tile = entry["tile"]
     title_name = _tile_display_name(state, tile)
     proposals = []
@@ -2124,18 +2168,30 @@ def _interaction_support_proposals(state: dict[str, Any]) -> list[dict[str, Any]
                 plan["plan_id"] = f"support_interaction_{ability_id}_{(entry['instance'] or {}).get('instance_id')}"
             proposals.append(plan)
     if not proposals:
+        fail_commands = [{"type": "fail_interaction", "payload": {}}]
+        fail_statistics = _plan_statistics(
+            state,
+            commands=fail_commands,
+            interactions=[entry],
+            assumptions=["Failure is available when no support path can be planned; some failure effects may still require manual target selection."],
+        )
+        interaction_summary = _interaction_resolution_summary(state, entry)
+        fail_statistics["interaction_summaries"] = [interaction_summary]
+        fail_statistics["expected_resource_delta"] = _effect_delta((tile or {}).get("failure_effects") or [])
         proposals.append(
             _public_plan(
-                plan_id=f"open_interaction_needs_manual_resolution_{(entry['instance'] or {}).get('instance_id')}",
+                plan_id=f"fail_interaction_{(entry['instance'] or {}).get('instance_id')}",
                 proposer_ability_id=None,
-                title=f"{title_name} needs manual support",
-                rationale="The interaction is open, but no planner-controlled ability can cover all currently missing requirements.",
+                title=f"Fail {title_name}",
+                rationale="No ability has a planned path to provide the missing support. Accepting failure keeps the game moving and applies the configured penalties.",
                 risk_label="high",
-                step_preview=["Inspect missing symbols", "Choose support manually, draw cards, or fail the interaction"],
+                step_preview=["Accept the failed interaction"],
                 expected_resources=_resource_estimate(),
-                score=55,
-                warnings=["No executable support plan is available for the current hands."],
-                statistics=_plan_statistics(state, interactions=[entry]),
+                score=35,
+                warnings=["If the failure requires a movement target, choose it manually after the reducer rejects this shortcut."],
+                commands=fail_commands,
+                plan_chain=_plan_chain(["Fail interaction"], fail_commands),
+                statistics=fail_statistics,
             )
         )
     return proposals

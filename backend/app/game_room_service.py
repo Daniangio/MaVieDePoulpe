@@ -1044,6 +1044,18 @@ def _auto_selected_interaction_card_ids(next_state: dict[str, Any], capability_i
     return selected
 
 
+def _auto_discard_card_id_for_draw(state: dict[str, Any], capability: dict[str, Any]) -> str:
+    interaction = state.get("interaction") or {}
+    tile = (state.get("tile_catalog") or {}).get("tiles", {}).get(interaction.get("tile_id")) or {}
+    required = [str(interaction_id) for interaction_id in (tile.get("interaction_ids") or []) + (tile.get("counter_attack_interaction_ids") or []) if interaction_id]
+    hand = capability.get("hand") or []
+    if required:
+        for card in hand:
+            if not any(interaction_id in required for interaction_id in _card_interaction_options(card)):
+                return str(card.get("card_id") or "")
+    return str((hand[0] if hand else {}).get("card_id") or "")
+
+
 def _auto_selected_surprise_card_ids(capability: dict[str, Any], costs: list[dict[str, Any]]) -> list[str]:
     selected: list[str] = []
     selected_ids: set[str] = set()
@@ -2128,6 +2140,8 @@ class GameRoomService:
             discard_card_id = str(payload.get("discard_card_id") or "").strip()
             hand = capability.get("hand") or []
             hand_limit = int(capability.get("current_max_cards_in_hand") or 3)
+            if len(hand) >= hand_limit and not discard_card_id and payload.get("auto_discard_card"):
+                discard_card_id = _auto_discard_card_id_for_draw(state, capability)
             if len(hand) >= hand_limit and not discard_card_id:
                 self._reject(state, command_id, "discard_required", "Choose a card to discard before drawing.")
             if discard_card_id and not any(card.get("card_id") == discard_card_id for card in hand):
@@ -2320,7 +2334,7 @@ class GameRoomService:
                         selected_card_ids = _auto_selected_interaction_card_ids(
                             next_state,
                             capability_id,
-                            list(tile.get("interaction_ids") or []),
+                            list(tile.get("interaction_ids") or []) + list(tile.get("counter_attack_interaction_ids") or []),
                         )
                     try:
                         _sync_interaction_cards(next_state, capability_id, selected_card_ids)

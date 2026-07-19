@@ -734,6 +734,115 @@ def test_bot_plans_use_shared_intelligence_cards_for_open_interaction_support():
     run(scenario())
 
 
+def test_auto_resolve_interaction_selects_counter_attack_cards():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "camouflage"
+        state["poulpita"]["energy"] = 3
+        state["tile_catalog"] = {
+            "categories": {"threat": {"id": "threat", "name": "Threat", "compulsory_on_same_node": True}},
+            "events": {"fish": {"id": "fish", "name": "Big fish", "category_id": "threat"}},
+            "tiles": {
+                "fish-tile": {
+                    "id": "fish-tile",
+                    "event_id": "fish",
+                    "interaction_ids": ["charge"],
+                    "counter_attack_interaction_ids": ["hide"],
+                    "success_effects": [{"type": "gain_neurons", "amount": 1}],
+                    "counter_attack_effects": [{"type": "gain_energy", "amount": 2}],
+                    "failure_effects": [],
+                }
+            },
+            "interactions": {"charge": {"id": "charge", "name": "Charge"}, "hide": {"id": "hide", "name": "Hide"}},
+        }
+        state["tiles"] = {"1A": [{"instance_id": "tile_fish", "tile_id": "fish-tile", "face_up": True}]}
+        state["interaction"] = {
+            "tile_instance_id": "tile_fish",
+            "tile_id": "fish-tile",
+            "node_id": "1A",
+            "initiator_capability_id": "force",
+            "played_cards": [{"card_id": "charge_card", "interaction_id": "charge", "interaction_ids": ["charge"], "capability_id": "force"}],
+        }
+        state["capabilities"]["camouflage"]["hand"] = [
+            {"card_id": "hide_card", "interaction_id": "hide", "interaction_ids": ["hide"], "owner_capability_id": "camouflage"}
+        ]
+
+        result = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_counter_auto",
+            expected_version=1,
+            command_type="resolve_interaction",
+            payload={"capability_id": "camouflage", "auto_select_cards": True},
+        )
+
+        assert result["ok"] is True
+        assert result["events"][0]["counter_success"] is True
+        assert result["projection"]["poulpita"]["neurons"] == 1
+        assert result["projection"]["poulpita"]["energy"] == 5
+        assert result["projection"]["capabilities"]["camouflage"]["hand"] == []
+
+    run(scenario())
+
+
+def test_bot_support_plan_draws_with_auto_discard_for_counter_attack_when_hand_is_full():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+        room = await service.create_room(user=user, mode="solo_with_bots", game_type="goldfish", human_ability_id="force")
+        await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_start_counter_draw_plan",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "goldfish",
+                "expected_version": 0,
+                "type": "start_goldfish_game",
+                "payload": {},
+            },
+        )
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "force"
+        state["capabilities"]["force"]["actions_taken_this_control"] = state["capabilities"]["force"]["max_actions_per_control"]
+        state["capabilities"]["camouflage"]["pa"] = 1
+        state["capabilities"]["camouflage"]["current_max_cards_in_hand"] = 2
+        state["capabilities"]["camouflage"]["hand"] = [
+            {"card_id": "junk_1", "interaction_id": "ink", "interaction_ids": ["ink"], "owner_capability_id": "camouflage"},
+            {"card_id": "junk_2", "interaction_id": "analyse", "interaction_ids": ["analyse"], "owner_capability_id": "camouflage"},
+        ]
+        state["capabilities"]["camouflage"]["draw_pile"] = [
+            {"card_id": "future_hide", "interaction_id": "hide", "interaction_ids": ["hide"], "owner_capability_id": "camouflage"}
+        ]
+        state["tile_catalog"] = {
+            "categories": {"threat": {"id": "threat", "name": "Threat", "compulsory_on_same_node": True}},
+            "events": {"fish": {"id": "fish", "name": "Big fish", "category_id": "threat"}},
+            "tiles": {"fish-tile": {"id": "fish-tile", "event_id": "fish", "interaction_ids": ["charge"], "counter_attack_interaction_ids": ["hide"]}},
+            "interactions": {"charge": {"id": "charge", "name": "Charge"}, "hide": {"id": "hide", "name": "Hide"}},
+        }
+        state["interaction"] = {
+            "tile_instance_id": "tile_fish",
+            "tile_id": "fish-tile",
+            "node_id": "1A",
+            "initiator_capability_id": "force",
+            "played_cards": [{"card_id": "charge_card", "interaction_id": "charge", "interaction_ids": ["charge"], "capability_id": "force"}],
+        }
+
+        plans = await service.get_bot_plans(room_id=room["id"], user=user)
+        plan = next(plan for plan in plans["proposals"] if plan["proposer_ability_id"] == "camouflage")
+        draw_step = next(step for step in plan["plan_chain"] if step.get("public_command", {}).get("type") == "draw_action_card")
+
+        assert draw_step["public_command"]["payload"]["auto_discard_card"] is True
+        assert "future_hide" not in str(plans)
+
+    run(scenario())
+
+
 def test_bot_plans_continue_when_only_intelligence_has_control_left():
     async def scenario():
         service = GameRoomService()
