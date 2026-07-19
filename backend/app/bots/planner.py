@@ -1810,7 +1810,7 @@ def _interaction_support_proposals(state: dict[str, Any]) -> list[dict[str, Any]
     return proposals
 
 
-def _optimistic_collect_followup(state: dict[str, Any], ability_id: str, *, include_take_control: bool) -> dict[str, Any]:
+def _collect_simulation_after_expected_roll(state: dict[str, Any], ability_id: str, *, include_take_control: bool) -> dict[str, Any]:
     simulated = {**state, "phase": "night_action", "active_capability_id": ability_id}
     simulated["capabilities"] = {
         capability_id: dict(capability)
@@ -1831,6 +1831,20 @@ def _optimistic_collect_followup(state: dict[str, Any], ability_id: str, *, incl
     capability["actions_taken_this_control"] = int(capability.get("actions_taken_this_control") or 0) + 1
     if include_take_control:
         capability["control_takes_this_night"] = int(capability.get("control_takes_this_night") or 0) + 1
+    return simulated
+
+
+def _optimistic_collect_followup(
+    state: dict[str, Any],
+    ability_id: str,
+    *,
+    include_take_control: bool,
+    forced_first_commands: list[dict[str, Any]] | None = None,
+    variant_label: str | None = None,
+) -> dict[str, Any]:
+    simulated = _collect_simulation_after_expected_roll(state, ability_id, include_take_control=include_take_control)
+    capability = simulated["capabilities"].setdefault(ability_id, {})
+    expected_roll = _expected_ap_roll(state)
     current_node_id = str((state.get("poulpita") or {}).get("node_id") or "")
     max_followup_actions = max(1, _planning_depth_take_controls(state) * max(1, int(capability.get("max_actions_per_control") or 3)) - 1)
     followup_steps: list[str] = [f"Expected roll gives {expected_roll} AP"]
@@ -1842,6 +1856,18 @@ def _optimistic_collect_followup(state: dict[str, Any], ability_id: str, *, incl
     controls_used = 1
     max_controls = _planning_depth_take_controls(state)
     stop_reason = "max follow-up actions reached"
+
+    for command in forced_first_commands or []:
+        if len(followup_public_commands) >= max_followup_actions:
+            break
+        followup_steps.append(_rollout_command_label(simulated, command))
+        followup_public_commands.append(command)
+        if str(command.get("type") or "") == "start_interaction":
+            entry = _simulated_tile_entry(simulated, str((command.get("payload") or {}).get("tile_instance_id") or ""))
+            if entry:
+                followup_interactions.append(entry)
+        _simulate_public_command(simulated, command)
+        followup_label = variant_label or _rollout_command_label(simulated, command)
 
     def choose_next_control(current_ability_id: str) -> str | None:
         choices = []
@@ -1955,6 +1981,82 @@ def _optimistic_collect_followup(state: dict[str, Any], ability_id: str, *, incl
     }
 
 
+def _collect_followup_variants(state: dict[str, Any], ability_id: str, *, include_take_control: bool) -> list[tuple[str, dict[str, Any]]]:
+    variants: list[tuple[str, dict[str, Any]]] = [("best", _optimistic_collect_followup(state, ability_id, include_take_control=include_take_control))]
+    simulated = _collect_simulation_after_expected_roll(state, ability_id, include_take_control=include_take_control)
+    capability = _capability(simulated, ability_id)
+    current_node_id = str((simulated.get("poulpita") or {}).get("node_id") or "")
+    move_cost = _action_cost(simulated, "move")
+    interact_cost = _action_cost(simulated, "interact")
+    seen_first_keys = {
+        _proposal_command_key((variants[0][1].get("public_commands") or [{}])[0])
+        if variants[0][1].get("public_commands")
+        else ""
+    }
+    max_variants = max(1, _max_plans_per_proposer(state))
+
+    def add_variant(variant_id: str, command: dict[str, Any], label: str) -> None:
+        if len(variants) >= max_variants:
+            return
+        key = _proposal_command_key(command)
+        if not key or key in seen_first_keys:
+            return
+        seen_first_keys.add(key)
+        variants.append(
+            (
+                variant_id,
+                _optimistic_collect_followup(
+                    state,
+                    ability_id,
+                    include_take_control=include_take_control,
+                    forced_first_commands=[command],
+                    variant_label=label,
+                ),
+            )
+        )
+
+    current_compulsory = _compulsory_choices_on_node(simulated, current_node_id)
+    if int(capability.get("pa") or 0) >= interact_cost["ap_cost"]:
+        for entry in current_compulsory + _visible_current_tiles(simulated):
+            if _can_initiate(simulated, ability_id, entry.get("tile") or {}):
+                add_variant(
+                    f"interact_{(entry.get('instance') or {}).get('instance_id')}",
+                    {
+                        "type": "start_interaction",
+                        "payload": {
+                            "capability_id": ability_id,
+                            "tile_instance_id": (entry.get("instance") or {}).get("instance_id"),
+                            "auto_select_cards": True,
+                        },
+                    },
+                    f"forced {_tile_display_name(simulated, entry.get('tile') or {})}",
+                )
+    if not current_compulsory and int(capability.get("pa") or 0) >= move_cost["ap_cost"]:
+        scored_nodes = []
+        for adjacent_node_id in ((simulated.get("map") or {}).get("adjacency") or {}).get(current_node_id, []) or []:
+            node_score, _node_entries, _shelter_distance = _node_followup_score(simulated, str(adjacent_node_id), ability_id)
+            scored_nodes.append((node_score, str(adjacent_node_id)))
+        scored_nodes.sort(key=lambda item: item[0], reverse=True)
+        for _score, target_node_id in scored_nodes:
+            add_variant(
+                f"move_{target_node_id}",
+                {"type": "move_poulpita", "payload": {"capability_id": ability_id, "target_node_id": target_node_id}},
+                f"node {target_node_id}",
+            )
+    draw_cost = _action_cost(simulated, "special_power")
+    if (
+        int(capability.get("pa") or 0) >= draw_cost["ap_cost"]
+        and len(capability.get("hand") or []) < int(capability.get("current_max_cards_in_hand") or 3)
+        and (capability.get("draw_pile") or capability.get("discard"))
+    ):
+        add_variant(
+            "draw",
+            {"type": "draw_action_card", "payload": {"capability_id": ability_id}},
+            "card draw",
+        )
+    return variants
+
+
 def _collect_plan(
     state: dict[str, Any],
     *,
@@ -1962,6 +2064,8 @@ def _collect_plan(
     include_take_control: bool,
     base_score: float,
     rationale: str,
+    variant_id: str = "best",
+    followup: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     capability = _capability(state, ability_id)
     name = capability.get("name") or ability_id
@@ -1970,7 +2074,7 @@ def _collect_plan(
     if include_take_control:
         commands.append({"type": "take_control", "payload": {"capability_id": ability_id}})
     commands.append({"type": "collect_action_points", "payload": {"capability_id": ability_id}})
-    followup = _optimistic_collect_followup(state, ability_id, include_take_control=include_take_control)
+    followup = followup or _optimistic_collect_followup(state, ability_id, include_take_control=include_take_control)
     followup_public_commands = followup.get("public_commands") or []
     followup_action_labels = (followup.get("steps") or [])[1 : 1 + len(followup_public_commands)]
     step_preview = ([f"{name} takes control"] if include_take_control else []) + ["Collect action points"] + followup_action_labels
@@ -2017,8 +2121,11 @@ def _collect_plan(
         "followup_action_count": followup.get("followup_action_count"),
         "followup_label": followup.get("label"),
     }
+    plan_id = f"{'take_control_' if include_take_control else ''}collect_{ability_id}"
+    if variant_id != "best":
+        plan_id = f"{plan_id}_{variant_id}"
     return _public_plan(
-        plan_id=f"{'take_control_' if include_take_control else ''}collect_{ability_id}",
+        plan_id=plan_id,
         proposer_ability_id=ability_id,
         title=f"{name} collects AP toward {followup['label']}",
         rationale=f"{rationale} The planner assumes an average AP roll of {_expected_ap_roll(state)} for deeper evaluation.",
@@ -2029,8 +2136,30 @@ def _collect_plan(
         commands=commands,
         plan_chain=plan_chain,
         statistics=statistics,
-        plan_group=f"collect:{followup['label']}",
+        plan_group=f"collect:{ability_id}:{followup['label']}",
     )
+
+
+def _collect_plan_variants(
+    state: dict[str, Any],
+    *,
+    ability_id: str,
+    include_take_control: bool,
+    base_score: float,
+    rationale: str,
+) -> list[dict[str, Any]]:
+    return [
+        _collect_plan(
+            state,
+            ability_id=ability_id,
+            include_take_control=include_take_control,
+            base_score=base_score,
+            rationale=rationale,
+            variant_id=variant_id,
+            followup=followup,
+        )
+        for variant_id, followup in _collect_followup_variants(state, ability_id, include_take_control=include_take_control)
+    ]
 
 
 def _move_plan(
@@ -2127,7 +2256,7 @@ def _night_idle_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
                     proposals.append(_forced_interaction_plan(state, ability_id=ability_id, entry=entry, include_take_control=True, score=100))
                     break
             continue
-        proposals.append(_collect_plan(state, ability_id=ability_id, include_take_control=True, base_score=35, rationale="This bot ability can legally take control and collect AP."))
+        proposals.extend(_collect_plan_variants(state, ability_id=ability_id, include_take_control=True, base_score=35, rationale="This bot ability can legally take control and collect AP."))
         if int(capability.get("pa") or 0) >= move_cost["ap_cost"]:
             scored_nodes = []
             for adjacent_node_id in adjacent:
@@ -2180,8 +2309,8 @@ def _active_night_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
             if _can_initiate(state, active_id, entry["tile"]):
                 proposals.append(_forced_interaction_plan(state, ability_id=active_id, entry=entry, include_take_control=False, score=100))
                 break
-    proposals.append(
-        _collect_plan(
+    proposals.extend(
+        _collect_plan_variants(
             state,
             ability_id=active_id,
             include_take_control=False,
@@ -2269,8 +2398,8 @@ def _active_night_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
             bot_capability = _capability(state, ability_id)
             if not _has_control_take_left(bot_capability):
                 continue
-            proposals.append(
-                _collect_plan(
+            proposals.extend(
+                _collect_plan_variants(
                     state,
                     ability_id=ability_id,
                     include_take_control=True,
