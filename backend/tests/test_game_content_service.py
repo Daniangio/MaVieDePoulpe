@@ -194,6 +194,7 @@ def test_bot_settings_include_efficiency_weights_and_ability_colors(tmp_path, mo
             "expected_ap_roll": 4,
             "planning_depth_take_controls": 5,
             "max_plans": 12,
+            "min_energy_after_size_upgrade": 6,
             "weights": {"efficiency": 50, "confidence": 25, "expected_gain": 25},
             "resource_weights": {"energy": 10, "neurons": 7},
             "ability_colors": {"force": "#aa0000", "agility": "not-a-color"},
@@ -203,6 +204,7 @@ def test_bot_settings_include_efficiency_weights_and_ability_colors(tmp_path, mo
     assert settings["expected_ap_roll"] == 4
     assert settings["planning_depth_take_controls"] == 5
     assert settings["max_plans"] == 12
+    assert settings["min_energy_after_size_upgrade"] == 6
     assert settings["weights"]["efficiency"] == 50
     assert settings["resource_weights"]["energy"] == 10
     assert settings["resource_weights"]["neurons"] == 7

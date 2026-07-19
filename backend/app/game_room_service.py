@@ -289,6 +289,17 @@ def _refill_draw_pile_from_discard(capability: dict[str, Any]) -> bool:
     return True
 
 
+def _reshuffle_and_deal_starting_hand(capability: dict[str, Any]) -> None:
+    cards = []
+    for zone in ["hand", "draw_pile", "discard"]:
+        cards.extend(deepcopy(capability.get(zone) or []))
+    random.shuffle(cards)
+    hand_limit = max(0, int(capability.get("current_max_cards_in_hand") or capability.get("default_max_cards_in_hand") or 3))
+    capability["hand"] = cards[:hand_limit]
+    capability["draw_pile"] = cards[hand_limit:]
+    capability["discard"] = []
+
+
 def _remove_cards_from_capability(capability: dict[str, Any], interaction_id: str, count: int) -> list[dict[str, Any]] | None:
     available = sum(
         1
@@ -2068,6 +2079,7 @@ class GameRoomService:
                 capability["pa"] = 0
                 capability["control_takes_this_night"] = 0
                 capability["actions_taken_this_control"] = 0
+                _reshuffle_and_deal_starting_hand(capability)
             next_state["version"] = int(state["version"]) + 1
             event = {
                 "event_id": f"evt_{uuid.uuid4().hex}",

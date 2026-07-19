@@ -91,6 +91,7 @@ DEFAULT_BOT_SETTINGS = {
     "expected_ap_roll": 3,
     "planning_depth_take_controls": 3,
     "max_plans": 3,
+    "min_energy_after_size_upgrade": 4,
     "weights": {
         "efficiency": 35,
         "confidence": 35,
@@ -695,6 +696,7 @@ def _normalize_bot_settings(raw_settings: dict[str, Any]) -> dict[str, Any]:
     normalized["expected_ap_roll"] = max(1, min(6, int(raw_settings.get("expected_ap_roll") if raw_settings.get("expected_ap_roll") is not None else normalized["expected_ap_roll"])))
     normalized["planning_depth_take_controls"] = max(1, min(8, int(raw_settings.get("planning_depth_take_controls") if raw_settings.get("planning_depth_take_controls") is not None else normalized["planning_depth_take_controls"])))
     normalized["max_plans"] = max(1, min(16, int(raw_settings.get("max_plans") if raw_settings.get("max_plans") is not None else normalized["max_plans"])))
+    normalized["min_energy_after_size_upgrade"] = max(1, min(31, int(raw_settings.get("min_energy_after_size_upgrade") if raw_settings.get("min_energy_after_size_upgrade") is not None else normalized["min_energy_after_size_upgrade"])))
     raw_weights = raw_settings.get("weights") if isinstance(raw_settings.get("weights"), dict) else {}
     for key, fallback in DEFAULT_BOT_SETTINGS["weights"].items():
         normalized["weights"][key] = max(0.0, float(raw_weights.get(key) if raw_weights.get(key) is not None else fallback))

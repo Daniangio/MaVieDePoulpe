@@ -554,7 +554,7 @@ const SizeBar = ({
         <strong className="text-slate-100">{formatSize(currentSize)}</strong>
       </div>
       <button
-        className="rounded border border-cyan-300 px-2 py-1 text-[0.68rem] font-semibold text-cyan-100 hover:bg-cyan-950 disabled:opacity-50"
+        className="rounded border border-cyan-300 px-2 py-1 text-[0.68rem] font-semibold text-black-100 hover:bg-cyan-950 disabled:opacity-50"
         disabled={pending || !canBuy}
         onClick={onBuy}
         type="button"
@@ -1348,6 +1348,8 @@ const actionVisual = (step: PlanChainStep, projection: GameProjection) => {
   if (type === "end_night") return { actorId, text: "Night", Icon: Moon, title: "End night" };
   if (type === "end_day") return { actorId, text: "Day", Icon: Moon, title: "End day" };
   if (type === "move_seashell_to_shelter" || type === "move_seashell_from_shelter") return { actorId, text: "Shell", Icon: RefreshCw, title: compactPlanStepLabel(step, projection) };
+  if (type === "buy_hand_size_upgrade") return { actorId, text: "Up", Icon: CirclePlus, title: "Buy upgrade" };
+  if (type === "buy_poulpita_size") return { actorId, text: "Size", Icon: CirclePlus, title: "Grow Poulpita" };
   return { actorId, text: "Plan", Icon: RefreshCw, title: compactPlanStepLabel(step, projection) };
 };
 
@@ -1380,6 +1382,10 @@ const compactPlanStepLabel = (step: PlanChainStep, projection: GameProjection) =
       return "Store shell";
     case "move_seashell_from_shelter":
       return "Take shell";
+    case "buy_hand_size_upgrade":
+      return `${actor} Buy upgrade`;
+    case "buy_poulpita_size":
+      return "Grow size";
     default:
       return String(step.label || "Decision").replace(/^Use expected AP to /, "").slice(0, 34);
   }
@@ -2456,39 +2462,69 @@ const GameRoomPage = () => {
           />
           <div className="rounded-md border border-slate-800 bg-slate-900 p-3">
             <div className="flex items-center justify-between gap-3">
-              <h3 className="text-sm font-semibold text-white">Player hand</h3>
+              <h3 className="text-sm font-semibold text-white">{projection?.phase === "day" ? "Day upgrades" : "Player hand"}</h3>
               {discardBeforeDraw ? (
                 <button className="text-xs text-slate-400 hover:text-white" onClick={() => setDiscardBeforeDraw(false)} type="button">
                   Cancel discard
                 </button>
               ) : null}
             </div>
-            {discardBeforeDraw ? <p className="mt-2 text-xs text-amber-200">Choose one card to discard, then a new card will be drawn.</p> : null}
-            <div className="mt-3 flex h-[calc(100%-2rem)] flex-wrap content-start gap-2 overflow-auto rounded border border-dashed border-slate-700 p-2">
-              {(selectedCapability?.hand || []).map((card) => (
-                <CardButton
-                  card={card}
-                  disabled={
-                    pending ||
-                    (!discardBeforeDraw && (!(projection?.interaction || selectedTileInstanceId) || projection?.active_capability_id !== selectedCapability?.id))
-                  }
-                  key={card.card_id}
-                  onClick={() => {
-                    if (discardBeforeDraw) {
-                      drawActionCardAfterDiscard(card.card_id);
-                      return;
-                    }
-                    if (projection?.interaction || selectedTileInstanceId) {
-                      toggleDraftCard(card.card_id);
-                    }
-                  }}
-                  projection={projection as GameProjection}
-                  selected={discardBeforeDraw || selectedCardIds.includes(card.card_id)}
-                  showPreview
-                />
-              ))}
-              {(selectedCapability?.hand || []).length === 0 ? <p className="m-auto text-sm text-slate-500">No cards in hand.</p> : null}
-            </div>
+            {projection?.phase === "day" ? (
+              <div className="mt-3 grid h-[calc(100%-2rem)] content-start gap-2 overflow-auto rounded border border-dashed border-slate-700 p-2 sm:grid-cols-2 lg:grid-cols-3">
+                {(selectedCapability?.hand_size_upgrades || []).map((upgrade, index) => {
+                  const purchased = new Set((selectedCapability?.purchased_hand_size_upgrade_indices || []).map((value) => Number(value)));
+                  const bought = purchased.has(index);
+                  const cost = Number(upgrade.cost || 0);
+                  const isDeckExchange = upgrade.type === "deck_exchange";
+                  return (
+                    <button
+                      className={[
+                        "rounded-md border p-3 text-left text-xs transition",
+                        bought ? "border-slate-700 bg-slate-950 text-slate-500" : "border-cyan-300 bg-slate-950 text-cyan-100 hover:bg-cyan-950",
+                      ].join(" ")}
+                      disabled={pending || bought || Number(projection?.poulpita.neurons || 0) < cost}
+                      key={index}
+                      onClick={() => buyHandSizeUpgrade(index)}
+                      type="button"
+                    >
+                      <span className="block font-semibold text-white">{isDeckExchange ? "Improve deck" : `Increase hand +${Number(upgrade.hand_size_bonus || 1)}`}</span>
+                      <span className="mt-1 block text-slate-400">{bought ? "Bought" : `${cost} neurons`}</span>
+                      {isDeckExchange ? <span className="mt-1 block text-slate-400">Exchange cards at next night setup.</span> : null}
+                    </button>
+                  );
+                })}
+                {(selectedCapability?.hand_size_upgrades || []).length === 0 ? <p className="m-auto text-sm text-slate-500">No upgrades configured.</p> : null}
+              </div>
+            ) : (
+              <>
+                {discardBeforeDraw ? <p className="mt-2 text-xs text-amber-200">Choose one card to discard, then a new card will be drawn.</p> : null}
+                <div className="mt-3 flex h-[calc(100%-2rem)] flex-wrap content-start gap-2 overflow-auto rounded border border-dashed border-slate-700 p-2">
+                  {(selectedCapability?.hand || []).map((card) => (
+                    <CardButton
+                      card={card}
+                      disabled={
+                        pending ||
+                        (!discardBeforeDraw && (!(projection?.interaction || selectedTileInstanceId) || projection?.active_capability_id !== selectedCapability?.id))
+                      }
+                      key={card.card_id}
+                      onClick={() => {
+                        if (discardBeforeDraw) {
+                          drawActionCardAfterDiscard(card.card_id);
+                          return;
+                        }
+                        if (projection?.interaction || selectedTileInstanceId) {
+                          toggleDraftCard(card.card_id);
+                        }
+                      }}
+                      projection={projection as GameProjection}
+                      selected={discardBeforeDraw || selectedCardIds.includes(card.card_id)}
+                      showPreview
+                    />
+                  ))}
+                  {(selectedCapability?.hand || []).length === 0 ? <p className="m-auto text-sm text-slate-500">No cards in hand.</p> : null}
+                </div>
+              </>
+            )}
           </div>
         </div>
       </section>

@@ -5,7 +5,16 @@ from typing import Any
 
 
 BOT_PLAYER_ABILITIES = {"agility", "camouflage", "force", "propulsion"}
-BOT_PLAN_TERMINAL_COMMANDS = {"collect_action_points", "draw_action_card", "move_poulpita", "start_interaction", "resolve_interaction", "end_day"}
+BOT_PLAN_TERMINAL_COMMANDS = {
+    "buy_hand_size_upgrade",
+    "buy_poulpita_size",
+    "collect_action_points",
+    "draw_action_card",
+    "move_poulpita",
+    "start_interaction",
+    "resolve_interaction",
+    "end_day",
+}
 DEFAULT_PLANNING_TAKE_CONTROL_DEPTH = 3
 
 
@@ -75,6 +84,8 @@ def _safe_public_command(command: dict[str, Any]) -> dict[str, Any] | None:
         "end_night": {"capability_id"},
         "move_seashell_to_shelter": set(),
         "move_seashell_from_shelter": set(),
+        "buy_hand_size_upgrade": {"capability_id", "upgrade_index"},
+        "buy_poulpita_size": set(),
         "resolve_surprise_card": {"accept", "capability_id", "auto_select_cards"},
     }
     if command_type not in safe_payload_keys:
@@ -179,6 +190,10 @@ def _max_plans_per_proposer(state: dict[str, Any]) -> int:
 def _max_public_plans(state: dict[str, Any]) -> int:
     proposer_count = max(1, len(_controller_ids(state, "bot")) + 1)
     return _max_plans_per_proposer(state) * proposer_count
+
+
+def _playable_ability_ids(state: dict[str, Any]) -> list[str]:
+    return [ability_id for ability_id in _all_capability_ids(state) if ability_id in (state.get("capabilities") or {})]
 
 
 def _planner_weight(state: dict[str, Any], key: str, fallback: float) -> float:
@@ -758,6 +773,8 @@ def _plan_statistics(
         elif command_type == "draw_action_card":
             estimated_actions += 1
             estimated_time_steps += _action_cost(state, "special_power")["time_cost"]
+        elif command_type in {"buy_hand_size_upgrade", "buy_poulpita_size", "end_night", "end_day"}:
+            pass
     if not interaction_probabilities:
         success_probability = 1.0
     return {
@@ -882,12 +899,13 @@ def _attach_plan_metrics(state: dict[str, Any], proposal: dict[str, Any]) -> dic
         _simulate_public_command(simulated, command)
     expected_gain_score = _global_state_score(simulated)
     expected_delta_score = _weighted_expected_gain(state, expected_delta)
+    objective_bonus = 25.0 if proposal.get("objective_effect") else 0.0
     confidence = max(0.0, min(1.0, float(statistics.get("success_probability") if statistics.get("success_probability") is not None else proposal.get("confidence") if proposal.get("confidence") is not None else 1.0)))
     efficiency_score = float(efficiency["efficiency"])
     aggregate_score = round(
         _planner_weight(state, "efficiency", 35.0) * efficiency_score
         + _planner_weight(state, "confidence", 35.0) * confidence
-        + _planner_weight(state, "expected_gain", 30.0) * ((expected_gain_score - base_global_score + expected_delta_score) / 20.0),
+        + _planner_weight(state, "expected_gain", 30.0) * ((expected_gain_score - base_global_score + expected_delta_score + objective_bonus) / 20.0),
         2,
     )
     statistics.update(
@@ -903,7 +921,7 @@ def _attach_plan_metrics(state: dict[str, Any], proposal: dict[str, Any]) -> dic
             "pareto_axes": {
                 "efficiency": round(efficiency_score, 2),
                 "confidence": round(confidence, 2),
-                "expected_gain": round(expected_gain_score - base_global_score + expected_delta_score, 2),
+                "expected_gain": round(expected_gain_score - base_global_score + expected_delta_score + objective_bonus, 2),
             },
         }
     )
@@ -1208,6 +1226,76 @@ def _current_shelter_secure_for_simulation(state: dict[str, Any]) -> bool:
     return bool(raw.get("secure")) if isinstance(raw, dict) else False
 
 
+def _simulate_deck_exchange_upgrade(capability: dict[str, Any], upgrade: dict[str, Any]) -> None:
+    for entry in upgrade.get("remove_cards") or []:
+        interaction_id = str(entry.get("interaction_id") or "")
+        remaining = max(0, int(entry.get("count") or 0))
+        for zone in ["draw_pile", "discard", "hand"]:
+            kept = []
+            for card in capability.get(zone) or []:
+                if remaining > 0 and interaction_id in _card_interaction_options(card):
+                    remaining -= 1
+                else:
+                    kept.append(card)
+            capability[zone] = kept
+    capability_id = str(capability.get("id") or "")
+    added = []
+    for entry in upgrade.get("add_cards") or []:
+        interaction_ids = [str(interaction_id) for interaction_id in (entry.get("interaction_ids") or []) if interaction_id]
+        if not interaction_ids:
+            continue
+        for index in range(max(0, int(entry.get("count") or 0))):
+            added.append(
+                {
+                    "card_id": f"planned_upgrade_{capability_id}_{len(added)}_{index}",
+                    "interaction_id": interaction_ids[0],
+                    "interaction_ids": interaction_ids,
+                    "owner_capability_id": capability_id,
+                    "upgraded": True,
+                }
+            )
+    capability.setdefault("draw_pile", []).extend(added)
+
+
+def _simulate_reshuffle_and_deal_starting_hand(capability: dict[str, Any]) -> None:
+    cards = []
+    for zone in ["hand", "draw_pile", "discard"]:
+        cards.extend(deepcopy(capability.get(zone) or []))
+    hand_limit = max(0, int(capability.get("current_max_cards_in_hand") or capability.get("default_max_cards_in_hand") or 3))
+    capability["hand"] = cards[:hand_limit]
+    capability["draw_pile"] = cards[hand_limit:]
+    capability["discard"] = []
+
+
+def _poulpita_size_upgrade_cost(state: dict[str, Any]) -> tuple[int | None, dict[str, Any] | None]:
+    poulpita = state.get("poulpita") or {}
+    sizes = ((state.get("tile_catalog") or {}).get("poulpita_panel") or {}).get("sizes") or []
+    next_size_index = int(poulpita.get("size_index") or 0) + 1
+    if next_size_index >= len(sizes):
+        return None, None
+    next_size = sizes[next_size_index] or {}
+    base_cost = max(1, int(next_size.get("energy_cost") or 1))
+    cost = max(0, base_cost - (1 if _current_shelter_secure_for_simulation(state) else 0))
+    return cost, next_size
+
+
+def _can_end_night_now(state: dict[str, Any]) -> bool:
+    if state.get("phase") != "night_action":
+        return False
+    current_node_id = str((state.get("poulpita") or {}).get("node_id") or "")
+    shelter_at = int(state.get("night_shelter_available_at") or 16)
+    return bool(state.get("active_capability_id")) and _state_has_shelter(state, current_node_id) and int(state.get("night_time_spent") or 0) >= shelter_at
+
+
+def _night_lateness_score(state: dict[str, Any]) -> float:
+    spent = int(state.get("night_time_spent") or 0)
+    total = max(1, int(state.get("night_time_total") or 24))
+    shelter_at = int(state.get("night_shelter_available_at") or 16)
+    if spent < shelter_at:
+        return 0.0
+    return min(40.0, 12.0 + max(0, spent - shelter_at) * 2.0 + (20.0 if spent >= total - 2 else 0.0))
+
+
 def _simulate_public_command(state: dict[str, Any], command: dict[str, Any]) -> None:
     command_type = str(command.get("type") or "")
     payload = command.get("payload") or {}
@@ -1324,6 +1412,8 @@ def _simulate_public_command(state: dict[str, Any], command: dict[str, Any]) -> 
             state.setdefault("poulpita", {})["neurons"] = max(0, int(state.get("poulpita", {}).get("neurons") or 0) - cost)
             if str(upgrade.get("type") or "hand_size") == "hand_size":
                 capability["current_max_cards_in_hand"] = int(capability.get("current_max_cards_in_hand") or capability.get("default_max_cards_in_hand") or 3) + max(1, int(upgrade.get("hand_size_bonus") or 1))
+            elif str(upgrade.get("type") or "") == "deck_exchange":
+                _simulate_deck_exchange_upgrade(capability, upgrade)
             capability.setdefault("purchased_hand_size_upgrade_indices", []).append(upgrade_index)
     elif command_type == "buy_poulpita_size":
         poulpita = state.setdefault("poulpita", {})
@@ -1335,6 +1425,7 @@ def _simulate_public_command(state: dict[str, Any], command: dict[str, Any]) -> 
             poulpita["energy"] = max(0, int(poulpita.get("energy") or 0) - cost)
             poulpita["size_index"] = next_size_index
             poulpita["size_upgraded_today"] = True
+            state.setdefault("objective_progress", {})["size_increases"] = int((state.get("objective_progress") or {}).get("size_increases") or 0) + 1
     elif command_type == "end_night":
         current_node_id = str((state.get("poulpita") or {}).get("node_id") or "")
         if not _state_has_shelter(state, current_node_id):
@@ -1346,6 +1437,7 @@ def _simulate_public_command(state: dict[str, Any], command: dict[str, Any]) -> 
             next_capability["pa"] = 0
             next_capability["actions_taken_this_control"] = 0
             next_capability["control_takes_this_night"] = 0
+            _simulate_reshuffle_and_deal_starting_hand(next_capability)
         state.setdefault("poulpita", {})["size_upgraded_today"] = False
     elif command_type == "end_day":
         state["phase"] = "night_idle"
@@ -2479,13 +2571,42 @@ def _move_plan(
     )
 
 
+def _end_night_plan(state: dict[str, Any]) -> dict[str, Any] | None:
+    if not _can_end_night_now(state):
+        return None
+    ability_id = str(state.get("active_capability_id") or "")
+    capability = _capability(state, ability_id)
+    commands = [{"type": "end_night", "payload": {"capability_id": ability_id}}]
+    lateness = _night_lateness_score(state)
+    statistics = _plan_statistics(
+        state,
+        commands=commands,
+        assumptions=["Ending the night is free and is prioritized when Poulpita is on a shelter late in the night."],
+    )
+    expected_resources = _resource_estimate()
+    expected_resources["expected_resource_delta"] = {"energy": 1 if int(state.get("night_time_spent") or 0) >= int(state.get("night_time_total") or 24) else 0}
+    return _public_plan(
+        plan_id=f"end_night_{ability_id}",
+        proposer_ability_id=ability_id or None,
+        title="End the night at shelter",
+        rationale="Poulpita is on a shelter and enough night time has passed. Ending now avoids late-night energy loss and opens day upgrades.",
+        risk_label="low",
+        step_preview=[f"{capability.get('name') or ability_id} ends the night"],
+        expected_resources=expected_resources,
+        score=95 + lateness,
+        commands=commands,
+        plan_chain=_plan_chain(["End night"], commands),
+        statistics=statistics,
+    )
+
+
 def _night_idle_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
     proposals = []
     current_node_id = str((state.get("poulpita") or {}).get("node_id") or "")
     compulsory = _compulsory_choices_on_node(state, current_node_id)
     move_cost = _action_cost(state, "move")
     adjacent = list(((state.get("map") or {}).get("adjacency") or {}).get(current_node_id) or [])
-    for ability_id in _controller_ids(state, "bot"):
+    for ability_id in _playable_ability_ids(state):
         capability = _capability(state, ability_id)
         if not _has_control_take_left(capability):
             continue
@@ -2521,6 +2642,9 @@ def _active_night_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
     current_node_id = str((state.get("poulpita") or {}).get("node_id") or "")
     current_compulsory = _compulsory_choices_on_node(state, current_node_id)
     interact_cost = _action_cost(state, "interact")
+    end_night = _end_night_plan(state)
+    if end_night:
+        proposals.append(end_night)
     if current_compulsory and not state.get("interaction"):
         for ability_id, include_take_control in _forced_actor_candidates(state):
             for entry in current_compulsory:
@@ -2543,7 +2667,7 @@ def _active_night_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
         if not current_compulsory and not state.get("interaction"):
             move_cost = _action_cost(state, "move")
             adjacent = list(((state.get("map") or {}).get("adjacency") or {}).get(current_node_id) or [])
-            for ability_id in _controller_ids(state, "bot"):
+            for ability_id in _playable_ability_ids(state):
                 capability = _capability(state, ability_id)
                 if ability_id == str(state.get("active_capability_id") or "") or not _has_control_take_left(capability):
                     continue
@@ -2664,7 +2788,7 @@ def _active_night_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
                 )
             )
     if not current_compulsory and not state.get("interaction"):
-        for ability_id in _controller_ids(state, "bot"):
+        for ability_id in _playable_ability_ids(state):
             if ability_id == active_id:
                 continue
             bot_capability = _capability(state, ability_id)
@@ -2725,6 +2849,73 @@ def _day_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
                 statistics=_plan_statistics(state, commands=commands),
             )
         )
+    cost, next_size = _poulpita_size_upgrade_cost(state)
+    min_energy_after_growth = max(1, int(_bot_settings(state).get("min_energy_after_size_upgrade") or 4))
+    current_energy = int((state.get("poulpita") or {}).get("energy") or 0)
+    needs_size = any(
+        str(objective.get("type") or "") == "increase_size"
+        and int((state.get("objective_progress") or {}).get("size_increases") or 0) < max(1, int(objective.get("count") or 1))
+        for objective in state.get("objectives") or []
+    )
+    if cost is not None and next_size and not (state.get("poulpita") or {}).get("size_upgraded_today") and current_energy - int(cost or 0) >= min_energy_after_growth:
+        commands = [{"type": "buy_poulpita_size", "payload": {}}]
+        statistics = _plan_statistics(
+            state,
+            commands=commands,
+            assumptions=[f"Bot growth plans keep at least {min_energy_after_growth} energy after paying the size cost."],
+        )
+        statistics["expected_resource_delta"] = {"energy": -int(cost or 0), "size_index": 1}
+        proposals.append(
+            _public_plan(
+                plan_id="day_buy_poulpita_size",
+                proposer_ability_id=None,
+                title="Grow Poulpita",
+                rationale="Growing advances size objectives and is worth more than holding spare energy when enough energy remains afterward.",
+                risk_label="low",
+                step_preview=[f"Spend {int(cost or 0)} energy to grow"],
+                expected_resources={"expected_resource_delta": {"energy": -int(cost or 0), "size_index": 1}, **_resource_estimate()},
+                score=90 if needs_size else 55,
+                objective_effect="Progresses size objectives." if needs_size else None,
+                commands=commands,
+                plan_chain=_plan_chain(["Grow Poulpita"], commands),
+                statistics=statistics,
+            )
+        )
+    shared_neurons = int((state.get("poulpita") or {}).get("neurons") or 0)
+    for ability_id in _playable_ability_ids(state):
+        capability = _capability(state, ability_id)
+        purchased = {int(index) for index in capability.get("purchased_hand_size_upgrade_indices") or []}
+        for index, upgrade in enumerate(capability.get("hand_size_upgrades") or []):
+            if index in purchased:
+                continue
+            cost_neurons = max(0, int((upgrade or {}).get("cost") or 0))
+            if shared_neurons < cost_neurons or str((upgrade or {}).get("cost_resource") or "neurons") != "neurons":
+                continue
+            upgrade_type = str((upgrade or {}).get("type") or "hand_size")
+            commands = [{"type": "buy_hand_size_upgrade", "payload": {"capability_id": ability_id, "upgrade_index": index}}]
+            gain_delta = {"neurons": -cost_neurons, "purchased_upgrades": 1}
+            if upgrade_type == "hand_size":
+                gain_delta["hand_capacity"] = max(1, int((upgrade or {}).get("hand_size_bonus") or 1))
+            elif upgrade_type == "deck_exchange":
+                gain_delta["cards_in_hand"] = 1
+            statistics = _plan_statistics(state, commands=commands, assumptions=["Day upgrades are valued higher than holding neurons because they improve all future nights."])
+            statistics["expected_resource_delta"] = gain_delta
+            name = capability.get("name") or ability_id
+            proposals.append(
+                _public_plan(
+                    plan_id=f"day_buy_upgrade_{ability_id}_{index}",
+                    proposer_ability_id=ability_id,
+                    title=f"Buy {name} upgrade",
+                    rationale="Buying configured day upgrades converts shared neurons into persistent capability strength.",
+                    risk_label="low",
+                    step_preview=[f"Spend {cost_neurons} neurons on {name}"],
+                    expected_resources={"expected_resource_delta": gain_delta, **_resource_estimate()},
+                    score=80 + (20 if upgrade_type == "deck_exchange" else 10) - cost_neurons,
+                    commands=commands,
+                    plan_chain=_plan_chain([f"Buy {name} upgrade"], commands),
+                    statistics=statistics,
+                )
+            )
     commands = [{"type": "end_day", "payload": {}}]
     proposals.append(
         _public_plan(
