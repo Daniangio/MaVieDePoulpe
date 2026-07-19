@@ -301,7 +301,7 @@ def test_solo_with_bots_generates_public_bot_plan_proposals():
         assert plans["generated_from_version"] == 1
         assert 1 <= len(plans["proposals"]) <= 5
         assert all("_score" not in proposal for proposal in plans["proposals"])
-        assert all(proposal["proposer_ability_id"] in {"agility", "camouflage", "propulsion"} for proposal in plans["proposals"])
+        assert all(proposal["proposer_ability_id"] in {"agility", "camouflage", "force", "propulsion", "intelligence"} for proposal in plans["proposals"])
         assert all("step_preview" in proposal for proposal in plans["proposals"])
 
     run(scenario())
@@ -444,10 +444,14 @@ def test_bot_plans_offer_surprise_resolution_without_public_card_ids():
 
         public_plans = await service.get_bot_plans(room_id=room["id"], user=user)
         executed = await service.execute_bot_plan(room_id=room["id"], user=user, plan_id="surprise_accept_camouflage")
+        accept_plan = next(plan for plan in public_plans["proposals"] if plan["plan_id"] == "surprise_accept_camouflage")
 
         assert [plan["plan_id"] for plan in public_plans["proposals"]] == ["surprise_accept_camouflage", "surprise_skip"]
         assert all("commands" not in plan for plan in public_plans["proposals"])
         assert "secret_card_hide" not in str(public_plans)
+        assert accept_plan["statistics"]["surprise_resolution"] == "pay"
+        assert accept_plan["statistics"]["surprise_delta"]["neurons"] == 2
+        assert accept_plan["statistics"]["surprise_delta"]["cards_in_hand"] == -1
         assert executed["ok"] is True
         assert executed["projection"]["pending_surprise"] is None
         assert executed["projection"]["poulpita"]["neurons"] == 2
@@ -622,6 +626,330 @@ def test_bot_plans_support_open_interaction_with_public_statistics():
         assert proposal["statistics"]["success_probability"] >= 0.9
         assert proposal["statistics"]["interaction_probabilities"][0]["tile_name"] == "Moray"
         assert proposal["plan_chain"]
+
+    run(scenario())
+
+
+def test_bot_plans_suggest_drawing_when_open_interaction_support_is_missing_from_hand():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+        room = await service.create_room(user=user, mode="solo_with_bots", game_type="goldfish", human_ability_id="force")
+        await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_start_draw_support_plan",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "goldfish",
+                "expected_version": 0,
+                "type": "start_goldfish_game",
+                "payload": {},
+            },
+        )
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "force"
+        state["capabilities"]["force"]["actions_taken_this_control"] = state["capabilities"]["force"]["max_actions_per_control"]
+        state["capabilities"]["camouflage"]["pa"] = 1
+        state["capabilities"]["camouflage"]["hand"] = []
+        state["capabilities"]["camouflage"]["draw_pile"] = [
+            {"card_id": "future_hide_card", "interaction_id": "hide", "interaction_ids": ["hide"], "owner_capability_id": "camouflage"}
+        ]
+        state["tile_catalog"] = {
+            "categories": {"threat": {"id": "threat", "name": "Threat", "compulsory_on_same_node": True}},
+            "events": {"crab": {"id": "crab", "name": "Crab", "category_id": "threat"}},
+            "tiles": {"crab-tile": {"id": "crab-tile", "event_id": "crab", "priority": 10, "interaction_ids": ["hide"]}},
+            "interactions": {"hide": {"id": "hide", "name": "Hide"}},
+        }
+        state["interaction"] = {
+            "tile_instance_id": "tile_crab",
+            "tile_id": "crab-tile",
+            "node_id": "1A",
+            "initiator_capability_id": "force",
+            "played_cards": [],
+        }
+
+        plans = await service.get_bot_plans(room_id=room["id"], user=user)
+        plan_ids = [plan["plan_id"] for plan in plans["proposals"]]
+        draw_plan = next(plan for plan in plans["proposals"] if plan["proposer_ability_id"] == "camouflage")
+
+        assert not any(plan_id.startswith("open_interaction_needs_manual_resolution") for plan_id in plan_ids)
+        assert draw_plan["plan_chain"][0]["public_command"]["type"] == "take_control"
+        assert draw_plan["plan_chain"][1]["public_command"]["type"] == "draw_action_card"
+        assert draw_plan["statistics"]["support_estimate"]["known_future_matches"] == 1
+
+    run(scenario())
+
+
+def test_bot_plans_use_shared_intelligence_cards_for_open_interaction_support():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+        room = await service.create_room(user=user, mode="solo_with_bots", game_type="goldfish", human_ability_id="force")
+        await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_start_intelligence_support_plan",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "goldfish",
+                "expected_version": 0,
+                "type": "start_goldfish_game",
+                "payload": {},
+            },
+        )
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "force"
+        state["capabilities"]["force"]["actions_taken_this_control"] = state["capabilities"]["force"]["max_actions_per_control"]
+        state["capabilities"]["intelligence"]["hand"] = [
+            {"card_id": "analyse_card", "interaction_id": "analyse", "interaction_ids": ["analyse"], "owner_capability_id": "intelligence"}
+        ]
+        state["tile_catalog"] = {
+            "categories": {"threat": {"id": "threat", "name": "Threat", "compulsory_on_same_node": True}},
+            "events": {"fish": {"id": "fish", "name": "Big fish", "category_id": "threat"}},
+            "tiles": {"fish-tile": {"id": "fish-tile", "event_id": "fish", "priority": 10, "interaction_ids": ["analyse"]}},
+            "interactions": {"analyse": {"id": "analyse", "name": "Analyse"}},
+        }
+        state["interaction"] = {
+            "tile_instance_id": "tile_fish",
+            "tile_id": "fish-tile",
+            "node_id": "1A",
+            "initiator_capability_id": "camouflage",
+            "played_cards": [],
+        }
+
+        plans = await service.get_bot_plans(room_id=room["id"], user=user)
+        plan = next(plan for plan in plans["proposals"] if plan["plan_id"] == "support_interaction_intelligence_tile_fish")
+
+        assert plan["proposer_ability_id"] == "intelligence"
+        assert plan["plan_chain"][0]["public_command"]["type"] == "take_control"
+        assert plan["plan_chain"][1]["public_command"]["type"] == "resolve_interaction"
+        assert plan["statistics"]["support_estimate"]["hand_matches"] == 1
+        assert "analyse_card" not in str(plans)
+
+    run(scenario())
+
+
+def test_auto_resolve_interaction_selects_counter_attack_cards():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "camouflage"
+        state["poulpita"]["energy"] = 3
+        state["tile_catalog"] = {
+            "categories": {"threat": {"id": "threat", "name": "Threat", "compulsory_on_same_node": True}},
+            "events": {"fish": {"id": "fish", "name": "Big fish", "category_id": "threat"}},
+            "tiles": {
+                "fish-tile": {
+                    "id": "fish-tile",
+                    "event_id": "fish",
+                    "interaction_ids": ["charge"],
+                    "counter_attack_interaction_ids": ["hide"],
+                    "success_effects": [{"type": "gain_neurons", "amount": 1}],
+                    "counter_attack_effects": [{"type": "gain_energy", "amount": 2}],
+                    "failure_effects": [],
+                }
+            },
+            "interactions": {"charge": {"id": "charge", "name": "Charge"}, "hide": {"id": "hide", "name": "Hide"}},
+        }
+        state["tiles"] = {"1A": [{"instance_id": "tile_fish", "tile_id": "fish-tile", "face_up": True}]}
+        state["interaction"] = {
+            "tile_instance_id": "tile_fish",
+            "tile_id": "fish-tile",
+            "node_id": "1A",
+            "initiator_capability_id": "force",
+            "played_cards": [{"card_id": "charge_card", "interaction_id": "charge", "interaction_ids": ["charge"], "capability_id": "force"}],
+        }
+        state["capabilities"]["camouflage"]["hand"] = [
+            {"card_id": "hide_card", "interaction_id": "hide", "interaction_ids": ["hide"], "owner_capability_id": "camouflage"}
+        ]
+
+        result = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_counter_auto",
+            expected_version=1,
+            command_type="resolve_interaction",
+            payload={"capability_id": "camouflage", "auto_select_cards": True},
+        )
+
+        assert result["ok"] is True
+        assert result["events"][0]["counter_success"] is True
+        assert result["projection"]["poulpita"]["neurons"] == 1
+        assert result["projection"]["poulpita"]["energy"] == 5
+        assert result["projection"]["capabilities"]["camouflage"]["hand"] == []
+
+    run(scenario())
+
+
+def test_bot_support_plan_draws_with_auto_discard_for_counter_attack_when_hand_is_full():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+        room = await service.create_room(user=user, mode="solo_with_bots", game_type="goldfish", human_ability_id="force")
+        await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_start_counter_draw_plan",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "goldfish",
+                "expected_version": 0,
+                "type": "start_goldfish_game",
+                "payload": {},
+            },
+        )
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "force"
+        state["capabilities"]["force"]["actions_taken_this_control"] = state["capabilities"]["force"]["max_actions_per_control"]
+        state["capabilities"]["camouflage"]["pa"] = 1
+        state["capabilities"]["camouflage"]["current_max_cards_in_hand"] = 2
+        state["capabilities"]["camouflage"]["hand"] = [
+            {"card_id": "junk_1", "interaction_id": "ink", "interaction_ids": ["ink"], "owner_capability_id": "camouflage"},
+            {"card_id": "junk_2", "interaction_id": "analyse", "interaction_ids": ["analyse"], "owner_capability_id": "camouflage"},
+        ]
+        state["capabilities"]["camouflage"]["draw_pile"] = [
+            {"card_id": "future_hide", "interaction_id": "hide", "interaction_ids": ["hide"], "owner_capability_id": "camouflage"}
+        ]
+        state["tile_catalog"] = {
+            "categories": {"threat": {"id": "threat", "name": "Threat", "compulsory_on_same_node": True}},
+            "events": {"fish": {"id": "fish", "name": "Big fish", "category_id": "threat"}},
+            "tiles": {"fish-tile": {"id": "fish-tile", "event_id": "fish", "interaction_ids": ["charge"], "counter_attack_interaction_ids": ["hide"]}},
+            "interactions": {"charge": {"id": "charge", "name": "Charge"}, "hide": {"id": "hide", "name": "Hide"}},
+        }
+        state["interaction"] = {
+            "tile_instance_id": "tile_fish",
+            "tile_id": "fish-tile",
+            "node_id": "1A",
+            "initiator_capability_id": "force",
+            "played_cards": [{"card_id": "charge_card", "interaction_id": "charge", "interaction_ids": ["charge"], "capability_id": "force"}],
+        }
+
+        plans = await service.get_bot_plans(room_id=room["id"], user=user)
+        plan = next(plan for plan in plans["proposals"] if plan["proposer_ability_id"] == "camouflage")
+        draw_step = next(step for step in plan["plan_chain"] if step.get("public_command", {}).get("type") == "draw_action_card")
+
+        assert draw_step["public_command"]["payload"]["auto_discard_card"] is True
+        assert "future_hide" not in str(plans)
+
+    run(scenario())
+
+
+def test_bot_plans_continue_when_only_intelligence_has_control_left():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+        room = await service.create_room(user=user, mode="solo_with_bots", game_type="goldfish", human_ability_id="force")
+        await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_start_only_intelligence_left",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "goldfish",
+                "expected_version": 0,
+                "type": "start_goldfish_game",
+                "payload": {},
+            },
+        )
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "force"
+        state["capabilities"]["force"]["actions_taken_this_control"] = state["capabilities"]["force"]["max_actions_per_control"]
+        for ability_id, capability in state["capabilities"].items():
+            if ability_id not in {"force", "intelligence"}:
+                capability["control_takes_this_night"] = capability["max_control_takes_per_night"]
+        state["capabilities"]["intelligence"]["control_takes_this_night"] = 0
+
+        plans = await service.get_bot_plans(room_id=room["id"], user=user)
+
+        assert plans["status"] == "awaiting_selection"
+        assert any(
+            step.get("public_command", {}).get("type") == "take_control"
+            and step.get("public_command", {}).get("payload", {}).get("capability_id") == "intelligence"
+            for plan in plans["proposals"]
+            for step in plan["plan_chain"]
+        )
+
+    run(scenario())
+
+
+def test_bot_plans_prioritize_ending_night_at_shelter_when_late():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+        room = await service.create_room(user=user, mode="solo_with_bots", game_type="goldfish", human_ability_id="force")
+        await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_start_late_shelter_plan",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "goldfish",
+                "expected_version": 0,
+                "type": "start_goldfish_game",
+                "payload": {},
+            },
+        )
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "force"
+        state["night_time_spent"] = 23
+        state["poulpita"]["node_id"] = "1A"
+        state["shelters"] = {"1A": {"count": 1, "seashells": 0, "secure": False}}
+
+        plans = await service.get_bot_plans(room_id=room["id"], user=user)
+
+        assert plans["proposals"][0]["plan_id"] == "end_night_force"
+        assert plans["proposals"][0]["plan_chain"][0]["public_command"]["type"] == "end_night"
+
+    run(scenario())
+
+
+def test_bot_day_plans_include_size_growth_and_ability_upgrades():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+        room = await service.create_room(user=user, mode="solo_with_bots", game_type="goldfish", human_ability_id="force")
+        await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_start_day_upgrade_plans",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "goldfish",
+                "expected_version": 0,
+                "type": "start_goldfish_game",
+                "payload": {},
+            },
+        )
+        state = service._memory_states[room["id"]]
+        state["phase"] = "day"
+        state["poulpita"]["energy"] = 7
+        state["poulpita"]["neurons"] = 4
+        state["objectives"] = [{"type": "increase_size", "count": 1}]
+        state["tile_catalog"]["poulpita_panel"] = {"sizes": [{"amount": 1, "unit": "kg", "energy_cost": 0}, {"amount": 2, "unit": "kg", "energy_cost": 2}]}
+        state["tile_catalog"]["bot_settings"] = {"min_energy_after_size_upgrade": 4}
+        for capability in state["capabilities"].values():
+            capability["hand_size_upgrades"] = []
+        state["capabilities"]["force"]["hand_size_upgrades"] = [{"cost_resource": "neurons", "cost": 2, "hand_size_bonus": 1}]
+
+        plans = await service.get_bot_plans(room_id=room["id"], user=user)
+        plan_ids = {plan["plan_id"] for plan in plans["proposals"]}
+
+        assert "day_buy_poulpita_size" in plan_ids
+        assert "day_buy_upgrade_force_0" in plan_ids
 
     run(scenario())
 
@@ -1515,6 +1843,9 @@ def test_end_night_is_free_and_day_upgrades_stack_before_next_night():
         capability["control_takes_this_night"] = 2
         capability["actions_taken_this_control"] = int(capability["max_actions_per_control"])
         capability["current_max_cards_in_hand"] = 3
+        capability["hand"] = capability["hand"][:1]
+        capability["discard"] = capability["draw_pile"][:4]
+        capability["draw_pile"] = capability["draw_pile"][4:]
         capability["hand_size_upgrades"] = [
             {"cost_resource": "neurons", "cost": 2, "hand_size_bonus": 5},
             {"cost_resource": "neurons", "cost": 1, "hand_size_bonus": 1},
@@ -1577,6 +1908,8 @@ def test_end_night_is_free_and_day_upgrades_stack_before_next_night():
         assert night["projection"]["day_index"] == 2
         assert night_capability["current_max_cards_in_hand"] == 8
         assert night_capability["control_takes_this_night"] == 0
+        assert len(night_capability["hand"]) == min(8, len(night_capability["hand"]) + len(night_capability["draw_pile"]))
+        assert night_capability["discard"] == []
 
     run(scenario())
 

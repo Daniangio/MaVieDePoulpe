@@ -554,7 +554,7 @@ const SizeBar = ({
         <strong className="text-slate-100">{formatSize(currentSize)}</strong>
       </div>
       <button
-        className="rounded border border-cyan-300 px-2 py-1 text-[0.68rem] font-semibold text-cyan-100 hover:bg-cyan-950 disabled:opacity-50"
+        className="rounded border border-cyan-300 px-2 py-1 text-[0.68rem] font-semibold text-black-100 hover:bg-cyan-950 disabled:opacity-50"
         disabled={pending || !canBuy}
         onClick={onBuy}
         type="button"
@@ -1001,6 +1001,7 @@ const BotPlansOverlay = ({
     ? projection.capabilities?.[projection.active_capability_id]?.name || projection.active_capability_id
     : "No active ability";
   const plans = botPlanStatus?.proposals || [];
+  const debug = botPlanStatus?.debug || {};
 
   if (!open) return null;
   return (
@@ -1086,6 +1087,30 @@ const BotPlansOverlay = ({
                     {stats.distance_to_closest_known_shelter !== undefined ? (
                       <p className="mt-1"><span className="text-slate-500">Shelter distance:</span> {stats.distance_to_closest_known_shelter}</p>
                     ) : null}
+                    {stats.surprise_card ? (
+                      <div className="mt-2 rounded border border-slate-800 bg-slate-950 p-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <strong className="text-slate-100">{stats.surprise_card?.name || "Surprise"}</strong>
+                          <span className="text-cyan-200">{stats.surprise_resolution || "resolve"}</span>
+                        </div>
+                        {(stats.surprise_costs || []).length ? <p className="mt-1"><span className="text-slate-500">Cost:</span> {(stats.surprise_costs || []).join("; ")}</p> : null}
+                        {(stats.surprise_effects || []).length ? <p className="mt-1"><span className="text-slate-500">Effects:</span> {(stats.surprise_effects || []).join(", ")}</p> : null}
+                        {Object.keys(stats.surprise_delta || {}).length ? <p className="mt-1"><span className="text-slate-500">Projected:</span> {Object.entries(stats.surprise_delta || {}).map(([key, value]) => `${Number(value) > 0 ? "+" : ""}${Number(value)} ${String(key).replaceAll("_", " ")}`).join(", ")}</p> : null}
+                      </div>
+                    ) : null}
+                    {stats.support_estimate ? (
+                      <div className="mt-2 rounded border border-slate-800 bg-slate-950 p-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <strong className="text-slate-100">{stats.support_estimate.ability_name || "Support"}</strong>
+                          <span className="text-cyan-200">{Math.round(Number(stats.support_estimate.probability || 0) * 100)}%</span>
+                        </div>
+                        {(stats.support_estimate.missing_requirements || []).length ? <p className="mt-1"><span className="text-slate-500">Missing:</span> {(stats.support_estimate.missing_requirements || []).join(", ")}</p> : null}
+                        <p className="mt-1">
+                          <span className="text-slate-500">Coverage:</span> {Number(stats.support_estimate.hand_matches || 0)} in hand, {Number(stats.support_estimate.known_future_matches || 0)} in deck/discard
+                          {stats.support_estimate.is_human ? ", human-controlled" : ""}
+                        </p>
+                      </div>
+                    ) : null}
                     {(stats.interaction_summaries || []).length ? (
                       <div className="mt-2 space-y-2">
                         {(stats.interaction_summaries || []).map((entry: any) => (
@@ -1124,6 +1149,52 @@ const BotPlansOverlay = ({
             );
           })}
           </div>
+          ) : null}
+          {!loading && Object.keys(debug).length ? (
+            <section className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-slate-800">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h3 className="font-semibold text-amber-950">Planner debug</h3>
+                <span className="text-[0.68rem] text-amber-800">Version {botPlanStatus?.generated_from_version ?? "-"}</span>
+              </div>
+              <div className="mt-2 grid gap-2 md:grid-cols-4">
+                <p><span className="font-semibold">Generated:</span> {Number(debug.generated_count ?? debug.raw_generated_count ?? 0)}</p>
+                <p><span className="font-semibold">Frontier:</span> {Number(debug.frontier_count ?? 0)}</p>
+                <p><span className="font-semibold">Selected:</span> {Number(debug.selected_count ?? plans.length)}</p>
+                <p><span className="font-semibold">Limit:</span> {Number(debug.max_public_plans ?? 0)} ({Number(debug.max_plans_per_proposer ?? 0)}/bot)</p>
+              </div>
+              <div className="mt-2 grid gap-2 md:grid-cols-3">
+                <p><span className="font-semibold">Generated by:</span> {Object.entries(debug.generated_by_proposer || {}).map(([key, value]) => `${projection.capabilities?.[key]?.name || key}: ${Number(value)}`).join(", ") || "-"}</p>
+                <p><span className="font-semibold">Selected by:</span> {Object.entries(debug.selected_by_proposer || {}).map(([key, value]) => `${projection.capabilities?.[key]?.name || key}: ${Number(value)}`).join(", ") || "-"}</p>
+                <p><span className="font-semibold">Selected depths:</span> {Object.entries(debug.selected_depths || {}).map(([key, value]) => `${key}: ${Number(value)}`).join(", ") || "-"}</p>
+                <p><span className="font-semibold">Generated depths:</span> {Object.entries(debug.generated_depths || {}).map(([key, value]) => `${key}: ${Number(value)}`).join(", ") || "-"}</p>
+              </div>
+              {(debug.selected || []).length ? (
+                <div className="mt-3">
+                  <p className="font-semibold text-amber-950">Selected stop reasons</p>
+                  <div className="mt-1 grid gap-1 md:grid-cols-2">
+                    {(debug.selected || []).map((entry: any, index: number) => (
+                      <p className="rounded border border-amber-200 bg-white px-2 py-1" key={`${entry.plan_id || "selected"}:${index}`}>
+                        <span className="font-semibold">{projection.capabilities?.[entry.proposer_ability_id]?.name || entry.proposer_ability_id || "Team"}</span>
+                        {` depth ${Number(entry.depth || 0)}: ${entry.rollout_stop_reason || entry.last_step || "no stop reason"}`}
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+              {(debug.pruned || []).length ? (
+                <details className="mt-3">
+                  <summary className="cursor-pointer font-semibold text-amber-950">Pruned / not selected ({(debug.pruned || []).length} shown)</summary>
+                  <div className="mt-1 grid gap-1 md:grid-cols-2">
+                    {(debug.pruned || []).map((entry: any, index: number) => (
+                      <p className="rounded border border-amber-200 bg-white px-2 py-1" key={`${entry.plan_id || "pruned"}:${index}`}>
+                        <span className="font-semibold">{projection.capabilities?.[entry.proposer_ability_id]?.name || entry.proposer_ability_id || "Team"}</span>
+                        {` depth ${Number(entry.depth || 0)} score ${Number(entry.score || 0).toFixed(1)}: ${entry.rollout_stop_reason || entry.last_step || entry.title || "no detail"}`}
+                      </p>
+                    ))}
+                  </div>
+                </details>
+              ) : null}
+            </section>
           ) : null}
         </div>
       </section>
@@ -1277,6 +1348,8 @@ const actionVisual = (step: PlanChainStep, projection: GameProjection) => {
   if (type === "end_night") return { actorId, text: "Night", Icon: Moon, title: "End night" };
   if (type === "end_day") return { actorId, text: "Day", Icon: Moon, title: "End day" };
   if (type === "move_seashell_to_shelter" || type === "move_seashell_from_shelter") return { actorId, text: "Shell", Icon: RefreshCw, title: compactPlanStepLabel(step, projection) };
+  if (type === "buy_hand_size_upgrade") return { actorId, text: "Up", Icon: CirclePlus, title: "Buy upgrade" };
+  if (type === "buy_poulpita_size") return { actorId, text: "Size", Icon: CirclePlus, title: "Grow Poulpita" };
   return { actorId, text: "Plan", Icon: RefreshCw, title: compactPlanStepLabel(step, projection) };
 };
 
@@ -1309,6 +1382,10 @@ const compactPlanStepLabel = (step: PlanChainStep, projection: GameProjection) =
       return "Store shell";
     case "move_seashell_from_shelter":
       return "Take shell";
+    case "buy_hand_size_upgrade":
+      return `${actor} Buy upgrade`;
+    case "buy_poulpita_size":
+      return "Grow size";
     default:
       return String(step.label || "Decision").replace(/^Use expected AP to /, "").slice(0, 34);
   }
@@ -1338,7 +1415,7 @@ const PlanActionNode = ({
     <button
       className={[
         "group flex shrink-0 items-center gap-1.5 rounded-full bg-transparent p-0.5 text-left transition hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-60",
-        selected ? "drop-shadow-[0_0_10px_rgba(45,212,191,0.75)]" : "",
+        selected ? "rounded-xl bg-amber-200/40 drop-shadow-[0_0_16px_rgba(251,191,36,0.95)] ring-4 ring-amber-300/80" : "",
       ].join(" ")}
       disabled={disabled}
       onClick={() => onSelect(option)}
@@ -1348,7 +1425,7 @@ const PlanActionNode = ({
     >
       <span
         className="relative flex h-12 w-12 shrink-0 items-center justify-center overflow-visible rounded-full border-[3px] bg-white text-slate-900"
-        style={{ borderColor: selected ? "#2dd4bf" : color, boxShadow: selected ? `0 0 0 3px ${color}` : undefined }}
+        style={{ borderColor: selected ? "#f59e0b" : color, boxShadow: selected ? `0 0 0 4px ${color}, 0 0 18px rgba(245,158,11,0.95)` : undefined }}
       >
         <span
           className="absolute -top-2 left-1/2 flex h-5 min-w-5 -translate-x-1/2 items-center justify-center rounded-full border border-white px-1 text-[0.56rem] font-bold text-white shadow"
@@ -1365,7 +1442,7 @@ const PlanActionNode = ({
           </span>
         )}
       </span>
-      <span className={["grid w-12 shrink-0 gap-0.5 rounded-md border px-1.5 py-1 text-[0.5rem] leading-none shadow", selected ? "border-cyan-200 bg-slate-950/95 text-black-100" : "border-slate-700 bg-slate-950/85 text-slate-200"].join(" ")}>
+      <span className={["grid w-12 shrink-0 gap-0.5 rounded-md border px-1.5 py-1 text-[0.5rem] leading-none shadow", selected ? "border-amber-300 bg-white text-slate-950 ring-2 ring-amber-200" : "border-slate-700 bg-slate-950/85 text-slate-200"].join(" ")}>
         <span>Eff {Math.round(option.avgEfficiency * 100)}%</span>
         <span>Risk {Math.round((1 - option.avgSuccess) * 100)}%</span>
         <span>Score {Math.round(option.avgExpectedGain)}</span>
@@ -1438,18 +1515,22 @@ const PlanDetailTree = ({ plan, projection }: { plan: BotPlanSummary; projection
 const BotPlanTree = ({
   plans,
   activePlanIds,
+  collapsed,
   stepIndex,
   preferredPlanId,
   pending,
+  onToggleCollapsed,
   onSelectOption,
   onExecuteOption,
   projection,
 }: {
   plans: BotPlanSummary[];
   activePlanIds: string[];
+  collapsed: boolean;
   stepIndex: number;
   preferredPlanId: string | null;
   pending: boolean;
+  onToggleCollapsed: () => void;
   onSelectOption: (option: PlanTreeOption) => void;
   onExecuteOption: (option: PlanTreeOption) => void;
   projection: GameProjection;
@@ -1499,16 +1580,21 @@ const BotPlanTree = ({
   return (
     <div className="absolute left-3 top-3 z-[45] w-max max-w-none overflow-visible p-0">
       <div className="flex items-center justify-between gap-2">
-        <p className="text-[0.65rem] font-semibold uppercase tracking-wide text-black-100 drop-shadow">Planning tree</p>
-        <button
-          className="rounded bg-teal-400 px-2 py-1 text-[0.62rem] font-semibold uppercase tracking-wide text-slate-950 shadow hover:bg-teal-300 disabled:cursor-not-allowed disabled:opacity-50"
-          disabled={pending || !selectedOption?.public_command}
-          onClick={() => selectedOption && onExecuteOption(selectedOption)}
-          type="button"
-        >
-          Execute
+        <button className="rounded bg-white/90 px-2 py-1 text-[0.65rem] font-semibold uppercase tracking-wide text-slate-950 shadow hover:bg-cyan-50" onClick={onToggleCollapsed} type="button">
+          Planning tree
         </button>
+        {!collapsed ? (
+          <button
+            className="rounded bg-teal-400 px-2 py-1 text-[0.62rem] font-semibold uppercase tracking-wide text-slate-950 shadow hover:bg-teal-300 disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={pending || !selectedOption?.public_command}
+            onClick={() => selectedOption && onExecuteOption(selectedOption)}
+            type="button"
+          >
+            Execute
+          </button>
+        ) : null}
       </div>
+      {collapsed ? null : (
       <div className="mt-2 space-y-2">
         {Array.from({ length: maxVisibleDepth + 1 }).map((_, depth) => {
           const depthOptions = optionsForDepth(depth);
@@ -1531,6 +1617,7 @@ const BotPlanTree = ({
           );
         })}
       </div>
+      )}
     </div>
   );
 };
@@ -1584,6 +1671,7 @@ const GameRoomPage = () => {
   const { token, user } = useStore();
   const navigate = useNavigate();
   const socketRef = useRef<WebSocket | null>(null);
+  const pendingPlanContinuationRef = useRef<{ expectedCommand: { type: string; payload?: Record<string, unknown> } | null; previousPlanIds: string[] } | null>(null);
   const [projection, setProjection] = useState<GameProjection | null>(null);
   const [levels, setLevels] = useState<Array<any>>([]);
   const [focusedCapabilityId, setFocusedCapabilityId] = useState<string | null>(null);
@@ -1599,6 +1687,7 @@ const GameRoomPage = () => {
   const [interactionPanelState, setInteractionPanelState] = useState<"open" | "success" | "failure" | "closing">("open");
   const [alertsVisible, setAlertsVisible] = useState(false);
   const [botPlansOpen, setBotPlansOpen] = useState(false);
+  const [botPlanTreeCollapsed, setBotPlanTreeCollapsed] = useState(false);
   const [botPlanStatus, setBotPlanStatus] = useState<BotPlanStatus | null>(null);
   const [botPlansLoading, setBotPlansLoading] = useState(false);
   const [activePlanIds, setActivePlanIds] = useState<string[]>([]);
@@ -1730,6 +1819,29 @@ const GameRoomPage = () => {
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.detail || "Failed to load bot plans.");
       setBotPlanStatus(payload);
+      const continuation = pendingPlanContinuationRef.current;
+      if (continuation) {
+        pendingPlanContinuationRef.current = null;
+        const proposals = payload.proposals || [];
+        const expectedCommand = continuation.expectedCommand;
+        if (expectedCommand) {
+          const matchingPlans = proposals.filter((plan: BotPlanSummary) => plannedCommandMatches(plan.plan_chain?.[0], expectedCommand.type, expectedCommand.payload || {}));
+          if (matchingPlans.length) {
+            setActivePlanIds(matchingPlans.map((plan: BotPlanSummary) => plan.plan_id));
+            setPreferredPlanId((current) => matchingPlans.some((plan: BotPlanSummary) => plan.plan_id === current) ? current : matchingPlans[0]?.plan_id || null);
+            setPlanStepIndex(1);
+          } else {
+            setActivePlanIds([]);
+            setPreferredPlanId(null);
+            setPlanStepIndex(0);
+            pushBotLog("Planned branch changed after new information; choose the next plan manually.", "warn");
+          }
+        } else {
+          setActivePlanIds([]);
+          setPreferredPlanId(null);
+          setPlanStepIndex(0);
+        }
+      }
       setError("");
     } catch (plansError: any) {
       setError(plansError.message || "Failed to load bot plans.");
@@ -2130,6 +2242,10 @@ const GameRoomPage = () => {
     setActivePlanIds(option.planIds);
     setPreferredPlanId((current) => option.planIds.includes(String(current || "")) ? current : option.planIds[0] || null);
     const nextCommand = option.public_command;
+    const selectedPlans = (botPlanStatus?.proposals || []).filter((plan) => option.planIds.includes(plan.plan_id));
+    const expectedNextCommand = selectedPlans
+      .map((plan) => plan.plan_chain?.[option.depth + 1]?.public_command)
+      .find(Boolean) || null;
     const result = await submitCommand(nextCommand.type, nextCommand.payload || {}, "plan");
     if (result?.ok === false) {
       setActivePlanIds([]);
@@ -2140,6 +2256,7 @@ const GameRoomPage = () => {
     }
     setPlanStepIndex(option.depth + 1);
     pushBotLog(`Planned action done: ${option.compactLabel}`, "ok");
+    pendingPlanContinuationRef.current = { expectedCommand: expectedNextCommand, previousPlanIds: option.planIds };
     void loadBotPlans("POST");
   };
 
@@ -2247,8 +2364,10 @@ const GameRoomPage = () => {
                 <BotPlanTree
                   onExecuteOption={executePlanTreeOption}
                   onSelectOption={selectPlanTreeOption}
+                  onToggleCollapsed={() => setBotPlanTreeCollapsed((collapsed) => !collapsed)}
                   pending={pending}
                   activePlanIds={activePlanIds}
+                  collapsed={botPlanTreeCollapsed}
                   plans={botPlanStatus?.proposals || []}
                   preferredPlanId={preferredPlanId}
                   projection={projection}
@@ -2343,39 +2462,69 @@ const GameRoomPage = () => {
           />
           <div className="rounded-md border border-slate-800 bg-slate-900 p-3">
             <div className="flex items-center justify-between gap-3">
-              <h3 className="text-sm font-semibold text-white">Player hand</h3>
+              <h3 className="text-sm font-semibold text-white">{projection?.phase === "day" ? "Day upgrades" : "Player hand"}</h3>
               {discardBeforeDraw ? (
                 <button className="text-xs text-slate-400 hover:text-white" onClick={() => setDiscardBeforeDraw(false)} type="button">
                   Cancel discard
                 </button>
               ) : null}
             </div>
-            {discardBeforeDraw ? <p className="mt-2 text-xs text-amber-200">Choose one card to discard, then a new card will be drawn.</p> : null}
-            <div className="mt-3 flex h-[calc(100%-2rem)] flex-wrap content-start gap-2 overflow-auto rounded border border-dashed border-slate-700 p-2">
-              {(selectedCapability?.hand || []).map((card) => (
-                <CardButton
-                  card={card}
-                  disabled={
-                    pending ||
-                    (!discardBeforeDraw && (!(projection?.interaction || selectedTileInstanceId) || projection?.active_capability_id !== selectedCapability?.id))
-                  }
-                  key={card.card_id}
-                  onClick={() => {
-                    if (discardBeforeDraw) {
-                      drawActionCardAfterDiscard(card.card_id);
-                      return;
-                    }
-                    if (projection?.interaction || selectedTileInstanceId) {
-                      toggleDraftCard(card.card_id);
-                    }
-                  }}
-                  projection={projection as GameProjection}
-                  selected={discardBeforeDraw || selectedCardIds.includes(card.card_id)}
-                  showPreview
-                />
-              ))}
-              {(selectedCapability?.hand || []).length === 0 ? <p className="m-auto text-sm text-slate-500">No cards in hand.</p> : null}
-            </div>
+            {projection?.phase === "day" ? (
+              <div className="mt-3 grid h-[calc(100%-2rem)] content-start gap-2 overflow-auto rounded border border-dashed border-slate-700 p-2 sm:grid-cols-2 lg:grid-cols-3">
+                {(selectedCapability?.hand_size_upgrades || []).map((upgrade, index) => {
+                  const purchased = new Set((selectedCapability?.purchased_hand_size_upgrade_indices || []).map((value) => Number(value)));
+                  const bought = purchased.has(index);
+                  const cost = Number(upgrade.cost || 0);
+                  const isDeckExchange = upgrade.type === "deck_exchange";
+                  return (
+                    <button
+                      className={[
+                        "rounded-md border p-3 text-left text-xs transition",
+                        bought ? "border-slate-700 bg-slate-950 text-slate-500" : "border-cyan-300 bg-slate-950 text-cyan-100 hover:bg-cyan-950",
+                      ].join(" ")}
+                      disabled={pending || bought || Number(projection?.poulpita.neurons || 0) < cost}
+                      key={index}
+                      onClick={() => buyHandSizeUpgrade(index)}
+                      type="button"
+                    >
+                      <span className="block font-semibold text-white">{isDeckExchange ? "Improve deck" : `Increase hand +${Number(upgrade.hand_size_bonus || 1)}`}</span>
+                      <span className="mt-1 block text-slate-400">{bought ? "Bought" : `${cost} neurons`}</span>
+                      {isDeckExchange ? <span className="mt-1 block text-slate-400">Exchange cards at next night setup.</span> : null}
+                    </button>
+                  );
+                })}
+                {(selectedCapability?.hand_size_upgrades || []).length === 0 ? <p className="m-auto text-sm text-slate-500">No upgrades configured.</p> : null}
+              </div>
+            ) : (
+              <>
+                {discardBeforeDraw ? <p className="mt-2 text-xs text-amber-200">Choose one card to discard, then a new card will be drawn.</p> : null}
+                <div className="mt-3 flex h-[calc(100%-2rem)] flex-wrap content-start gap-2 overflow-auto rounded border border-dashed border-slate-700 p-2">
+                  {(selectedCapability?.hand || []).map((card) => (
+                    <CardButton
+                      card={card}
+                      disabled={
+                        pending ||
+                        (!discardBeforeDraw && (!(projection?.interaction || selectedTileInstanceId) || projection?.active_capability_id !== selectedCapability?.id))
+                      }
+                      key={card.card_id}
+                      onClick={() => {
+                        if (discardBeforeDraw) {
+                          drawActionCardAfterDiscard(card.card_id);
+                          return;
+                        }
+                        if (projection?.interaction || selectedTileInstanceId) {
+                          toggleDraftCard(card.card_id);
+                        }
+                      }}
+                      projection={projection as GameProjection}
+                      selected={discardBeforeDraw || selectedCardIds.includes(card.card_id)}
+                      showPreview
+                    />
+                  ))}
+                  {(selectedCapability?.hand || []).length === 0 ? <p className="m-auto text-sm text-slate-500">No cards in hand.</p> : null}
+                </div>
+              </>
+            )}
           </div>
         </div>
       </section>

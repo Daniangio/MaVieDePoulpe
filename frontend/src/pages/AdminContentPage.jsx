@@ -144,6 +144,7 @@ const defaultBotSettings = {
   expected_ap_roll: 3,
   planning_depth_take_controls: 3,
   max_plans: 3,
+  min_energy_after_size_upgrade: 4,
   weights: {
     efficiency: 35,
     confidence: 35,
@@ -1167,6 +1168,19 @@ const BotSettingsEditor = ({ botSettings, onSave, busy }) => {
             type="number"
             value={Number(draft.max_plans || 3)}
             onChange={(event) => setDraft((current) => ({ ...current, max_plans: Math.max(1, Math.min(16, Number(event.target.value || 3))) }))}
+          />
+        </label>
+        <label className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3 text-sm">
+          <span className="font-semibold text-teal-950">Energy kept after growth</span>
+          <span className="mt-1 block text-xs text-slate-500">Bots suggest size growth only if this much energy remains. Default is 4.</span>
+          <input
+            className={`${input} mt-3`}
+            max="31"
+            min="1"
+            step="1"
+            type="number"
+            value={Number(draft.min_energy_after_size_upgrade || 4)}
+            onChange={(event) => setDraft((current) => ({ ...current, min_energy_after_size_upgrade: Math.max(1, Math.min(31, Number(event.target.value || 4))) }))}
           />
         </label>
       </div>

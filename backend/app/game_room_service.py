@@ -289,6 +289,17 @@ def _refill_draw_pile_from_discard(capability: dict[str, Any]) -> bool:
     return True
 
 
+def _reshuffle_and_deal_starting_hand(capability: dict[str, Any]) -> None:
+    cards = []
+    for zone in ["hand", "draw_pile", "discard"]:
+        cards.extend(deepcopy(capability.get(zone) or []))
+    random.shuffle(cards)
+    hand_limit = max(0, int(capability.get("current_max_cards_in_hand") or capability.get("default_max_cards_in_hand") or 3))
+    capability["hand"] = cards[:hand_limit]
+    capability["draw_pile"] = cards[hand_limit:]
+    capability["discard"] = []
+
+
 def _remove_cards_from_capability(capability: dict[str, Any], interaction_id: str, count: int) -> list[dict[str, Any]] | None:
     available = sum(
         1
@@ -1031,6 +1042,18 @@ def _auto_selected_interaction_card_ids(next_state: dict[str, Any], capability_i
             remaining.remove(match)
             selected.append(str(card.get("card_id")))
     return selected
+
+
+def _auto_discard_card_id_for_draw(state: dict[str, Any], capability: dict[str, Any]) -> str:
+    interaction = state.get("interaction") or {}
+    tile = (state.get("tile_catalog") or {}).get("tiles", {}).get(interaction.get("tile_id")) or {}
+    required = [str(interaction_id) for interaction_id in (tile.get("interaction_ids") or []) + (tile.get("counter_attack_interaction_ids") or []) if interaction_id]
+    hand = capability.get("hand") or []
+    if required:
+        for card in hand:
+            if not any(interaction_id in required for interaction_id in _card_interaction_options(card)):
+                return str(card.get("card_id") or "")
+    return str((hand[0] if hand else {}).get("card_id") or "")
 
 
 def _auto_selected_surprise_card_ids(capability: dict[str, Any], costs: list[dict[str, Any]]) -> list[str]:
@@ -2068,6 +2091,7 @@ class GameRoomService:
                 capability["pa"] = 0
                 capability["control_takes_this_night"] = 0
                 capability["actions_taken_this_control"] = 0
+                _reshuffle_and_deal_starting_hand(capability)
             next_state["version"] = int(state["version"]) + 1
             event = {
                 "event_id": f"evt_{uuid.uuid4().hex}",
@@ -2116,6 +2140,8 @@ class GameRoomService:
             discard_card_id = str(payload.get("discard_card_id") or "").strip()
             hand = capability.get("hand") or []
             hand_limit = int(capability.get("current_max_cards_in_hand") or 3)
+            if len(hand) >= hand_limit and not discard_card_id and payload.get("auto_discard_card"):
+                discard_card_id = _auto_discard_card_id_for_draw(state, capability)
             if len(hand) >= hand_limit and not discard_card_id:
                 self._reject(state, command_id, "discard_required", "Choose a card to discard before drawing.")
             if discard_card_id and not any(card.get("card_id") == discard_card_id for card in hand):
@@ -2308,7 +2334,7 @@ class GameRoomService:
                         selected_card_ids = _auto_selected_interaction_card_ids(
                             next_state,
                             capability_id,
-                            list(tile.get("interaction_ids") or []),
+                            list(tile.get("interaction_ids") or []) + list(tile.get("counter_attack_interaction_ids") or []),
                         )
                     try:
                         _sync_interaction_cards(next_state, capability_id, selected_card_ids)

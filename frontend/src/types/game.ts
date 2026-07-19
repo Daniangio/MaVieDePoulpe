@@ -160,6 +160,7 @@ export type BotPlanStatus = {
   generated_from_version?: number;
   proposals: BotPlanSummary[];
   message?: string;
+  debug?: Record<string, any>;
 };
 
 export type GameProjection = {
