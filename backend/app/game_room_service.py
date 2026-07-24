@@ -269,14 +269,15 @@ def _expand_deck(deck_config: list[dict[str, Any]], capability_id: str) -> list[
         if not interaction_ids and interaction_id:
             interaction_ids = [interaction_id]
         for _index in range(max(0, int(entry.get("count") or 0))):
-            cards.append(
-                {
-                    "card_id": f"card_{uuid.uuid4().hex}",
-                    "interaction_id": interaction_id,
-                    "interaction_ids": interaction_ids,
-                    "owner_capability_id": capability_id,
-                }
-            )
+            card = {
+                "card_id": f"card_{uuid.uuid4().hex}",
+                "interaction_id": interaction_id,
+                "interaction_ids": interaction_ids,
+                "owner_capability_id": capability_id,
+            }
+            if entry.get("upgraded"):
+                card["upgraded"] = True
+            cards.append(card)
     random.shuffle(cards)
     return cards
 
@@ -292,69 +293,62 @@ def _refill_draw_pile_from_discard(capability: dict[str, Any]) -> bool:
 
 
 def _reshuffle_and_deal_starting_hand(capability: dict[str, Any]) -> None:
-    cards = []
-    for zone in ["hand", "draw_pile", "discard"]:
-        cards.extend(deepcopy(capability.get(zone) or []))
-    random.shuffle(cards)
+    cards = _expand_deck(capability.get("deck") or [], str(capability.get("id") or ""))
     hand_limit = max(0, int(capability.get("current_max_cards_in_hand") or capability.get("default_max_cards_in_hand") or 3))
     capability["hand"] = cards[:hand_limit]
     capability["draw_pile"] = cards[hand_limit:]
     capability["discard"] = []
 
 
-def _remove_cards_from_capability(capability: dict[str, Any], interaction_id: str, count: int) -> list[dict[str, Any]] | None:
-    available = sum(
-        1
-        for zone in ["draw_pile", "discard", "hand"]
-        for card in capability.get(zone) or []
-        if interaction_id in _card_interaction_options(card)
-    )
-    if available < count:
-        return None
-    removed: list[dict[str, Any]] = []
-    zones = ["draw_pile", "discard", "hand"]
-    for zone in zones:
-        kept = []
-        for card in capability.get(zone) or []:
-            if len(removed) < count and interaction_id in _card_interaction_options(card):
-                removed.append(card)
-            else:
-                kept.append(card)
-        capability[zone] = kept
-        if len(removed) >= count:
-            return removed
-    return None
-
-
 def _apply_deck_exchange_upgrade(capability: dict[str, Any], upgrade: dict[str, Any]) -> None:
-    removed_by_interaction: list[tuple[str, list[dict[str, Any]]]] = []
+    deck = deepcopy(capability.get("deck") or [])
     for entry in upgrade.get("remove_cards") or []:
         interaction_id = str(entry.get("interaction_id") or "")
-        count = max(0, int(entry.get("count") or 0))
-        removed = _remove_cards_from_capability(capability, interaction_id, count)
-        if removed is None:
-            for restored_interaction_id, restored_cards in removed_by_interaction:
-                capability.setdefault("draw_pile", []).extend(restored_cards)
+        remaining = max(0, int(entry.get("count") or 0))
+        for deck_entry in deck:
+            options = [str(value) for value in (deck_entry.get("interaction_ids") or []) if value]
+            primary = str(deck_entry.get("interaction_id") or "")
+            if not options and primary:
+                options = [primary]
+            if interaction_id not in options:
+                continue
+            available = max(0, int(deck_entry.get("count") or 0))
+            removed = min(available, remaining)
+            deck_entry["count"] = available - removed
+            remaining -= removed
+            if remaining == 0:
+                break
+        if remaining:
             raise ValueError(f"Not enough {interaction_id} cards remain to exchange.")
-        removed_by_interaction.append((interaction_id, removed))
-    new_cards = []
-    capability_id = str(capability.get("id") or "")
+
+    deck = [entry for entry in deck if int(entry.get("count") or 0) > 0]
     for entry in upgrade.get("add_cards") or []:
         interaction_ids = [str(interaction_id) for interaction_id in (entry.get("interaction_ids") or []) if interaction_id]
         if not interaction_ids:
             continue
-        for _index in range(max(0, int(entry.get("count") or 0))):
-            new_cards.append(
-                {
-                    "card_id": f"card_{uuid.uuid4().hex}",
-                    "interaction_id": interaction_ids[0],
-                    "interaction_ids": interaction_ids,
-                    "owner_capability_id": capability_id,
-                    "upgraded": True,
-                }
-            )
-    capability.setdefault("draw_pile", []).extend(new_cards)
-    random.shuffle(capability["draw_pile"])
+        deck.append(
+            {
+                "interaction_id": interaction_ids[0],
+                "interaction_ids": interaction_ids,
+                "count": max(0, int(entry.get("count") or 0)),
+                "upgraded": True,
+            }
+        )
+    capability["deck"] = deck
+
+
+def _apply_unmigrated_deck_exchange_upgrades(capability: dict[str, Any]) -> None:
+    applied = {int(index) for index in (capability.get("applied_deck_exchange_upgrade_indices") or [])}
+    purchased = {int(index) for index in (capability.get("purchased_hand_size_upgrade_indices") or [])}
+    upgrades = capability.get("hand_size_upgrades") or []
+    for upgrade_index in sorted(purchased - applied):
+        if upgrade_index < 0 or upgrade_index >= len(upgrades):
+            continue
+        upgrade = upgrades[upgrade_index] or {}
+        if str(upgrade.get("type") or "hand_size") != "deck_exchange":
+            continue
+        _apply_deck_exchange_upgrade(capability, upgrade)
+        capability.setdefault("applied_deck_exchange_upgrade_indices", []).append(upgrade_index)
 
 
 def _initial_capabilities(*, deal_hands: bool = False) -> dict[str, dict[str, Any]]:
@@ -2071,6 +2065,7 @@ class GameRoomService:
             try:
                 if upgrade_type == "deck_exchange":
                     _apply_deck_exchange_upgrade(next_capability, upgrade)
+                    next_capability.setdefault("applied_deck_exchange_upgrade_indices", []).append(upgrade_index)
                 else:
                     bonus = max(1, int(upgrade.get("hand_size_bonus") or 1))
                     next_capability["current_max_cards_in_hand"] = int(next_capability.get("current_max_cards_in_hand") or next_capability.get("default_max_cards_in_hand") or 3) + bonus
@@ -2217,6 +2212,7 @@ class GameRoomService:
                 capability["pa"] = 0
                 capability["control_takes_this_night"] = 0
                 capability["actions_taken_this_control"] = 0
+                _apply_unmigrated_deck_exchange_upgrades(capability)
                 _reshuffle_and_deal_starting_hand(capability)
             next_state["version"] = int(state["version"]) + 1
             event = {

@@ -2678,7 +2678,9 @@ def test_day_can_buy_deck_exchange_upgrade():
             }
         ]
         capability["purchased_hand_size_upgrade_indices"] = []
-        capability["draw_pile"] = [{"card_id": "card_old", "interaction_id": "charge", "interaction_ids": ["charge"], "owner_capability_id": DEFAULT_ACTIVE_CAPABILITY_ID}]
+        capability["applied_deck_exchange_upgrade_indices"] = []
+        capability["deck"] = [{"interaction_id": "charge", "count": 1}]
+        capability["draw_pile"] = []
         capability["hand"] = []
         capability["discard"] = []
 
@@ -2691,14 +2693,37 @@ def test_day_can_buy_deck_exchange_upgrade():
             command_type="buy_hand_size_upgrade",
             payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID, "upgrade_index": 0},
         )
+        duplicate = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_buy_deck_exchange_again",
+            expected_version=2,
+            command_type="buy_hand_size_upgrade",
+            payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID, "upgrade_index": 0},
+        )
+        night = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_end_day_after_deck_exchange",
+            expected_version=2,
+            command_type="end_day",
+        )
 
         next_capability = result["projection"]["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]
+        night_capability = night["projection"]["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]
         assert result["ok"] is True
         assert result["projection"]["poulpita"]["neurons"] == 1
         assert next_capability["purchased_hand_size_upgrade_indices"] == [0]
-        assert len(next_capability["draw_pile"]) == 1
-        assert next_capability["draw_pile"][0]["interaction_ids"] == ["charge", "hide"]
-        assert next_capability["draw_pile"][0]["upgraded"] is True
+        assert next_capability["applied_deck_exchange_upgrade_indices"] == [0]
+        assert duplicate["ok"] is False
+        assert duplicate["reason"] == "upgrade_already_bought"
+        assert night["ok"] is True
+        night_cards = night_capability["hand"] + night_capability["draw_pile"]
+        assert len(night_cards) == 1
+        assert night_cards[0]["interaction_ids"] == ["charge", "hide"]
+        assert night_cards[0]["upgraded"] is True
 
     run(scenario())
 
