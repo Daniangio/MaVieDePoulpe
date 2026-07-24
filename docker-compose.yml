@@ -90,7 +90,7 @@ services:
       dockerfile: backend/Dockerfile
     command: >
       sh -c "pip install -r backend/requirements.txt &&
-             python -m backend.app.worker_main"
+             watchfiles --filter python 'python -m backend.app.worker_main' backend"
     depends_on:
       postgres:
         condition: service_healthy

@@ -124,6 +124,14 @@ async def execute_bot_plan(room_id: str, plan_id: str, current_user: User = Depe
     return result
 
 
+@router.post("/game/rooms/{room_id}/bot-orchestrator/step")
+async def execute_bot_orchestrator_step(room_id: str, current_user: User = Depends(get_current_user)):
+    result = await _service().execute_bot_orchestrator_step(room_id=room_id, user=current_user)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Game state not found.")
+    return result
+
+
 @router.post("/game/rooms/{room_id}/commands", response_model=GameCommandQueuedResponse)
 async def enqueue_game_command(
     room_id: str,

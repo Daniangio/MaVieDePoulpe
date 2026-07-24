@@ -92,6 +92,21 @@ const shelterData = (entry: any) => {
   };
 };
 
+const hasNightEndBlocker = (projection: GameProjection | null, nodeId: string) =>
+  (projection?.tiles?.[nodeId] || []).some((instance: any) => {
+    const tile = projection?.tile_catalog?.tiles?.[instance.tile_id];
+    if (
+      instance.token_type === "octopus" ||
+      ["octopus", "__octopus_token__"].includes(String(instance.tile_id || "")) ||
+      tile?.token_type === "octopus"
+    ) {
+      return true;
+    }
+    const event = tile?.event || projection?.tile_catalog?.events?.[tile?.event_id];
+    const category = projection?.tile_catalog?.categories?.[event?.category_id];
+    return Boolean(category?.compulsory_on_same_node);
+  });
+
 const DotTrack = ({
   current,
   total,
@@ -185,7 +200,8 @@ const CapabilityBoard = ({
     projection?.phase === "night_action" &&
     Boolean(currentNodeId) &&
     shelterData(projection?.shelters?.[currentNodeId]).count > 0 &&
-    Number(projection?.night_time_spent || 0) >= Number(projection?.night_shelter_available_at || 16);
+    Number(projection?.night_time_spent || 0) >= Number(projection?.night_shelter_available_at || 16) &&
+    !hasNightEndBlocker(projection, currentNodeId);
   const purchasedUpgrades = new Set((capability.purchased_hand_size_upgrade_indices || []).map((index) => Number(index)));
   const sharedNeurons = Number(projection?.poulpita?.neurons || 0);
   const ArticleTag = compact ? "button" : "article";
@@ -390,7 +406,8 @@ const ActionPanel = ({
     projection?.phase === "night_action" &&
     Boolean(currentNodeId) &&
     shelterData(projection?.shelters?.[currentNodeId]).count > 0 &&
-    Number(projection?.night_time_spent || 0) >= Number(projection?.night_shelter_available_at || 16);
+    Number(projection?.night_time_spent || 0) >= Number(projection?.night_shelter_available_at || 16) &&
+    !hasNightEndBlocker(projection, currentNodeId);
   return (
     <div className="flex h-full flex-col gap-2 overflow-auto rounded-md border border-slate-800 bg-slate-900 p-2">
       <h3 className="text-sm font-semibold text-white">Actions</h3>
@@ -1671,6 +1688,7 @@ const GameRoomPage = () => {
   const { token, user } = useStore();
   const navigate = useNavigate();
   const socketRef = useRef<WebSocket | null>(null);
+  const orchestratorPendingRef = useRef(false);
   const pendingPlanContinuationRef = useRef<{ expectedCommand: { type: string; payload?: Record<string, unknown> } | null; previousPlanIds: string[] } | null>(null);
   const [projection, setProjection] = useState<GameProjection | null>(null);
   const [levels, setLevels] = useState<Array<any>>([]);
@@ -1696,6 +1714,9 @@ const GameRoomPage = () => {
   const [botLogEntries, setBotLogEntries] = useState<BotLogEntry[]>([]);
   const [botLogPopups, setBotLogPopups] = useState<BotLogEntry[]>([]);
   const [botLogOpen, setBotLogOpen] = useState(false);
+  const [botsOnlyPaused, setBotsOnlyPaused] = useState(false);
+  const [orchestratorRunning, setOrchestratorRunning] = useState(false);
+  const [orchestratorElapsedSeconds, setOrchestratorElapsedSeconds] = useState(0);
 
   const capabilityMap = projection?.capabilities || {};
   const capabilities = useMemo(() => {
@@ -1708,7 +1729,10 @@ const GameRoomPage = () => {
   const selectedCapabilityId = focusedCapabilityId || projection?.focused_capability_id || capabilities[0]?.id || "";
   const selectedCapability = selectedCapabilityId ? capabilityMap[selectedCapabilityId] : null;
   const otherCapabilities = capabilities.filter((capability) => capability.id !== selectedCapabilityId);
+  const botsOnlyMode = projection?.mode === "bots_only" && Boolean(projection?.bot_config);
   const botModeEnabled = projection?.mode === "solo_with_bots" && Boolean(projection?.bot_config);
+  const botLogEnabled = botModeEnabled || botsOnlyMode;
+  const gameplayPending = pending || botsOnlyMode;
   const activePlanTreePlans = useMemo(() => {
     const proposals = botPlanStatus?.proposals || [];
     if (!activePlanIds.length) return [];
@@ -1730,6 +1754,14 @@ const GameRoomPage = () => {
       setFocusedCapabilityId(projection.focused_capability_id || projection.capability_order?.[0] || null);
     }
   }, [focusedCapabilityId, projection]);
+
+  useEffect(() => {
+    if (!botsOnlyMode || botsOnlyPaused) return;
+    const activeCapabilityId = projection?.active_capability_id;
+    if (!activeCapabilityId || activeCapabilityId === focusedCapabilityId) return;
+    setFocusedCapabilityId(activeCapabilityId);
+    setMoveMode(false);
+  }, [botsOnlyMode, botsOnlyPaused, focusedCapabilityId, projection?.active_capability_id]);
 
   useEffect(() => {
     if (!feedback && !error) {
@@ -1850,6 +1882,39 @@ const GameRoomPage = () => {
     }
   }, [roomId, token]);
 
+  const runOrchestratorStep = useCallback(async () => {
+    if (!token || !roomId || orchestratorPendingRef.current) return;
+    orchestratorPendingRef.current = true;
+    setOrchestratorRunning(true);
+    try {
+      const response = await fetch(buildApiUrl(`/api/game/rooms/${roomId}/bot-orchestrator/step`), {
+        method: "POST",
+        cache: "no-store",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || "Bot orchestrator failed.");
+      if (payload.projection) setProjection(payload.projection);
+      if (payload.ok) {
+        const commandType = String(payload.decision?.command?.type || "action").replaceAll("_", " ");
+        const title = payload.decision?.plan_title || payload.decision?.plan_id || "plan";
+        pushBotLog(`${title}: ${commandType}`, "ok");
+        setBotPlanStatus(null);
+      } else if (payload.status === "idle") {
+        setBotsOnlyPaused(true);
+        setFeedback(payload.message || "The orchestrator has no executable action. Bots were paused.");
+      } else {
+        setFeedback(payload.message || "The orchestrator action was rejected.");
+      }
+    } catch (orchestratorError: any) {
+      setBotsOnlyPaused(true);
+      setError(orchestratorError.message || "Bot orchestrator failed.");
+    } finally {
+      orchestratorPendingRef.current = false;
+      setOrchestratorRunning(false);
+    }
+  }, [pushBotLog, roomId, token]);
+
   useEffect(() => {
     if (!activePlanIds.length || !botPlanStatus || activePlanTreePlans.length) return;
     const proposalIds = (botPlanStatus.proposals || []).map((plan) => plan.plan_id);
@@ -1888,6 +1953,26 @@ const GameRoomPage = () => {
     }
     if (!botPlanStatus && !botPlansLoading) void loadBotPlans();
   }, [botModeEnabled, botPlanStatus, botPlansLoading, loadBotPlans, projection?.phase]);
+
+  useEffect(() => {
+    if (!botsOnlyMode || botsOnlyPaused || !projection || ["setup", "game_over"].includes(projection.phase)) return undefined;
+    const timer = window.setTimeout(() => {
+      void runOrchestratorStep();
+    }, 1000);
+    return () => window.clearTimeout(timer);
+  }, [botsOnlyMode, botsOnlyPaused, projection?.phase, projection?.version, runOrchestratorStep]);
+
+  useEffect(() => {
+    if (!orchestratorRunning) {
+      setOrchestratorElapsedSeconds(0);
+      return undefined;
+    }
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => {
+      setOrchestratorElapsedSeconds(Math.max(1, Math.floor((Date.now() - startedAt) / 1000)));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [orchestratorRunning]);
 
   useEffect(() => {
     void loadProjection();
@@ -2270,6 +2355,24 @@ const GameRoomPage = () => {
           <span className="ml-3 text-slate-400">v{projection?.version ?? "-"} - {phaseLabel(projection)}</span>
         </div>
         <div className="flex items-center gap-2">
+          {botsOnlyMode && projection?.phase !== "setup" && projection?.phase !== "game_over" ? (
+            <>
+              <span className="text-xs text-cyan-200">
+                {orchestratorRunning
+                  ? `Simulating plan${orchestratorElapsedSeconds ? ` ${orchestratorElapsedSeconds}s` : ""}`
+                  : botsOnlyPaused
+                    ? "Bots paused"
+                    : "Bots playing"}
+              </span>
+              <button
+                className="rounded border border-cyan-500 px-3 py-1.5 text-xs text-cyan-100 hover:bg-cyan-950"
+                onClick={() => setBotsOnlyPaused((paused) => !paused)}
+                type="button"
+              >
+                {botsOnlyPaused ? "Resume bots" : "Pause bots"}
+              </button>
+            </>
+          ) : null}
           {projection?.phase === "setup" ? (
             <>
               <select
@@ -2332,7 +2435,7 @@ const GameRoomPage = () => {
                     setFocusedCapabilityId(capability.id);
                     setMoveMode(false);
                   }}
-                  pending={pending}
+                  pending={gameplayPending}
                   projection={projection}
                 />
               </div>
@@ -2350,7 +2453,7 @@ const GameRoomPage = () => {
                   setFocusedCapabilityId(selectedCapability.id);
                   setMoveMode(false);
                 }}
-                pending={pending}
+                pending={gameplayPending}
                 projection={projection}
               />
             ) : null}
@@ -2359,13 +2462,13 @@ const GameRoomPage = () => {
         <div className="relative min-w-0 overflow-hidden border-r border-slate-800">
           {projection ? (
             <>
-              <BoardView focusedCapabilityId={selectedCapabilityId} moveMode={moveMode} onInspectTile={inspectTile} onMove={movePoulpita} onMoveShellFromShelter={moveShellFromShelter} pending={pending} projection={projection} />
+              <BoardView focusedCapabilityId={selectedCapabilityId} moveMode={moveMode} onInspectTile={inspectTile} onMove={movePoulpita} onMoveShellFromShelter={moveShellFromShelter} pending={gameplayPending} projection={projection} />
               {botModeEnabled ? (
                 <BotPlanTree
                   onExecuteOption={executePlanTreeOption}
                   onSelectOption={selectPlanTreeOption}
                   onToggleCollapsed={() => setBotPlanTreeCollapsed((collapsed) => !collapsed)}
-                  pending={pending}
+                  pending={gameplayPending}
                   activePlanIds={activePlanIds}
                   collapsed={botPlanTreeCollapsed}
                   plans={botPlanStatus?.proposals || []}
@@ -2389,7 +2492,7 @@ const GameRoomPage = () => {
                   {botPlansOpen ? "Close plans" : "Plans"}
                 </button>
               ) : null}
-              {botModeEnabled ? (
+              {botLogEnabled ? (
                 <BotActionLog
                   entries={botLogEntries}
                   logOpen={botLogOpen}
@@ -2415,7 +2518,7 @@ const GameRoomPage = () => {
                 onInitiate={initiateInteraction}
                 onResolve={confirmInteraction}
                 onToggleCard={toggleDraftCard}
-                pending={pending}
+                pending={gameplayPending}
                 projection={projection}
                 selectedCardIds={selectedCardIds}
                 selectedCapability={selectedCapability}
@@ -2426,7 +2529,7 @@ const GameRoomPage = () => {
                 onResolve={resolveSurpriseCard}
                 onSkip={skipSurpriseCard}
                 onToggleCard={toggleSurpriseCard}
-                pending={pending}
+                pending={gameplayPending}
                 projection={projection}
                 selectedCapability={selectedCapability}
                 selectedCardIds={surpriseSelectedCardIds}
@@ -2444,7 +2547,7 @@ const GameRoomPage = () => {
           <ObjectivesPanel projection={projection} />
           <TimeTracker projection={projection} />
           <EnergyBar energy={Number(projection?.poulpita.energy || 0)} />
-          <PoulpitaResourcePanel onBuySize={buyPoulpitaSize} onMoveShellToShelter={moveShellToShelter} pending={pending} projection={projection} />
+          <PoulpitaResourcePanel onBuySize={buyPoulpitaSize} onMoveShellToShelter={moveShellToShelter} pending={gameplayPending} projection={projection} />
         </aside>
         <div className="grid min-h-0 grid-cols-[11rem_1fr] gap-2 overflow-hidden border-t border-r border-slate-800 bg-slate-950 p-1">
           <ActionPanel
@@ -2457,7 +2560,7 @@ const GameRoomPage = () => {
             onEndNight={endNight}
             onMoveMode={() => setMoveMode((value) => !value)}
             onTakeControl={takeControl}
-            pending={pending}
+            pending={gameplayPending}
             projection={projection}
           />
           <div className="rounded-md border border-slate-800 bg-slate-900 p-3">
@@ -2482,7 +2585,7 @@ const GameRoomPage = () => {
                         "rounded-md border p-3 text-left text-xs transition",
                         bought ? "border-slate-700 bg-slate-950 text-slate-500" : "border-cyan-300 bg-slate-950 text-cyan-100 hover:bg-cyan-950",
                       ].join(" ")}
-                      disabled={pending || bought || Number(projection?.poulpita.neurons || 0) < cost}
+                      disabled={gameplayPending || bought || Number(projection?.poulpita.neurons || 0) < cost}
                       key={index}
                       onClick={() => buyHandSizeUpgrade(index)}
                       type="button"

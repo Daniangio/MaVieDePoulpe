@@ -13,7 +13,7 @@ from typing import Any, Optional
 
 from fastapi import WebSocket
 
-from .bots.planner import generate_bot_plan_status, public_bot_plan_status
+from .bots.planner import choose_bot_orchestrator_action, generate_bot_plan_status, public_bot_plan_status
 from .game_content_service import get_game_content_catalog, get_level_config, get_player_board_configs
 from .map_service import get_map
 from .server_models import User
@@ -125,14 +125,16 @@ def _public_room(room: dict[str, Any]) -> dict[str, Any]:
 
 def _bot_room_config(*, mode: str, human_ability_id: str | None = None) -> dict[str, Any] | None:
     normalized_mode = str(mode or "solo").strip() or "solo"
-    if normalized_mode != "solo_with_bots":
+    if normalized_mode not in {"solo_with_bots", "bots_only"}:
         return None
-    human_id = str(human_ability_id or "").strip() or DEFAULT_FOCUSED_CAPABILITY_ID
-    if human_id not in BOT_SEAT_CAPABILITY_IDS:
-        raise ValueError("human_ability_id must be one of agility, camouflage, force, or propulsion.")
+    human_id = None
+    if normalized_mode == "solo_with_bots":
+        human_id = str(human_ability_id or "").strip() or DEFAULT_FOCUSED_CAPABILITY_ID
+        if human_id not in BOT_SEAT_CAPABILITY_IDS:
+            raise ValueError("human_ability_id must be one of agility, camouflage, force, or propulsion.")
     controllers = []
     for capability_id in BOT_SEAT_CAPABILITY_IDS:
-        controller_type = "human" if capability_id == human_id else "bot"
+        controller_type = "human" if human_id and capability_id == human_id else "bot"
         controllers.append(
             {
                 "ability_id": capability_id,
@@ -142,9 +144,9 @@ def _bot_room_config(*, mode: str, human_ability_id: str | None = None) -> dict[
         )
     controllers.append({"ability_id": "intelligence", "controller_type": "shared", "seat_id": "shared_intelligence"})
     return {
-        "mode": "solo_with_bots",
+        "mode": normalized_mode,
         "human_ability_id": human_id,
-        "privacy_mode": "solo_faithful",
+        "privacy_mode": "solo_faithful" if human_id else "all_bot",
         "controllers": controllers,
     }
 
@@ -800,8 +802,11 @@ def _active_capability_is_out_of_actions(state: dict[str, Any]) -> bool:
     return remaining_actions <= 0
 
 
-def _no_control_takes_available(state: dict[str, Any]) -> bool:
-    for capability in (state.get("capabilities") or {}).values():
+def _no_other_control_takes_available(state: dict[str, Any]) -> bool:
+    active_id = str(state.get("active_capability_id") or "")
+    for capability_id, capability in (state.get("capabilities") or {}).items():
+        if str(capability_id) == active_id:
+            continue
         if int(capability.get("control_takes_this_night") or 0) < int(capability.get("max_control_takes_per_night") or 0):
             return False
     return True
@@ -811,7 +816,7 @@ def _mark_game_lost_if_needed(next_state: dict[str, Any], *, reason: str | None 
     if next_state.get("phase") == PHASE_FINISHED:
         return True
     loss_reason = reason
-    if not loss_reason and _no_control_takes_available(next_state) and _active_capability_is_out_of_actions(next_state):
+    if not loss_reason and _no_other_control_takes_available(next_state) and _active_capability_is_out_of_actions(next_state):
         loss_reason = loss_reason or "no_controls_or_actions"
     if not loss_reason:
         return False
@@ -952,6 +957,19 @@ def _tile_category(state: dict[str, Any], tile: dict[str, Any]) -> dict[str, Any
     catalog = state.get("tile_catalog") or {}
     event = tile.get("event") or (catalog.get("events") or {}).get(tile.get("event_id")) or {}
     return (catalog.get("categories") or {}).get(event.get("category_id")) or {}
+
+
+def _night_end_blockers(state: dict[str, Any], node_id: str) -> list[dict[str, Any]]:
+    catalog_tiles = ((state.get("tile_catalog") or {}).get("tiles") or {})
+    blockers = []
+    for instance in (state.get("tiles") or {}).get(node_id, []) or []:
+        tile = catalog_tiles.get(instance.get("tile_id")) or {}
+        if _is_octopus_tile_instance(instance) or tile.get("token_type") == OCTOPUS_TOKEN_ID:
+            blockers.append(instance)
+            continue
+        if _tile_category(state, tile).get("compulsory_on_same_node"):
+            blockers.append(instance)
+    return blockers
 
 
 def _played_interactions(state: dict[str, Any]) -> list[str]:
@@ -1118,7 +1136,6 @@ def _apply_effects(next_state: dict[str, Any], effects: list[dict[str, Any]], *,
                 shelter = _ensure_shelter_entry(next_state, target_node_id)
                 shelter["count"] = int(shelter.get("count") or 0) + 1
                 shelter["secure"] = int(shelter.get("seashells") or 0) >= 3
-                next_state.setdefault("objective_progress", {})["found_shelter"] = True
         elif effect_type == "draw_surprise_card":
             _draw_surprise_card(next_state)
 
@@ -1127,6 +1144,8 @@ def _move_poulpita_without_ap(next_state: dict[str, Any], target_node_id: str) -
     current_node_id = str(next_state.get("poulpita", {}).get("node_id") or "")
     next_state["poulpita"]["previous_node_id"] = current_node_id or None
     next_state["poulpita"]["node_id"] = target_node_id
+    if _has_shelter(next_state, target_node_id):
+        next_state.setdefault("objective_progress", {})["found_shelter"] = True
 
 
 def _move_interaction_tile(next_state: dict[str, Any], interaction: dict[str, Any], target_node_id: str) -> None:
@@ -1369,7 +1388,7 @@ class GameRoomService:
     ) -> dict[str, Any]:
         normalized_game_type = str(game_type or "goldfish").strip() or "goldfish"
         bot_config = _bot_room_config(mode=mode, human_ability_id=human_ability_id)
-        normalized_mode = "solo_with_bots" if bot_config else "goldfish"
+        normalized_mode = str((bot_config or {}).get("mode") or "goldfish")
         selected_level = get_level_config(level_id)
         selected_map = get_map(selected_level["map_id"])
         room_id = f"room_{uuid.uuid4().hex[:16]}"
@@ -1426,7 +1445,8 @@ class GameRoomService:
         if state is None:
             return None
         state = self._state_with_latest_content_metadata(state)
-        return public_bot_plan_status(generate_bot_plan_status(state))
+        plans = await asyncio.to_thread(generate_bot_plan_status, state)
+        return public_bot_plan_status(plans)
 
     async def execute_bot_plan(self, *, room_id: str, user: User, plan_id: str) -> dict[str, Any] | None:
         room = await self._load_room(room_id)
@@ -1436,7 +1456,7 @@ class GameRoomService:
         if state is None:
             return None
         state = self._state_with_latest_content_metadata(state)
-        plans = generate_bot_plan_status(state)
+        plans = await asyncio.to_thread(generate_bot_plan_status, state)
         proposal = next((entry for entry in plans.get("proposals") or [] if str(entry.get("plan_id")) == str(plan_id)), None)
         if proposal is None:
             return {
@@ -1538,6 +1558,58 @@ class GameRoomService:
             "projection": projection,
         }
 
+    async def execute_bot_orchestrator_step(self, *, room_id: str, user: User) -> dict[str, Any] | None:
+        room = await self._load_room(room_id)
+        if not room or room.get("owner_user_id") != user.id:
+            return None
+        state = await self._load_state(room_id)
+        if state is None:
+            return None
+        state = self._state_with_latest_content_metadata(state)
+        decision = await asyncio.to_thread(choose_bot_orchestrator_action, state)
+        public_decision = deepcopy(decision)
+        for evaluated in public_decision.get("evaluated_plans") or []:
+            for rollout in evaluated.get("rollouts") or []:
+                rollout.pop("path", None)
+        command_template = decision.get("command")
+        if not isinstance(command_template, dict):
+            if (
+                room.get("mode") == "bots_only"
+                and state.get("phase") in {PHASE_NIGHT_IDLE, PHASE_NIGHT_ACTION}
+                and _active_capability_is_out_of_actions(state)
+                and _no_other_control_takes_available(state)
+            ):
+                command_template = {"type": "bot_no_actions_available", "payload": {}}
+            else:
+                return {
+                    "ok": False,
+                    "status": decision.get("status") or "idle",
+                    "message": decision.get("message") or "No orchestrator action is available.",
+                    "decision": public_decision,
+                    "projection": _project_state(state),
+                }
+        command = {
+            "command_id": f"orchestrator_{uuid.uuid4().hex}",
+            "room_id": room_id,
+            "actor_user_id": user.id,
+            "actor_seat_id": "bot_orchestrator",
+            "expected_version": int(state.get("version") or 0),
+            "type": str(command_template.get("type") or ""),
+            "payload": deepcopy(command_template.get("payload") or {}),
+        }
+        result = await self.enqueue_game_command(room_id=room_id, user=user, command=command)
+        success_message = (
+            "No legal bot actions or control takes remain. The game is lost."
+            if command["type"] == "bot_no_actions_available"
+            else decision.get("message")
+        )
+        return {
+            **result,
+            "status": "action_executed" if result.get("ok") else result.get("status"),
+            "message": success_message if result.get("ok") else result.get("message"),
+            "decision": public_decision,
+        }
+
     async def enqueue_game_command(
         self,
         *,
@@ -1606,10 +1678,30 @@ class GameRoomService:
             if state is None:
                 raise LookupError("Game state not found.")
             state = self._state_with_latest_content_metadata(state)
+            actor_seat_id = str(command.get("actor_seat_id") or "")
+            if (
+                room.get("mode") == "bots_only"
+                and state.get("phase") != PHASE_SETUP
+                and actor_seat_id != "bot_orchestrator"
+            ):
+                rejection = CommandRejection(
+                    command_id=str(command.get("command_id") or ""),
+                    reason="bots_only_room",
+                    message="Only the bot orchestrator can perform game actions in this room.",
+                    current_version=int(state.get("version") or 0),
+                )
+                return rejection.payload(_project_state(state))
             try:
                 next_state, events = self._reduce(state, command, user=user, room_id=room_id, room=room)
             except CommandRejection as rejection:
                 return rejection.payload(_project_state(state))
+            if (
+                next_state.get("phase") in {PHASE_NIGHT_IDLE, PHASE_NIGHT_ACTION}
+                and _mark_game_lost_if_needed(next_state)
+            ):
+                loss_event = next_state.get("event_log", [])[-1]
+                if not any(event.get("event_id") == loss_event.get("event_id") for event in events):
+                    events = [*events, loss_event]
             if next_state["phase"] != PHASE_SETUP:
                 room.update({"state": ROOM_STATE_IN_GAME, "started_at": room.get("started_at") or _now_iso()})
             if next_state.get("phase") == PHASE_FINISHED:
@@ -1769,6 +1861,31 @@ class GameRoomService:
             next_state.setdefault("event_log", []).append(event)
             return next_state, [event]
 
+        if command_type == "bot_no_actions_available":
+            if room.get("mode") != "bots_only" or str(command.get("actor_seat_id") or "") != "bot_orchestrator":
+                self._reject(
+                    state,
+                    command_id,
+                    "invalid_orchestrator_command",
+                    "Only the bot orchestrator can finish a bots-only game with no available actions.",
+                )
+            if state.get("phase") not in {PHASE_NIGHT_IDLE, PHASE_NIGHT_ACTION}:
+                self._reject(state, command_id, "phase_not_night", "This dead-end check applies only during the night.")
+            if not (_active_capability_is_out_of_actions(state) and _no_other_control_takes_available(state)):
+                self._reject(
+                    state,
+                    command_id,
+                    "bot_actions_still_available",
+                    "At least one ability can still act or take control.",
+                )
+            next_state = deepcopy(state)
+            next_state["version"] = int(state["version"]) + 1
+            _mark_game_lost_if_needed(next_state, reason="no_controls_or_actions")
+            event = next_state["event_log"][-1]
+            event["command_id"] = command_id
+            event["version"] = int(next_state["version"])
+            return next_state, [event]
+
         if command_type == "move_poulpita":
             if state["phase"] != PHASE_NIGHT_ACTION:
                 self._reject(state, command_id, "phase_not_movable", "Take control before moving Poulpita.")
@@ -1791,6 +1908,9 @@ class GameRoomService:
             next_state["poulpita"]["node_id"] = target_node_id
             _spend_action(next_state, capability_id, ap_cost=action_cost["ap_cost"], time_cost=action_cost["time_cost"])
             _apply_tile_visibility(next_state)
+            if _has_shelter(next_state, target_node_id):
+                next_state.setdefault("objective_progress", {})["found_shelter"] = True
+                _mark_game_won_if_needed(next_state)
             _mark_game_lost_if_needed(next_state)
             event = {
                 "event_id": f"evt_{uuid.uuid4().hex}",
@@ -1859,6 +1979,13 @@ class GameRoomService:
                 self._reject(state, command_id, "no_shelter_here", "Poulpita must be on a shelter token to end the night.")
             if int(state.get("night_time_spent") or 0) < NIGHT_SHELTER_AVAILABLE_CHUNKS:
                 self._reject(state, command_id, "too_early_to_end_night", "At least 4 hours must pass before ending the night.")
+            if _night_end_blockers(state, current_node_id):
+                self._reject(
+                    state,
+                    command_id,
+                    "night_end_blocked",
+                    "Resolve every compulsory tile and octopus token on this node before ending the night.",
+                )
             next_state = deepcopy(state)
             next_state["phase"] = PHASE_DAY
             next_state["last_active_capability_id"] = capability_id
@@ -1900,7 +2027,6 @@ class GameRoomService:
                 poulpita["seashells"] = int(poulpita.get("seashells") or 0) + 1
                 event_type = "seashell_moved_to_poulpita"
             shelter["secure"] = int(shelter.get("seashells") or 0) >= 3
-            next_state.setdefault("objective_progress", {})["found_shelter"] = True
             next_state["version"] = int(state["version"]) + 1
             _mark_game_won_if_needed(next_state)
             event = {
@@ -2318,6 +2444,17 @@ class GameRoomService:
                 self._reject(state, command_id, "no_active_interaction", "No interaction is active.")
             interaction = state["interaction"]
             tile = (state.get("tile_catalog") or {}).get("tiles", {}).get(interaction.get("tile_id")) or {}
+            if (
+                command_type == "fail_interaction"
+                and not (tile.get("interaction_ids") or [])
+                and max(0, int(tile.get("shell_requirement_count") or 0)) == 0
+            ):
+                self._reject(
+                    state,
+                    command_id,
+                    "automatic_interaction_cannot_fail",
+                    "This interaction succeeds automatically and cannot be failed.",
+                )
             next_state = deepcopy(state)
             success = False
             counter_success = False
@@ -2391,6 +2528,8 @@ class GameRoomService:
                 _apply_tile_visibility(next_state)
                 if int((next_state.get("poulpita") or {}).get("energy") or 0) <= 0 and any(effect.get("type") == "lose_energy" for effect in failure_effects):
                     _mark_game_lost_if_needed(next_state, reason="poulpita_no_energy")
+                if next_state.get("phase") != PHASE_FINISHED:
+                    _mark_game_won_if_needed(next_state)
                 event_type = "interaction_failed"
             for card in interaction.get("played_cards") or []:
                 capability = next_state["capabilities"].get(card.get("capability_id"))

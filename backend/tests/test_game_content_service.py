@@ -193,9 +193,21 @@ def test_bot_settings_include_efficiency_weights_and_ability_colors(tmp_path, mo
         {
             "expected_ap_roll": 4,
             "planning_depth_take_controls": 5,
+            "orchestrator_rollout_take_controls": 4,
+            "orchestrator_rollouts_per_plan": 2,
+            "orchestrator_sampling_temperature": 0.7,
+            "orchestrator_max_candidates": 6,
             "max_plans": 12,
             "min_energy_after_size_upgrade": 6,
-            "weights": {"efficiency": 50, "confidence": 25, "expected_gain": 25},
+            "weights": {
+                "efficiency": 50,
+                "confidence": 25,
+                "expected_gain": 25,
+                "tile_resolution": 18,
+                "compulsory_tile_resolution": 42,
+                "third_ability_penalty": 60,
+                "late_shelter_urgency": 11,
+            },
             "resource_weights": {"energy": 10, "neurons": 7},
             "ability_colors": {"force": "#aa0000", "agility": "not-a-color"},
         }
@@ -203,9 +215,17 @@ def test_bot_settings_include_efficiency_weights_and_ability_colors(tmp_path, mo
 
     assert settings["expected_ap_roll"] == 4
     assert settings["planning_depth_take_controls"] == 5
+    assert settings["orchestrator_rollout_take_controls"] == 4
+    assert settings["orchestrator_rollouts_per_plan"] == 2
+    assert settings["orchestrator_sampling_temperature"] == 0.7
+    assert settings["orchestrator_max_candidates"] == 6
     assert settings["max_plans"] == 12
     assert settings["min_energy_after_size_upgrade"] == 6
     assert settings["weights"]["efficiency"] == 50
+    assert settings["weights"]["tile_resolution"] == 18
+    assert settings["weights"]["compulsory_tile_resolution"] == 42
+    assert settings["weights"]["third_ability_penalty"] == 60
+    assert settings["weights"]["late_shelter_urgency"] == 11
     assert settings["resource_weights"]["energy"] == 10
     assert settings["resource_weights"]["neurons"] == 7
     assert settings["ability_colors"]["force"] == "#aa0000"

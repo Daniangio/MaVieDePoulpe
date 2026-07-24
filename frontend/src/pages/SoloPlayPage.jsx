@@ -81,7 +81,7 @@ const SoloPlayPage = () => {
       <section className="mb-5">
         <h1 className="text-2xl font-semibold text-white">Solo Play</h1>
         <p className="mt-1 max-w-3xl text-sm text-slate-400">
-          Start a goldfish room from an admin-created level.
+          Start a manual, mixed, or fully autonomous room from an admin-created level.
         </p>
       </section>
 
@@ -113,6 +113,7 @@ const SoloPlayPage = () => {
           >
             <option value="goldfish">Manual goldfish</option>
             <option value="solo_with_bots">Solo with bots</option>
+            <option value="bots_only">Bots only</option>
           </select>
         </label>
         <label className="block text-sm">
@@ -147,7 +148,13 @@ const SoloPlayPage = () => {
         />
         <ModeCard
           title="Goldfish"
-          description={selectedMode === "solo_with_bots" ? "Create a solo room with three bot-controlled abilities." : "Create a manual solo room with the current prototype rules."}
+          description={
+            selectedMode === "solo_with_bots"
+              ? "Create a solo room with three bot-controlled abilities."
+              : selectedMode === "bots_only"
+                ? "Watch four bots play while the orchestrator evaluates and selects their actions."
+                : "Create a manual solo room with the current prototype rules."
+          }
           actionLabel={creating ? "Creating..." : "Start"}
           onClick={createQuickMatch}
           disabled={creating || !selectedLevelId}

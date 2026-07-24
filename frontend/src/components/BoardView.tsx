@@ -264,7 +264,7 @@ const BoardView = ({ projection, focusedCapabilityId, moveMode, pending, onMove,
                   {isPrevious && !isCurrent ? <span className="absolute right-0 top-0 h-2 w-2 rounded-full bg-slate-400" /> : null}
                 </button>
                 {shelterCount > 0 ? (
-                  <span className={["absolute right-1/2 top-0 z-20 flex h-10 min-w-10 -translate-y-[50%] items-center justify-center overflow-hidden rounded-full border bg-cyan-100 text-[0.55rem] font-bold text-teal-950 shadow", shelter.secure ? "border-emerald-300 ring-2 ring-emerald-300" : "border-cyan-100"].join(" ")} title={`${shelterCount} shelter token${shelterCount === 1 ? "" : "s"}${shelter.secure ? " - secure" : ""}`}>
+                  <span className={["absolute right-1/2 top-0 z-20 flex h-10 min-w-10 -translate-y-[50%] items-center justify-center overflow-hidden rounded-full border bg-cyan-100 text-[0.55rem] font-bold text-teal-950 shadow", shelter.secure ? "border-emerald-200 bg-emerald-100 ring-4 ring-emerald-300 shadow-[0_0_18px_rgba(52,211,153,0.9)]" : "border-cyan-100"].join(" ")} title={`${shelterCount} shelter token${shelterCount === 1 ? "" : "s"}${shelter.secure ? " - secure" : ""}`}>
                     {shelterImageUrl ? <img alt="" className="h-full w-full object-cover" draggable={false} src={shelterImageUrl} /> : shelterCount > 1 ? shelterCount : "S"}
                     {shelterCount > 1 && shelterImageUrl ? <span className="absolute -bottom-0.5 -right-0.5 rounded-full bg-teal-950 px-1 text-[0.5rem] leading-3 text-cyan-50">{shelterCount}</span> : null}
                   </span>

@@ -143,12 +143,20 @@ const botAbilityOptions = [
 const defaultBotSettings = {
   expected_ap_roll: 3,
   planning_depth_take_controls: 3,
+  orchestrator_rollout_take_controls: 3,
+  orchestrator_rollouts_per_plan: 3,
+  orchestrator_sampling_temperature: 1,
+  orchestrator_max_candidates: 8,
   max_plans: 3,
   min_energy_after_size_upgrade: 4,
   weights: {
     efficiency: 35,
     confidence: 35,
     expected_gain: 30,
+    tile_resolution: 14,
+    compulsory_tile_resolution: 35,
+    third_ability_penalty: 45,
+    late_shelter_urgency: 8,
   },
   resource_weights: {
     energy: 8,
@@ -172,6 +180,10 @@ const botPlannerWeightLabels = {
   efficiency: "Efficiency",
   confidence: "Confidence",
   expected_gain: "Expected gain",
+  tile_resolution: "Resolve a tile",
+  compulsory_tile_resolution: "Resolve a compulsory tile",
+  third_ability_penalty: "Third ability penalty",
+  late_shelter_urgency: "Late-night shelter urgency",
 };
 
 const botResourceWeightLabels = {
@@ -1154,7 +1166,59 @@ const BotSettingsEditor = ({ botSettings, onSave, busy }) => {
             step="1"
             type="number"
             value={Number(draft.planning_depth_take_controls || 3)}
-            onChange={(event) => setDraft((current) => ({ ...current, planning_depth_take_controls: Math.max(1, Math.min(8, Number(event.target.value || 3))) }))}
+            onChange={(event) => setDraft((current) => ({ ...current, planning_depth_take_controls: Math.max(1, Math.min(20, Number(event.target.value || 3))) }))}
+          />
+        </label>
+        <label className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3 text-sm">
+          <span className="font-semibold text-teal-950">Orchestrator horizon</span>
+          <span className="mt-1 block text-xs text-slate-500">Simulate through this many future initiative windows. Default is 3.</span>
+          <input
+            className={`${input} mt-3`}
+            max="8"
+            min="1"
+            step="1"
+            type="number"
+            value={Number(draft.orchestrator_rollout_take_controls || 3)}
+            onChange={(event) => setDraft((current) => ({ ...current, orchestrator_rollout_take_controls: Math.max(1, Math.min(8, Number(event.target.value || 3))) }))}
+          />
+        </label>
+        <label className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3 text-sm">
+          <span className="font-semibold text-teal-950">Rollouts per plan</span>
+          <span className="mt-1 block text-xs text-slate-500">Number of weighted continuations sampled for every root plan.</span>
+          <input
+            className={`${input} mt-3`}
+            max="12"
+            min="1"
+            step="1"
+            type="number"
+            value={Number(draft.orchestrator_rollouts_per_plan || 3)}
+            onChange={(event) => setDraft((current) => ({ ...current, orchestrator_rollouts_per_plan: Math.max(1, Math.min(12, Number(event.target.value || 3))) }))}
+          />
+        </label>
+        <label className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3 text-sm">
+          <span className="font-semibold text-teal-950">Sampling temperature</span>
+          <span className="mt-1 block text-xs text-slate-500">Lower values are greedier; higher values explore more near-optimal plans.</span>
+          <input
+            className={`${input} mt-3`}
+            max="5"
+            min="0.1"
+            step="0.1"
+            type="number"
+            value={Number(draft.orchestrator_sampling_temperature || 1)}
+            onChange={(event) => setDraft((current) => ({ ...current, orchestrator_sampling_temperature: Math.max(0.1, Math.min(5, Number(event.target.value || 1))) }))}
+          />
+        </label>
+        <label className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3 text-sm">
+          <span className="font-semibold text-teal-950">Max local candidates</span>
+          <span className="mt-1 block text-xs text-slate-500">Bounds the legal actions evaluated at each simulated decision.</span>
+          <input
+            className={`${input} mt-3`}
+            max="20"
+            min="2"
+            step="1"
+            type="number"
+            value={Number(draft.orchestrator_max_candidates || 8)}
+            onChange={(event) => setDraft((current) => ({ ...current, orchestrator_max_candidates: Math.max(2, Math.min(20, Number(event.target.value || 8))) }))}
           />
         </label>
         <label className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3 text-sm">

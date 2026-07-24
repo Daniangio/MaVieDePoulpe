@@ -90,12 +90,20 @@ DEFAULT_ACTION_COSTS = {
 DEFAULT_BOT_SETTINGS = {
     "expected_ap_roll": 3,
     "planning_depth_take_controls": 3,
+    "orchestrator_rollout_take_controls": 3,
+    "orchestrator_rollouts_per_plan": 3,
+    "orchestrator_sampling_temperature": 1.0,
+    "orchestrator_max_candidates": 8,
     "max_plans": 3,
     "min_energy_after_size_upgrade": 4,
     "weights": {
         "efficiency": 35,
         "confidence": 35,
         "expected_gain": 30,
+        "tile_resolution": 14,
+        "compulsory_tile_resolution": 35,
+        "third_ability_penalty": 45,
+        "late_shelter_urgency": 8,
     },
     "resource_weights": {
         "energy": 8,
@@ -695,6 +703,10 @@ def _normalize_bot_settings(raw_settings: dict[str, Any]) -> dict[str, Any]:
         return normalized
     normalized["expected_ap_roll"] = max(1, min(6, int(raw_settings.get("expected_ap_roll") if raw_settings.get("expected_ap_roll") is not None else normalized["expected_ap_roll"])))
     normalized["planning_depth_take_controls"] = max(1, min(8, int(raw_settings.get("planning_depth_take_controls") if raw_settings.get("planning_depth_take_controls") is not None else normalized["planning_depth_take_controls"])))
+    normalized["orchestrator_rollout_take_controls"] = max(1, min(8, int(raw_settings.get("orchestrator_rollout_take_controls") if raw_settings.get("orchestrator_rollout_take_controls") is not None else normalized["orchestrator_rollout_take_controls"])))
+    normalized["orchestrator_rollouts_per_plan"] = max(1, min(12, int(raw_settings.get("orchestrator_rollouts_per_plan") if raw_settings.get("orchestrator_rollouts_per_plan") is not None else normalized["orchestrator_rollouts_per_plan"])))
+    normalized["orchestrator_sampling_temperature"] = max(0.1, min(5.0, float(raw_settings.get("orchestrator_sampling_temperature") if raw_settings.get("orchestrator_sampling_temperature") is not None else normalized["orchestrator_sampling_temperature"])))
+    normalized["orchestrator_max_candidates"] = max(2, min(20, int(raw_settings.get("orchestrator_max_candidates") if raw_settings.get("orchestrator_max_candidates") is not None else normalized["orchestrator_max_candidates"])))
     normalized["max_plans"] = max(1, min(16, int(raw_settings.get("max_plans") if raw_settings.get("max_plans") is not None else normalized["max_plans"])))
     normalized["min_energy_after_size_upgrade"] = max(1, min(31, int(raw_settings.get("min_energy_after_size_upgrade") if raw_settings.get("min_energy_after_size_upgrade") is not None else normalized["min_energy_after_size_upgrade"])))
     raw_weights = raw_settings.get("weights") if isinstance(raw_settings.get("weights"), dict) else {}

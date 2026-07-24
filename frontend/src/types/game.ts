@@ -75,9 +75,9 @@ export type PlayerProjection = {
 };
 
 export type BotRoomConfig = {
-  mode: "solo_with_bots";
-  human_ability_id: string;
-  privacy_mode: "solo_faithful" | "omniscient_debug";
+  mode: "solo_with_bots" | "bots_only";
+  human_ability_id: string | null;
+  privacy_mode: "solo_faithful" | "all_bot" | "omniscient_debug";
   controllers: Array<{
     ability_id: string;
     controller_type: "human" | "bot" | "shared";
@@ -167,7 +167,7 @@ export type GameProjection = {
   room_id: string;
   projection_mode: "goldfish";
   privacy_enforced: false;
-  mode: "goldfish" | "solo_with_bots";
+  mode: "goldfish" | "solo_with_bots" | "bots_only";
   bot_config?: BotRoomConfig | null;
   version: number;
   phase: "setup" | "night_idle" | "night_action" | "day" | "game_over";
