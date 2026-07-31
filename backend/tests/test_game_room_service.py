@@ -961,7 +961,7 @@ def test_local_orchestrator_switches_to_bot_with_partial_interaction_support():
     camouflage = next(
         candidate
         for candidate in candidates
-        if candidate["commands"][0] == {"type": "resolve_interaction", "payload": {"capability_id": "camouflage", "card_ids": ["hide-card"]}}
+        if candidate["commands"][0] == {"type": "resolve_interaction", "payload": {"capability_id": "camouflage", "card_ids": ["hide-card"], "confirm_only": True}}
     )
     simulated = deepcopy(state)
     bot_planner._simulate_public_command(simulated, camouflage["commands"][0])
@@ -969,11 +969,7 @@ def test_local_orchestrator_switches_to_bot_with_partial_interaction_support():
 
     assert support_commands[0]["type"] == "resolve_interaction"
     assert support_commands[0]["payload"]["auto_select_cards"] is True
-    assert camouflage["statistics"]["planner_score"] > next(
-        candidate["statistics"]["planner_score"]
-        for candidate in candidates
-        if candidate["commands"][0]["type"] == "fail_interaction"
-    )
+    assert all(candidate["commands"][0]["type"] == "resolve_interaction" for candidate in candidates)
     state["tile_catalog"]["bot_settings"] = {
         "orchestrator_rollout_take_controls": 2,
         "orchestrator_rollouts_per_plan": 1,
@@ -982,6 +978,71 @@ def test_local_orchestrator_switches_to_bot_with_partial_interaction_support():
     decision = choose_bot_orchestrator_action(state)
     assert decision["command"]["type"] == "resolve_interaction"
     assert decision["command"]["payload"]["capability_id"] in {"camouflage", "intelligence"}
+
+
+def test_local_orchestrator_keeps_useful_support_search_and_fails_when_no_path_remains():
+    state = _goldfish_state("room_local_support_search", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "force"
+    current_node_id = state["poulpita"]["node_id"]
+    for capability in state["capabilities"].values():
+        capability["hand"] = []
+        capability["draw_pile"] = []
+        capability["discard"] = []
+        capability["pa"] = 3
+        capability["actions_taken_this_control"] = 0
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "categories": {"threat": {"id": "threat", "name": "Threat", "compulsory_on_same_node": True}},
+        "events": {"fish": {"id": "fish", "name": "Big fish", "category_id": "threat"}},
+        "interactions": {"hide": {"id": "hide", "name": "Hide"}},
+        "tiles": {
+            "fish-tile": {
+                "id": "fish-tile",
+                "event_id": "fish",
+                "interaction_ids": ["hide"],
+                "failure_effects": [{"type": "lose_energy", "amount": 1}],
+            }
+        },
+    }
+    state["tiles"] = {current_node_id: [{"instance_id": "fish-instance", "tile_id": "fish-tile", "face_up": True}]}
+    state["interaction"] = {
+        "tile_instance_id": "fish-instance",
+        "tile_id": "fish-tile",
+        "node_id": current_node_id,
+        "initiator_capability_id": "force",
+        "initiator_confirmed": True,
+        "played_cards": [],
+    }
+    state["capabilities"]["force"]["draw_pile"] = [
+        {"card_id": "force-hide", "interaction_id": "hide", "interaction_ids": ["hide"], "owner_capability_id": "force"}
+    ]
+    state["capabilities"]["camouflage"]["draw_pile"] = [
+        {"card_id": "camouflage-hide", "interaction_id": "hide", "interaction_ids": ["hide"], "owner_capability_id": "camouflage"}
+    ]
+
+    active_search = bot_planner._local_orchestrator_interaction_candidates(state)
+    assert [candidate["commands"][0]["type"] for candidate in active_search] == ["draw_action_card", "fail_interaction"]
+    assert active_search[0]["commands"][0]["payload"]["capability_id"] == "force"
+    assert all(candidate["commands"][0]["type"] != "take_control" for candidate in active_search)
+    state["tile_catalog"]["bot_settings"] = {
+        "orchestrator_rollout_take_controls": 1,
+        "orchestrator_rollouts_per_plan": 1,
+        "orchestrator_sampling_temperature": 0.1,
+    }
+    assert choose_bot_orchestrator_action(state)["command"] == {
+        "type": "draw_action_card",
+        "payload": {"capability_id": "force"},
+    }
+
+    state["capabilities"]["force"]["actions_taken_this_control"] = state["capabilities"]["force"]["max_actions_per_control"]
+    targeted_switch = bot_planner._local_orchestrator_interaction_candidates(state)
+    take_commands = [candidate["commands"][0] for candidate in targeted_switch if candidate["commands"][0]["type"] == "take_control"]
+    assert take_commands == [{"type": "take_control", "payload": {"capability_id": "camouflage"}}]
+
+    state["capabilities"]["camouflage"]["draw_pile"] = []
+    no_path = bot_planner._local_orchestrator_interaction_candidates(state)
+    assert [candidate["commands"][0]["type"] for candidate in no_path] == ["fail_interaction"]
 
 
 def test_local_orchestrator_does_not_draw_for_exhausted_interaction_initiator():
@@ -1041,7 +1102,7 @@ def test_local_orchestrator_does_not_draw_for_exhausted_interaction_initiator():
 
     assert {"type": "draw_action_card", "payload": {"capability_id": "force"}} not in commands
     assert {"type": "collect_action_points", "payload": {"capability_id": "force"}} not in commands
-    assert {"type": "resolve_interaction", "payload": {"capability_id": "camouflage", "card_ids": ["camouflage-hide"]}} in commands
+    assert {"type": "resolve_interaction", "payload": {"capability_id": "camouflage", "card_ids": ["camouflage-hide"], "confirm_only": True}} in commands
 
 
 def test_local_orchestrator_interacts_instead_of_farming_ap_when_tile_is_available():
@@ -3152,7 +3213,10 @@ def test_interaction_support_requires_initiator_confirmation_and_not_initiative(
             },
         }
         state["tiles"] = {"1A": [{"instance_id": "fish-instance", "tile_id": "fish-tile", "face_up": True}]}
-        state["capabilities"]["force"]["hand"] = [{"card_id": "charge-card", "interaction_id": "charge", "interaction_ids": ["charge"], "owner_capability_id": "force"}]
+        state["capabilities"]["force"]["hand"] = [
+            {"card_id": "charge-card", "interaction_id": "charge", "interaction_ids": ["charge"], "owner_capability_id": "force"},
+            {"card_id": "ink-card", "interaction_id": "ink", "interaction_ids": ["ink"], "owner_capability_id": "force"},
+        ]
         state["capabilities"]["camouflage"]["hand"] = [{"card_id": "hide-card", "interaction_id": "hide", "interaction_ids": ["hide"], "owner_capability_id": "camouflage"}]
         state["capabilities"]["intelligence"]["hand"] = [{"card_id": "analyse-card", "interaction_id": "analyse", "interaction_ids": ["analyse"], "owner_capability_id": "intelligence"}]
 
@@ -3166,11 +3230,11 @@ def test_interaction_support_requires_initiator_confirmation_and_not_initiative(
         )
         confirmed = await send_command(
             service, user, room, command_id="cmd_support_confirm", expected_version=2,
-            command_type="resolve_interaction", payload={"capability_id": "force", "card_ids": ["charge-card"]},
+            command_type="resolve_interaction", payload={"capability_id": "force", "card_ids": ["charge-card"], "confirm_only": True},
         )
         first_support = await send_command(
             service, user, room, command_id="cmd_support_first", expected_version=3,
-            command_type="resolve_interaction", payload={"capability_id": "camouflage", "card_ids": ["hide-card"]},
+            command_type="resolve_interaction", payload={"capability_id": "camouflage", "card_ids": ["hide-card"], "confirm_only": True},
         )
         stale_support = await send_command(
             service, user, room, command_id="cmd_support_stale", expected_version=3,
@@ -3178,7 +3242,15 @@ def test_interaction_support_requires_initiator_confirmation_and_not_initiative(
         )
         completed = await send_command(
             service, user, room, command_id="cmd_support_complete", expected_version=4,
-            command_type="resolve_interaction", payload={"capability_id": "intelligence", "card_ids": ["analyse-card"]},
+            command_type="resolve_interaction", payload={"capability_id": "intelligence", "card_ids": ["analyse-card"], "confirm_only": True},
+        )
+        extra_card = await send_command(
+            service, user, room, command_id="cmd_support_extra", expected_version=5,
+            command_type="resolve_interaction", payload={"capability_id": "force", "card_ids": ["ink-card"], "confirm_only": True},
+        )
+        resolved = await send_command(
+            service, user, room, command_id="cmd_support_resolve", expected_version=5,
+            command_type="resolve_interaction", payload={"capability_id": "force"},
         )
 
         assert started["projection"]["interaction"]["initiator_confirmed"] is False
@@ -3188,9 +3260,12 @@ def test_interaction_support_requires_initiator_confirmation_and_not_initiative(
         assert stale_support["reason"] == "state_version_conflict"
         assert any(card["card_id"] == "analyse-card" for card in stale_support["projection"]["capabilities"]["intelligence"]["hand"])
         assert completed["ok"] is True
-        assert completed["projection"]["interaction"] is None
-        assert completed["projection"]["poulpita"]["neurons"] == 1
-        assert completed["projection"]["active_capability_id"] == "force"
+        assert completed["projection"]["interaction"] is not None
+        assert completed["events"][0]["type"] == "interaction_cards_confirmed"
+        assert extra_card["reason"] == "invalid_selected_cards"
+        assert resolved["projection"]["interaction"] is None
+        assert resolved["projection"]["poulpita"]["neurons"] == 1
+        assert resolved["projection"]["active_capability_id"] == "force"
 
     run(scenario())
 

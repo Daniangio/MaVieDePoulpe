@@ -1170,10 +1170,23 @@ def _sync_interaction_cards(next_state: dict[str, Any], capability_id: str, sele
         else:
             kept_played.append(card)
     next_played = kept_played
+    interaction_tile = (next_state.get("tile_catalog") or {}).get("tiles", {}).get(interaction.get("tile_id")) or {}
+    required_ids = list(
+        ((interaction.get("courtship_card") or {}).get("interaction_ids"))
+        or interaction_tile.get("interaction_ids")
+        or []
+    ) + list(interaction_tile.get("counter_attack_interaction_ids") or [])
     hand = []
     for card in capability.get("hand") or []:
         if str(card.get("card_id")) in selected:
+            remaining = list(required_ids)
+            for played_card in next_played:
+                played_interaction_id = str(played_card.get("interaction_id") or "")
+                if played_interaction_id in remaining:
+                    remaining.remove(played_interaction_id)
             chosen_interaction_id = _choose_card_interaction(next_state, next_played, card)
+            if chosen_interaction_id not in remaining:
+                raise ValueError("Cards can only be played for requirements that are still missing.")
             next_played.append({**card, "interaction_id": chosen_interaction_id, "interaction_ids": _card_interaction_options(card), "capability_id": capability_id})
         else:
             hand.append(card)
@@ -2796,8 +2809,7 @@ class GameRoomService:
                     )
                 selected_card_ids = [str(card_id) for card_id in ((payload or {}).get("card_ids") or [])]
                 should_sync_cards = bool(
-                    submitted_capability_id
-                    or (payload or {}).get("auto_select_cards")
+                    (payload or {}).get("auto_select_cards")
                     or "card_ids" in (payload or {})
                 )
                 if capability_id and should_sync_cards:
@@ -2821,6 +2833,21 @@ class GameRoomService:
                 ) and _shell_requirement_met(next_state, tile)
                 counter_required = tile.get("counter_attack_interaction_ids") or []
                 counter_success = success and bool(counter_required) and _criteria_met(counter_required, played)
+                if bool((payload or {}).get("confirm_only")):
+                    next_state["version"] = int(state["version"]) + 1
+                    event = {
+                        "event_id": f"evt_{uuid.uuid4().hex}",
+                        "type": "interaction_cards_confirmed",
+                        "command_id": command_id,
+                        "capability_id": capability_id,
+                        "tile_instance_id": interaction.get("tile_instance_id"),
+                        "success_ready": success,
+                        "counter_success_ready": counter_success,
+                        "version": int(next_state["version"]),
+                        "created_at": _now_iso(),
+                    }
+                    next_state.setdefault("event_log", []).append(event)
+                    return next_state, [event]
                 if not success:
                     next_state["version"] = int(state["version"]) + 1
                     event = {

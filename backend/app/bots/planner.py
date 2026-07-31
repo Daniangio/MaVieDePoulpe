@@ -82,7 +82,7 @@ def _safe_public_command(command: dict[str, Any]) -> dict[str, Any] | None:
         "move_poulpita": {"capability_id", "target_node_id"},
         "draw_action_card": {"capability_id", "auto_discard_card"},
         "start_interaction": {"capability_id", "tile_instance_id", "auto_select_cards"},
-        "resolve_interaction": {"capability_id", "auto_select_cards"},
+        "resolve_interaction": {"capability_id", "auto_select_cards", "confirm_only"},
         "fail_interaction": {"target_node_id"},
         "end_day": set(),
         "end_night": {"capability_id"},
@@ -145,6 +145,14 @@ def _can_pay_action_cost(state: dict[str, Any], capability: dict[str, Any], cost
     return (
         int(capability.get("pa") or 0) >= int(cost.get("ap_cost") or 0)
         and int((state.get("poulpita") or {}).get("neurons") or 0) >= int(cost.get("neuron_cost") or 0)
+    )
+
+
+def _can_collect_toward_action_cost(state: dict[str, Any], capability: dict[str, Any], cost: dict[str, int]) -> bool:
+    return (
+        int(capability.get("pa") or 0) < int(cost.get("ap_cost") or 0)
+        and int((state.get("poulpita") or {}).get("neurons") or 0) >= int(cost.get("neuron_cost") or 0)
+        and _can_pay_action_cost(state, capability, _action_cost(state, "gain_ap"))
     )
 
 
@@ -1088,6 +1096,7 @@ def _interaction_commands(ability_id: str, entry: dict[str, Any]) -> list[dict[s
             },
         }
     ]
+    commands.append({"type": "resolve_interaction", "payload": {"capability_id": ability_id, "auto_select_cards": True, "confirm_only": True}})
     if _interaction_requirements(tile) == 0:
         commands.append({"type": "resolve_interaction", "payload": {"capability_id": ability_id}})
     return commands
@@ -1113,7 +1122,9 @@ def _interaction_rollout_commands(state: dict[str, Any], ability_id: str, entry:
         }
     ]
     if _interaction_requirements(entry.get("tile") or {}) == 0 or _can_active_resolve_interaction(state, ability_id, entry):
-        commands.append({"type": "resolve_interaction", "payload": {"capability_id": ability_id, "auto_select_cards": True}})
+        commands.append({"type": "resolve_interaction", "payload": {"capability_id": ability_id, "auto_select_cards": True, "confirm_only": True}})
+    if _interaction_requirements(entry.get("tile") or {}) == 0:
+        commands.append({"type": "resolve_interaction", "payload": {"capability_id": ability_id}})
     return commands
 
 
@@ -1533,6 +1544,8 @@ def _simulate_public_command(state: dict[str, Any], command: dict[str, Any]) -> 
         if entry:
             if ability_id == initiator_id:
                 interaction["initiator_confirmed"] = True
+            if payload.get("confirm_only"):
+                return
             tile = entry.get("tile") or {}
             shell_ready = max(0, int((state.get("poulpita") or {}).get("seashells") or 0)) >= max(0, int(tile.get("shell_requirement_count") or 0))
             success = shell_ready and not _missing_interaction_ids_for_open_interaction(state)
@@ -2229,19 +2242,20 @@ def _next_interaction_support_command(state: dict[str, Any], ability_id: str) ->
         return [
             {
                 "type": "resolve_interaction",
-                "payload": {"capability_id": ability_id, "auto_select_cards": True},
+                "payload": {"capability_id": ability_id, "auto_select_cards": True, "confirm_only": True},
             }
         ], [entry], f"confirm initiator cards for {_tile_display_name(state, entry.get('tile') or {})}"
     capability = _capability(state, ability_id)
     missing = _missing_support_ids_for_open_interaction(state)
     tile = entry.get("tile") or {}
     shell_ready = max(0, int((state.get("poulpita") or {}).get("seashells") or 0)) >= max(0, int(tile.get("shell_requirement_count") or 0))
-    if shell_ready and (not missing or _selected_cards_for_requirements(capability, missing) is not None):
-        return [{"type": "resolve_interaction", "payload": {"capability_id": ability_id, "auto_select_cards": True}}], [entry], f"complete {_tile_display_name(state, tile)}"
+    if shell_ready and not missing:
+        return [{"type": "resolve_interaction", "payload": {"capability_id": ability_id}}], [entry], f"complete {_tile_display_name(state, tile)}"
+    if shell_ready and _selected_cards_for_requirements(capability, missing) is not None:
+        return [{"type": "resolve_interaction", "payload": {"capability_id": ability_id, "auto_select_cards": True, "confirm_only": True}}], [entry], f"confirm cards for {_tile_display_name(state, tile)}"
     if shell_ready and _selected_cards_matching_requirements(capability, missing):
-        return [{"type": "resolve_interaction", "payload": {"capability_id": ability_id, "auto_select_cards": True}}], [entry], f"commit cards to {_tile_display_name(state, tile)}"
+        return [{"type": "resolve_interaction", "payload": {"capability_id": ability_id, "auto_select_cards": True, "confirm_only": True}}], [entry], f"commit cards to {_tile_display_name(state, tile)}"
     draw_cost = _action_cost(state, "draw")
-    collect_cost = _action_cost(state, "gain_ap")
     has_action_slot = _action_slots_left(capability) > 0
     hand_count = len(capability.get("hand") or [])
     hand_limit = int(capability.get("current_max_cards_in_hand") or 3)
@@ -2256,7 +2270,7 @@ def _next_interaction_support_command(state: dict[str, Any], ability_id: str) ->
             if hand_count >= hand_limit:
                 payload["auto_discard_card"] = True
             return [{"type": "draw_action_card", "payload": payload}], [entry], f"draw for {_tile_display_name(state, tile)}"
-        if has_action_slot and _can_pay_action_cost(state, capability, collect_cost):
+        if has_action_slot and _can_collect_toward_action_cost(state, capability, draw_cost):
             return [{"type": "collect_action_points", "payload": {"capability_id": ability_id}}], [entry], f"AP for {_tile_display_name(state, tile)}"
     return [], [], "interaction pending"
 
@@ -2283,13 +2297,12 @@ def _support_candidate_plan(
         commands.append({"type": "take_control", "payload": {"capability_id": ability_id}})
         labels.append(f"{name} takes control")
     draw_cost = _action_cost(state, "draw")
-    collect_cost = _action_cost(state, "gain_ap")
     has_action_slot = include_take_control or _action_slots_left(capability) > 0
     if selected is not None:
-        commands.append({"type": "resolve_interaction", "payload": {"capability_id": ability_id, "card_ids": selected}})
+        commands.append({"type": "resolve_interaction", "payload": {"capability_id": ability_id, "card_ids": selected, "confirm_only": True}})
         labels.append(f"{name} plays support cards")
     elif partial_selected:
-        commands.append({"type": "resolve_interaction", "payload": {"capability_id": ability_id, "card_ids": partial_selected}})
+        commands.append({"type": "resolve_interaction", "payload": {"capability_id": ability_id, "card_ids": partial_selected, "confirm_only": True}})
         labels.append(f"{name} commits available support cards")
     elif estimate.get("can_improve_by_drawing") and has_action_slot:
         if _can_pay_action_cost(state, capability, draw_cost):
@@ -2300,15 +2313,12 @@ def _support_candidate_plan(
             else:
                 labels.append(f"{name} draws for {title_name}")
             commands.append({"type": "draw_action_card", "payload": draw_payload})
-        elif _can_pay_action_cost(state, capability, collect_cost):
+        elif _can_collect_toward_action_cost(state, capability, draw_cost):
             commands.append({"type": "collect_action_points", "payload": {"capability_id": ability_id}})
             labels.append(f"{name} collects AP to draw")
     elif estimate.get("is_human"):
-        commands.append({"type": "resolve_interaction", "payload": {"capability_id": ability_id, "auto_select_cards": True}})
+        commands.append({"type": "resolve_interaction", "payload": {"capability_id": ability_id, "auto_select_cards": True, "confirm_only": True}})
         labels.append(f"{name} tries support")
-    elif has_action_slot and _can_pay_action_cost(state, capability, collect_cost):
-        commands.append({"type": "collect_action_points", "payload": {"capability_id": ability_id}})
-        labels.append(f"{name} collects AP for support")
     if not commands or (include_take_control and len(commands) == 1):
         return None
     interaction_summary = _interaction_resolution_summary(state, entry, preferred_ability_id=ability_id)
@@ -2459,7 +2469,7 @@ def _interaction_support_proposals(state: dict[str, Any]) -> list[dict[str, Any]
             return []
         command = {
             "type": "resolve_interaction",
-            "payload": {"capability_id": initiator_id, "auto_select_cards": True},
+            "payload": {"capability_id": initiator_id, "auto_select_cards": True, "confirm_only": True},
         }
         title_name = _tile_display_name(state, entry.get("tile") or {})
         statistics = _plan_statistics(state, commands=[command], interactions=[entry])
@@ -2526,6 +2536,9 @@ def _interaction_support_proposals(state: dict[str, Any]) -> list[dict[str, Any]
             continue
         capability = _capability(state, ability_id)
         has_direct_support = bool(_selected_cards_matching_requirements(capability, missing))
+        estimate = _support_candidate_estimate(state, ability_id, missing, entry)
+        if not has_direct_support and not estimate.get("can_improve_by_drawing") and not estimate.get("is_human"):
+            continue
         include_take_control = not has_direct_support
         if include_take_control and not _has_control_take_left(capability):
             continue
@@ -2547,7 +2560,11 @@ def _interaction_support_proposals(state: dict[str, Any]) -> list[dict[str, Any]
             proposals.append(plan)
     if active_plan and active_support_command_type == "resolve_interaction" and proposals:
         return _advised_active_proposals(state, proposals, active_id)
-    if not proposals:
+    has_direct_support_plan = any(
+        str(((plan.get("commands") or [{}])[0]).get("type") or "") == "resolve_interaction"
+        for plan in proposals
+    )
+    if not has_direct_support_plan:
         fail_payload: dict[str, Any] = {}
         if any(str(effect.get("type") or "") == "pulpita_move_free" for effect in (tile or {}).get("failure_effects") or []):
             current_node_id = str((state.get("poulpita") or {}).get("node_id") or "")
@@ -3682,87 +3699,130 @@ def _local_orchestrator_interaction_candidates(state: dict[str, Any]) -> list[di
     entry = _open_interaction_entry(state)
     if not entry:
         return []
-    candidates = []
+    interaction = state.get("interaction") or {}
+    tile = entry.get("tile") or {}
     active_id = str(state.get("active_capability_id") or "")
-    active_capability = _capability(state, active_id)
-    active_commands, _entries, active_label = _next_interaction_support_command(state, active_id)
-    active_command_type = ""
-    if active_commands:
-        command = active_commands[0]
-        active_command_type = str(command.get("type") or "")
-        candidates.append(
+    initiator_id = str(interaction.get("initiator_capability_id") or "")
+    if not interaction.get("initiator_confirmed", True):
+        if initiator_id not in (state.get("capabilities") or {}):
+            return []
+        return [
             _local_orchestrator_candidate(
                 state,
-                plan_id=f"local_support_{active_id}_{active_command_type}",
-                title=f"{active_capability.get('name') or active_id}: {active_label}",
-                command=command,
-                base_score=125 if active_command_type == "resolve_interaction" else 65,
+                plan_id=f"local_confirm_initiator_{initiator_id}",
+                title=f"{_capability(state, initiator_id).get('name') or initiator_id} confirms cards",
+                command={"type": "resolve_interaction", "payload": {"capability_id": initiator_id, "auto_select_cards": True, "confirm_only": True}},
+                base_score=155,
             )
-        )
-        if active_command_type == "resolve_interaction" and _interaction_requirements(entry.get("tile") or {}) == 0:
-            return candidates
-    if active_command_type != "resolve_interaction":
-        existing_participants = {
-            str((state.get("interaction") or {}).get("initiator_capability_id") or "")
-        } | {
-            str(card.get("capability_id") or "")
-            for card in ((state.get("interaction") or {}).get("played_cards") or [])
-        }
-        existing_participants.discard("")
+        ]
+
+    missing = _missing_support_ids_for_open_interaction(state)
+    shell_ready = int((state.get("poulpita") or {}).get("seashells") or 0) >= max(0, int(tile.get("shell_requirement_count") or 0))
+    if shell_ready and not missing:
+        resolver_id = active_id or initiator_id
+        if resolver_id not in (state.get("capabilities") or {}):
+            return []
+        return [
+            _local_orchestrator_candidate(
+                state,
+                plan_id=f"local_complete_interaction_{resolver_id}",
+                title=f"Complete {_tile_display_name(state, tile)}",
+                command={"type": "resolve_interaction", "payload": {"capability_id": resolver_id}},
+                base_score=155,
+            )
+        ]
+
+    direct_candidates = []
+    if shell_ready:
+        for ability_id in _all_capability_ids(state):
+            capability = _capability(state, ability_id)
+            selected_cards = _selected_cards_matching_requirements(capability, missing)
+            if not selected_cards:
+                continue
+            estimate = _support_candidate_estimate(state, ability_id, missing, entry)
+            direct_candidates.append(
+                _local_orchestrator_candidate(
+                    state,
+                    plan_id=f"local_direct_support_{ability_id}",
+                    title=f"{capability.get('name') or ability_id} plays support",
+                    command={"type": "resolve_interaction", "payload": {"capability_id": ability_id, "card_ids": selected_cards, "confirm_only": True}},
+                    base_score=145 + len(selected_cards) * 5,
+                    confidence=float(estimate.get("probability") or 0.05),
+                )
+            )
+    if direct_candidates:
+        return direct_candidates
+
+    existing_participants = {initiator_id} | {
+        str(card.get("capability_id") or "")
+        for card in interaction.get("played_cards") or []
+    }
+    existing_participants.discard("")
+    search_candidates = []
+    best_search_probability = 0.0
+    active_capability = _capability(state, active_id)
+    active_estimate = _support_candidate_estimate(state, active_id, missing, entry) if active_capability else {}
+    active_commands, _entries, active_label = _next_interaction_support_command(state, active_id)
+    if active_commands and int(active_estimate.get("known_future_matches") or 0) > 0:
+        command = active_commands[0]
+        command_type = str(command.get("type") or "")
+        if command_type in {"draw_action_card", "collect_action_points"}:
+            probability = float(active_estimate.get("probability") or 0.05)
+            best_search_probability = max(best_search_probability, probability)
+            search_candidates.append(
+                _local_orchestrator_candidate(
+                    state,
+                    plan_id=f"local_continue_support_search_{active_id}_{command_type}",
+                    title=f"{active_capability.get('name') or active_id}: {active_label}",
+                    command=command,
+                    base_score=145 if command_type == "draw_action_card" else 125,
+                    confidence=probability,
+                )
+            )
+
+    if not search_candidates and shell_ready:
         for ability_id in _all_capability_ids(state):
             if ability_id == active_id:
                 continue
             capability = _capability(state, ability_id)
-            missing = _missing_support_ids_for_open_interaction(state)
-            selected_cards = _selected_cards_matching_requirements(capability, missing)
-            if selected_cards:
-                support_command = {"type": "resolve_interaction", "payload": {"capability_id": ability_id, "card_ids": selected_cards}}
-                candidates.append(
-                    _local_orchestrator_candidate(
-                        state,
-                        plan_id=f"local_direct_support_{ability_id}",
-                        title=f"{capability.get('name') or ability_id} plays support",
-                        command=support_command,
-                        base_score=135,
-                        confidence=float(_support_candidate_estimate(state, ability_id, missing, entry).get("probability") or 0.05),
-                    )
-                )
-                continue
-            if not _has_control_take_left(capability):
+            estimate = _support_candidate_estimate(state, ability_id, missing, entry)
+            if int(estimate.get("known_future_matches") or 0) <= 0 or not _has_control_take_left(capability):
                 continue
             simulated = _clone_simulation_state(state)
             take_command = {"type": "take_control", "payload": {"capability_id": ability_id}}
             _simulate_public_command(simulated, take_command)
             support_commands, _entries, label = _next_interaction_support_command(simulated, ability_id)
-            if support_commands:
-                support_command_type = str(support_commands[0].get("type") or "")
-                participant_count = len(existing_participants | {ability_id})
-                participant_penalty = max(0, participant_count - 2) * _planner_weight(
-                    state, "third_ability_penalty", 45.0
-                )
-                candidate = _local_orchestrator_candidate(
-                    state,
-                    plan_id=f"local_support_take_{ability_id}",
-                    title=f"{capability.get('name') or ability_id} supports: {label}",
-                    command=take_command,
-                    base_score=(130 if support_command_type == "resolve_interaction" else 80) - participant_penalty,
-                    confidence=float(_support_candidate_estimate(state, ability_id, _missing_support_ids_for_open_interaction(state), entry).get("probability") or 0.05),
-                )
-                candidate["statistics"]["interaction_team_size"] = participant_count
-                candidate["statistics"]["initiative_change_penalty"] = participant_penalty
-                candidates.append(candidate)
-    candidates.append(
-        _local_orchestrator_candidate(
-            state,
-            plan_id=f"local_fail_{(entry.get('instance') or {}).get('instance_id')}",
-            title=f"Fail {_tile_display_name(state, entry.get('tile') or {})}",
-            command=_local_orchestrator_fail_command(state, entry),
-            base_score=5,
-            confidence=1.0,
-            expected_gain=_weighted_expected_gain(state, _effect_delta((entry.get("tile") or {}).get("failure_effects") or [])),
-        )
+            if not support_commands or str(support_commands[0].get("type") or "") not in {"draw_action_card", "collect_action_points"}:
+                continue
+            participant_count = len(existing_participants | {ability_id})
+            participant_penalty = max(0, participant_count - 2) * _planner_weight(state, "third_ability_penalty", 45.0)
+            probability = float(estimate.get("probability") or 0.05)
+            best_search_probability = max(best_search_probability, probability)
+            candidate = _local_orchestrator_candidate(
+                state,
+                plan_id=f"local_support_search_take_{ability_id}",
+                title=f"{capability.get('name') or ability_id}: {label}",
+                command=take_command,
+                base_score=95 + probability * 25 - participant_penalty,
+                confidence=probability,
+            )
+            candidate["statistics"]["interaction_team_size"] = participant_count
+            candidate["statistics"]["initiative_change_penalty"] = participant_penalty
+            search_candidates.append(candidate)
+
+    failure_gain = _weighted_expected_gain(state, _effect_delta(tile.get("failure_effects") or []))
+    fail_candidate = _local_orchestrator_candidate(
+        state,
+        plan_id=f"local_fail_{(entry.get('instance') or {}).get('instance_id')}",
+        title=f"Fail {_tile_display_name(state, tile)}",
+        command=_local_orchestrator_fail_command(state, entry),
+        base_score=75 - best_search_probability * 35,
+        confidence=1.0,
+        expected_gain=failure_gain,
     )
-    return candidates
+    fail_candidate["statistics"]["failure_effect_score"] = failure_gain
+    fail_candidate["statistics"]["best_support_search_probability"] = round(best_search_probability, 2)
+    return [*search_candidates, fail_candidate]
 
 
 def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str, Any]]:
