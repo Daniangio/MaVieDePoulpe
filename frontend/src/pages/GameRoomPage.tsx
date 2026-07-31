@@ -740,6 +740,7 @@ const InteractionPanel = ({
   onToggleCard,
   onFailMoveTargetChange,
   onInitiate,
+  onConfirmCards,
   onResolve,
   onFail,
   onClose,
@@ -752,6 +753,7 @@ const InteractionPanel = ({
   visualState: "open" | "success" | "failure" | "closing";
   onToggleCard: (cardId: string) => void;
   onInitiate: () => void;
+  onConfirmCards: () => void;
   onResolve: () => void;
   failMoveTargetNodeId: string;
   onFailMoveTargetChange: (nodeId: string) => void;
@@ -784,8 +786,15 @@ const InteractionPanel = ({
     && activeInteraction.initiator_confirmed === false
     && activeInteraction.initiator_capability_id !== selectedCapabilityId,
   );
-  const activeOwnedPlayedCards = activePlayedCards.filter((card: CardProjection) => card.capability_id === selectedCapabilityId);
-  const lockedPlayedCards = activePlayedCards.filter((card: CardProjection) => card.capability_id !== selectedCapabilityId);
+  const canEditInitiatorCards = Boolean(
+    activeInteraction
+    && activeInteraction.initiator_confirmed === false
+    && activeInteraction.initiator_capability_id === selectedCapabilityId,
+  );
+  const activeOwnedPlayedCards = canEditInitiatorCards
+    ? activePlayedCards.filter((card: CardProjection) => card.capability_id === selectedCapabilityId)
+    : [];
+  const lockedPlayedCards = activePlayedCards.filter((card: CardProjection) => !activeOwnedPlayedCards.some((owned: CardProjection) => owned.card_id === card.card_id));
   const handCards = selectedCapability?.hand || [];
   const selectableCards = [...activeOwnedPlayedCards, ...handCards];
   const selectableCardMap = new Map(selectableCards.map((card: CardProjection) => [card.card_id, card]));
@@ -811,6 +820,12 @@ const InteractionPanel = ({
   const carriedShells = Math.max(0, Number(projection.poulpita?.seashells || 0));
   const missingShells = Math.max(0, shellRequirementCount - carriedShells);
   const canResolve = missingSuccess.length === 0 && missingShells === 0;
+  const confirmationPending = Boolean(canEditInitiatorCards || selectedCardIds.some((cardId) => !activeOwnedPlayedCards.some((card: CardProjection) => card.card_id === cardId)));
+  const missingCardSymbols = [...missingSuccess, ...missingCounter];
+  const cardCanFillMissing = (card: CardProjection) => {
+    const options = card.interaction_ids?.length ? card.interaction_ids : [card.interaction_id];
+    return options.some((interactionId) => missingCardSymbols.includes(interactionId));
+  };
   const canInitiate = !activeInteraction && projection.active_capability_id === selectedCapability?.id;
   const requiresFreeFailureMove = Boolean(activeInteraction && (tile.failure_effects || []).some((effect: any) => effect.type === "pulpita_move_free"));
   const isCourtship = Boolean(activeInteraction?.courtship_card);
@@ -897,7 +912,7 @@ const InteractionPanel = ({
               {handCards.map((card: CardProjection) => (
                 <CardButton
                   card={card}
-                  disabled={pending || initiatorConfirmationRequired}
+                  disabled={pending || initiatorConfirmationRequired || (!selectedCardIds.includes(card.card_id) && !cardCanFillMissing(card))}
                   key={card.card_id}
                   onClick={() => onToggleCard(card.card_id)}
                   projection={projection}
@@ -918,7 +933,14 @@ const InteractionPanel = ({
                 ) : null}
                 {isCourtship ? <button className="rounded border border-amber-400 px-3 py-2 text-sm text-amber-100 hover:bg-amber-950 disabled:opacity-50" disabled={pending || Number(projection.poulpita.energy || 0) <= 1} onClick={() => onFail(true)} type="button">Spend 1 energy and retry</button> : null}
                 <button className="rounded border border-rose-500 px-3 py-2 text-sm text-rose-100 hover:bg-rose-950 disabled:opacity-50" disabled={pending || (requiresFreeFailureMove && !failMoveTargetNodeId)} onClick={() => onFail(false)} type="button">{isCourtship ? "Leave and move away" : "Fail"}</button>
-                <button className="rounded bg-teal-400 px-3 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-300 disabled:opacity-50" disabled={pending || initiatorConfirmationRequired} onClick={onResolve} type="button">{initiatorConfirmationRequired ? "Waiting for initiator" : canResolve ? "Confirm interaction" : "Confirm cards"}</button>
+                <button
+                  className="rounded bg-teal-400 px-3 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-300 disabled:opacity-50"
+                  disabled={pending || initiatorConfirmationRequired || (!confirmationPending && !canResolve)}
+                  onClick={confirmationPending ? onConfirmCards : onResolve}
+                  type="button"
+                >
+                  {initiatorConfirmationRequired ? "Waiting for initiator" : confirmationPending ? "Confirm cards" : canResolve ? "Resolve interaction" : "Select missing cards"}
+                </button>
               </>
             ) : (
               <button className="rounded bg-teal-400 px-3 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-300 disabled:opacity-50" disabled={pending || !canInitiate} onClick={onInitiate} type="button">Initiate interaction</button>
@@ -1834,9 +1856,12 @@ const GameRoomPage = () => {
     if (!projection?.interaction) return;
     setSelectedTileInstanceId(projection.interaction.tile_instance_id || null);
     setInteractionPanelState("open");
-    const focusedPlayedCardIds = (projection.interaction.played_cards || [])
-      .filter((card: CardProjection) => card.capability_id === focusedCapabilityId)
-      .map((card: CardProjection) => card.card_id);
+    const focusedPlayedCardIds = projection.interaction.initiator_confirmed === false
+      && projection.interaction.initiator_capability_id === focusedCapabilityId
+      ? (projection.interaction.played_cards || [])
+        .filter((card: CardProjection) => card.capability_id === focusedCapabilityId)
+        .map((card: CardProjection) => card.card_id)
+      : [];
     setSelectedCardIds(focusedPlayedCardIds);
     setFailMoveTargetNodeId("");
   }, [focusedCapabilityId, projection?.interaction?.tile_instance_id, projection?.version]);
@@ -2334,11 +2359,19 @@ const GameRoomPage = () => {
     if (result?.ok !== false) setInteractionPanelState("open");
   };
 
-  const confirmInteraction = async () => {
+  const confirmInteractionCards = async () => {
+    if (!selectedCapabilityId) return;
+    await submitCommand("resolve_interaction", {
+      capability_id: selectedCapabilityId,
+      card_ids: selectedCardIds,
+      confirm_only: true,
+    });
+  };
+
+  const resolveInteraction = async () => {
     if (!selectedCapabilityId) return;
     const result = await submitCommand("resolve_interaction", {
       capability_id: selectedCapabilityId,
-      card_ids: selectedCardIds,
     });
     const eventType = result?.events?.[0]?.type;
     if (eventType === "interaction_resolved") {
@@ -2588,7 +2621,8 @@ const GameRoomPage = () => {
                 onFailMoveTargetChange={setFailMoveTargetNodeId}
                 onClose={closeInteractionPanel}
                 onInitiate={initiateInteraction}
-                onResolve={confirmInteraction}
+                onConfirmCards={confirmInteractionCards}
+                onResolve={resolveInteraction}
                 onToggleCard={toggleDraftCard}
                 pending={gameplayPending}
                 projection={projection}
