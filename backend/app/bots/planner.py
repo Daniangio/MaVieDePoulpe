@@ -706,35 +706,99 @@ def _known_shelter_nodes(state: dict[str, Any]) -> set[str]:
         count = int(raw.get("count") or 0) if isinstance(raw, dict) else int(raw or 0)
         if count > 0:
             nodes.add(str(node_id))
-    for node_id, entries in (state.get("tiles") or {}).items():
-        for entry in entries or []:
-            if entry.get("face_up"):
-                tile = ((state.get("tile_catalog") or {}).get("tiles") or {}).get(entry.get("tile_id")) or {}
-                if any(str(effect.get("type") or "") == "place_shelter_token" for effect in tile.get("success_effects") or []):
-                    nodes.add(str(node_id))
     return nodes
 
 
-def _distance_to_closest_shelter(state: dict[str, Any], start_node_id: str) -> int | None:
+def _node_has_known_compulsory_blocker(state: dict[str, Any], node_id: str) -> bool:
+    if _compulsory_choices_on_node(state, str(node_id), highest_only=False):
+        return True
+    catalog_tiles = ((state.get("tile_catalog") or {}).get("tiles") or {})
+    return any(
+        instance.get("face_up")
+        and (
+            str(instance.get("token_type") or "") == "octopus"
+            or str(instance.get("tile_id") or "") in {"octopus", "__octopus_token__"}
+            or str((catalog_tiles.get(instance.get("tile_id")) or {}).get("token_type") or "") == "octopus"
+        )
+        for instance in (state.get("tiles") or {}).get(str(node_id), []) or []
+    )
+
+
+def _safe_route_to_closest_shelter(state: dict[str, Any], start_node_id: str) -> dict[str, Any] | None:
+    """Find the shortest known route that does not enter an unresolved compulsory node."""
+    start_node_id = str(start_node_id or "")
     shelter_nodes = _known_shelter_nodes(state)
     if not start_node_id or not shelter_nodes:
         return None
-    if start_node_id in shelter_nodes:
-        return 0
+    safe_shelters = {
+        node_id for node_id in shelter_nodes if not _node_has_known_compulsory_blocker(state, node_id)
+    }
+    if start_node_id in safe_shelters:
+        return {"shelter_node_id": start_node_id, "path": [start_node_id], "distance": 0}
+    if not safe_shelters:
+        return None
+
     adjacency = (state.get("map") or {}).get("adjacency") or {}
-    frontier = [(start_node_id, 0)]
-    visited = {start_node_id}
+    frontier = [start_node_id]
+    previous: dict[str, str | None] = {start_node_id: None}
     while frontier:
-        node_id, distance = frontier.pop(0)
-        for next_node_id in adjacency.get(node_id, []) or []:
-            next_node_id = str(next_node_id)
-            if next_node_id in visited:
+        node_id = frontier.pop(0)
+        for raw_next_node_id in adjacency.get(node_id, []) or []:
+            next_node_id = str(raw_next_node_id)
+            if next_node_id in previous or _node_has_known_compulsory_blocker(state, next_node_id):
                 continue
-            if next_node_id in shelter_nodes:
-                return distance + 1
-            visited.add(next_node_id)
-            frontier.append((next_node_id, distance + 1))
+            previous[next_node_id] = node_id
+            if next_node_id in safe_shelters:
+                path = [next_node_id]
+                while previous[path[-1]] is not None:
+                    path.append(str(previous[path[-1]]))
+                path.reverse()
+                return {
+                    "shelter_node_id": next_node_id,
+                    "path": path,
+                    "distance": len(path) - 1,
+                }
+            frontier.append(next_node_id)
     return None
+
+
+def _distance_to_closest_shelter(state: dict[str, Any], start_node_id: str) -> int | None:
+    route = _safe_route_to_closest_shelter(state, start_node_id)
+    return int(route["distance"]) if route else None
+
+
+def _shelter_return_context(state: dict[str, Any], start_node_id: str | None = None) -> dict[str, Any]:
+    current_node_id = str(start_node_id or (state.get("poulpita") or {}).get("node_id") or "")
+    route = _safe_route_to_closest_shelter(state, current_node_id)
+    spent = int(state.get("night_time_spent") or 0)
+    total = max(1, int(state.get("night_time_total") or 24))
+    shelter_at = min(total, max(0, int(state.get("night_shelter_available_at") or 16)))
+    move_time = max(1, int(_action_cost(state, "move").get("time_cost") or 0))
+    distance = int(route.get("distance") or 0) if route else None
+    travel_time = distance * move_time if distance is not None else total
+    safety_margin = max(1, move_time)
+    return_start = max(0, shelter_at - travel_time - safety_margin)
+    per_step = _planner_weight(state, "late_shelter_urgency", 8.0)
+    urgency = 0.0
+    if route and spent >= return_start:
+        urgency = (spent - return_start + 1) * per_step
+        if spent >= shelter_at:
+            urgency += (spent - shelter_at + 1) * per_step
+        if spent >= total - max(2, travel_time):
+            urgency += per_step * 4
+    elif not route and spent >= shelter_at:
+        urgency = (spent - shelter_at + 1) * per_step
+        if spent >= total - 2:
+            urgency += per_step * 4
+    return {
+        "route": route,
+        "distance": distance,
+        "travel_time": travel_time,
+        "return_start": return_start,
+        "urgency": min(240.0, urgency),
+        "should_return": bool(route and distance and urgency > 0),
+        "next_node_id": route["path"][1] if route and len(route.get("path") or []) > 1 else None,
+    }
 
 
 def _merge_deltas(deltas: list[dict[str, float]]) -> dict[str, float]:
@@ -1423,16 +1487,8 @@ def _can_end_night_now(state: dict[str, Any]) -> bool:
     )
 
 
-def _night_lateness_score(state: dict[str, Any]) -> float:
-    spent = int(state.get("night_time_spent") or 0)
-    total = max(1, int(state.get("night_time_total") or 24))
-    shelter_at = int(state.get("night_shelter_available_at") or 16)
-    if spent < shelter_at:
-        return 0.0
-    per_step = _planner_weight(state, "late_shelter_urgency", 8.0)
-    elapsed = max(1, spent - shelter_at + 1)
-    near_end_bonus = per_step * 4 if spent >= total - 2 else 0.0
-    return min(200.0, elapsed * per_step + near_end_bonus)
+def _night_lateness_score(state: dict[str, Any], start_node_id: str | None = None) -> float:
+    return float(_shelter_return_context(state, start_node_id).get("urgency") or 0.0)
 
 
 def _mark_simulated_loss_if_needed(state: dict[str, Any]) -> None:
@@ -1694,18 +1750,22 @@ def _rollout_next_commands(state: dict[str, Any], ability_id: str) -> tuple[list
     move_cost = _action_cost(state, "move")
     draw_cost = _action_cost(state, "draw")
     collect_cost = _action_cost(state, "gain_ap")
+    if _can_end_night_now(state):
+        return [{"type": "end_night", "payload": {"capability_id": ability_id}}], [], "end night at shelter"
     if _action_slots_left(capability) <= 0:
         return [], [], "control exhausted"
     if state.get("interaction"):
         return _next_interaction_support_command(state, ability_id)
     current_compulsory = _compulsory_choices_on_node(state, current_node_id)
+    shelter_return = _shelter_return_context(state, current_node_id)
     if _can_pay_action_cost(state, capability, interact_cost):
         forced_entry = _best_rollout_interaction(state, ability_id, current_compulsory)
         if forced_entry:
             return _interaction_rollout_commands(state, ability_id, forced_entry), [forced_entry], f"forced {_tile_display_name(state, forced_entry['tile'])}"
-        optional_entry = _best_rollout_interaction(state, ability_id, _visible_current_tiles(state))
-        if optional_entry:
-            return _interaction_rollout_commands(state, ability_id, optional_entry), [optional_entry], _tile_display_name(state, optional_entry["tile"])
+        if not shelter_return["should_return"]:
+            optional_entry = _best_rollout_interaction(state, ability_id, _visible_current_tiles(state))
+            if optional_entry:
+                return _interaction_rollout_commands(state, ability_id, optional_entry), [optional_entry], _tile_display_name(state, optional_entry["tile"])
     elif (
         current_compulsory
         and any(_can_initiate(state, ability_id, entry.get("tile") or {}) for entry in current_compulsory)
@@ -1714,6 +1774,17 @@ def _rollout_next_commands(state: dict[str, Any], ability_id: str) -> tuple[list
         and _can_pay_action_cost(state, capability, collect_cost)
     ):
         return [{"type": "collect_action_points", "payload": {"capability_id": ability_id}}], current_compulsory, "AP for forced interaction"
+    if not current_compulsory and shelter_return["should_return"]:
+        if _can_pay_action_cost(state, capability, move_cost):
+            target_node_id = str(shelter_return["next_node_id"])
+            return [
+                {"type": "move_poulpita", "payload": {"capability_id": ability_id, "target_node_id": target_node_id}}
+            ], [], f"safe shelter route via {target_node_id}"
+        positive_move_ap = int(move_cost.get("ap_cost") or 0) > int(capability.get("pa") or 0)
+        neurons_ready = int((state.get("poulpita") or {}).get("neurons") or 0) >= int(move_cost.get("neuron_cost") or 0)
+        if positive_move_ap and neurons_ready and _can_pay_action_cost(state, capability, collect_cost):
+            return [{"type": "collect_action_points", "payload": {"capability_id": ability_id}}], [], "AP for shelter return"
+        return [], [], "safe shelter route currently unaffordable"
     if not current_compulsory and _can_pay_action_cost(state, capability, move_cost):
         adjacent = list(((state.get("map") or {}).get("adjacency") or {}).get(current_node_id) or [])
         if adjacent:
@@ -3054,6 +3125,7 @@ def _night_idle_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
     proposals = []
     current_node_id = str((state.get("poulpita") or {}).get("node_id") or "")
     compulsory = _compulsory_choices_on_node(state, current_node_id)
+    shelter_return = _shelter_return_context(state, current_node_id)
     visible_entries = _visible_current_tiles(state)
     visible_initiators = {
         ability_id
@@ -3062,6 +3134,35 @@ def _night_idle_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
     }
     move_cost = _action_cost(state, "move")
     adjacent = list(((state.get("map") or {}).get("adjacency") or {}).get(current_node_id) or [])
+    if not compulsory and shelter_return["should_return"]:
+        target_node_id = str(shelter_return["next_node_id"])
+        for ability_id in _playable_ability_ids(state):
+            capability = _capability(state, ability_id)
+            if not _has_control_take_left(capability):
+                continue
+            if _can_pay_action_cost(state, capability, move_cost):
+                proposals.append(
+                    _move_plan(
+                        state,
+                        ability_id=ability_id,
+                        target_node_id=target_node_id,
+                        include_take_control=True,
+                        base_score=90 + float(shelter_return["urgency"]),
+                        rationale="Night is approaching its safe return window. This is the next step on the shortest known route to a shelter without compulsory blockers.",
+                    )
+                )
+            else:
+                proposals.extend(
+                    _collect_plan_variants(
+                        state,
+                        ability_id=ability_id,
+                        include_take_control=True,
+                        base_score=75 + float(shelter_return["urgency"]),
+                        rationale="Night is approaching its safe return window. This ability needs AP before following the safe shelter route.",
+                    )
+                )
+        if proposals:
+            return proposals
     for ability_id in _playable_ability_ids(state):
         capability = _capability(state, ability_id)
         if not _has_control_take_left(capability):
@@ -3116,7 +3217,7 @@ def _active_night_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
     interact_cost = _action_cost(state, "interact")
     end_night = _end_night_plan(state)
     if end_night:
-        proposals.append(end_night)
+        return _advised_active_proposals(state, [end_night], str(state.get("active_capability_id") or ""))
     if current_compulsory and not state.get("interaction"):
         forced_proposals = []
         actor_candidates = _forced_actor_candidates(state, current_compulsory)
@@ -3168,6 +3269,36 @@ def _active_night_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
         if not current_compulsory and not state.get("interaction"):
             move_cost = _action_cost(state, "move")
             adjacent = list(((state.get("map") or {}).get("adjacency") or {}).get(current_node_id) or [])
+            shelter_return = _shelter_return_context(state, current_node_id)
+            if shelter_return["should_return"]:
+                target_node_id = str(shelter_return["next_node_id"])
+                for ability_id in _playable_ability_ids(state):
+                    capability = _capability(state, ability_id)
+                    if ability_id == str(state.get("active_capability_id") or "") or not _has_control_take_left(capability):
+                        continue
+                    if _can_pay_action_cost(state, capability, move_cost):
+                        proposals.append(
+                            _move_plan(
+                                state,
+                                ability_id=ability_id,
+                                target_node_id=target_node_id,
+                                include_take_control=True,
+                                base_score=90 + float(shelter_return["urgency"]),
+                                rationale="The previous control is exhausted. This ability can continue along the shortest safe route to shelter.",
+                            )
+                        )
+                    else:
+                        proposals.extend(
+                            _collect_plan_variants(
+                                state,
+                                ability_id=ability_id,
+                                include_take_control=True,
+                                base_score=75 + float(shelter_return["urgency"]),
+                                rationale="The previous control is exhausted. This ability needs AP to continue toward shelter.",
+                            )
+                        )
+                if proposals:
+                    return proposals
             eligible_visible_initiators = {
                 ability_id
                 for ability_id in _playable_ability_ids(state)
@@ -3228,6 +3359,30 @@ def _active_night_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
             if _can_initiate(state, active_id, entry["tile"]):
                 proposals.append(_forced_interaction_plan(state, ability_id=active_id, entry=entry, include_take_control=False, score=100))
                 break
+    shelter_return = _shelter_return_context(state, current_node_id)
+    if not current_compulsory and shelter_return["should_return"]:
+        move_cost = _action_cost(state, "move")
+        if _can_pay_action_cost(state, capability, move_cost):
+            route_plan = _move_plan(
+                state,
+                ability_id=active_id,
+                target_node_id=str(shelter_return["next_node_id"]),
+                include_take_control=False,
+                base_score=95 + float(shelter_return["urgency"]),
+                rationale="Night is approaching its safe return window. This move follows the shortest known path to shelter without compulsory blockers.",
+            )
+            route_plan["statistics"]["safe_shelter_route"] = shelter_return["route"]
+            route_plan["statistics"]["shelter_return_start"] = shelter_return["return_start"]
+            return _advised_active_proposals(state, [route_plan], active_id)
+        collect_plans = _collect_plan_variants(
+            state,
+            ability_id=active_id,
+            include_take_control=False,
+            base_score=80 + float(shelter_return["urgency"]),
+            rationale="Night is approaching its safe return window. Collect AP now to pay for the next shelter-route move.",
+        )
+        if collect_plans:
+            return _advised_active_proposals(state, collect_plans, active_id)
     visible_interaction_path = any(
         _can_initiate(state, ability_id, entry.get("tile") or {})
         for ability_id in _playable_ability_ids(state)
@@ -3829,6 +3984,10 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
     candidates = []
     phase = str(state.get("phase") or "")
     active_id = str(state.get("active_capability_id") or "")
+    current_node_id = str((state.get("poulpita") or {}).get("node_id") or "")
+    compulsory = _compulsory_choices_on_node(state, current_node_id)
+    shelter_return = _shelter_return_context(state, current_node_id)
+    returning_to_shelter = bool(shelter_return["should_return"] and not compulsory)
     if phase == "night_idle":
         active_id = ""
     if not active_id:
@@ -3843,7 +4002,7 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
             capability = _capability(state, ability_id)
             if not _has_control_take_left(capability):
                 continue
-            if visible_initiators and ability_id not in visible_initiators:
+            if visible_initiators and ability_id not in visible_initiators and not returning_to_shelter:
                 continue
             initiable_entries = [
                 entry for entry in visible if _can_initiate(state, ability_id, entry.get("tile") or {})
@@ -3861,13 +4020,19 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
                 ),
                 default=0.0,
             )
+            return_bonus = 0.0
+            if returning_to_shelter:
+                move_cost = _action_cost(state, "move")
+                return_bonus = float(shelter_return["urgency"])
+                if _can_pay_action_cost(state, capability, move_cost):
+                    return_bonus += 65
             candidates.append(
                 _local_orchestrator_candidate(
                     state,
                     plan_id=f"local_take_{ability_id}",
                     title=f"{capability.get('name') or ability_id} takes control",
                     command={"type": "take_control", "payload": {"capability_id": ability_id}},
-                    base_score=40 + min(10, int(capability.get("pa") or 0)) + tile_bonus,
+                    base_score=40 + min(10, int(capability.get("pa") or 0)) + tile_bonus + return_bonus,
                 )
             )
         return candidates
@@ -3875,9 +4040,17 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
         return _local_orchestrator_interaction_candidates(state)
 
     capability = _capability(state, active_id)
-    current_node_id = str((state.get("poulpita") or {}).get("node_id") or "")
     action_slot = _action_slots_left(capability) > 0
-    compulsory = _compulsory_choices_on_node(state, current_node_id)
+    if _can_end_night_now(state):
+        return [
+            _local_orchestrator_candidate(
+                state,
+                plan_id="local_end_night",
+                title="End night",
+                command={"type": "end_night", "payload": {"capability_id": active_id}},
+                base_score=140 + _night_lateness_score(state),
+            )
+        ]
     visible = _visible_current_tiles(state)
     visible_initiators = {
         ability_id
@@ -3897,6 +4070,8 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
             tile = entry.get("tile") or {}
             priority = int(tile.get("priority") or 0)
             is_compulsory = bool(_tile_category(state, tile).get("compulsory_on_same_node"))
+            if returning_to_shelter and not is_compulsory:
+                continue
             if highest_compulsory_priority is not None and not is_compulsory and priority <= highest_compulsory_priority:
                 continue
             if highest_compulsory_priority is not None and is_compulsory and priority < highest_compulsory_priority:
@@ -3933,7 +4108,9 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
     active_can_address_compulsory = not compulsory or active_can_initiate_compulsory
     if action_slot and active_can_address_compulsory:
         collect_cost = _action_cost(state, "gain_ap")
-        if active_interaction_candidate_count == 0 and _can_pay_action_cost(state, capability, collect_cost):
+        move_cost = _action_cost(state, "move")
+        needs_shelter_ap = returning_to_shelter and not _can_pay_action_cost(state, capability, move_cost)
+        if active_interaction_candidate_count == 0 and _can_pay_action_cost(state, capability, collect_cost) and (not returning_to_shelter or needs_shelter_ap):
             compulsory_ap_setup = bool(compulsory) and int(capability.get("pa") or 0) < interact_cost["ap_cost"]
             candidates.append(
                 _local_orchestrator_candidate(
@@ -3941,12 +4118,13 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
                     plan_id=f"local_collect_{active_id}",
                     title=f"{capability.get('name') or active_id} collects AP",
                     command={"type": "collect_action_points", "payload": {"capability_id": active_id}},
-                    base_score=(110 if compulsory_ap_setup else 30) + _expected_ap_roll(state) * 3,
+                    base_score=(110 if compulsory_ap_setup else 30) + _expected_ap_roll(state) * 3 + (float(shelter_return["urgency"]) if needs_shelter_ap else 0),
                 )
             )
         draw_cost = _action_cost(state, "draw")
         if (
             active_interaction_candidate_count == 0
+            and not returning_to_shelter
             and _can_pay_action_cost(state, capability, draw_cost)
             and (capability.get("draw_pile") or capability.get("discard"))
         ):
@@ -3962,34 +4140,32 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
                     base_score=32,
                 )
             )
-        move_cost = _action_cost(state, "move")
         if (
             not compulsory
-            and not visible_initiators
+            and (not visible_initiators or returning_to_shelter)
             and active_interaction_candidate_count == 0
             and _can_pay_action_cost(state, capability, move_cost)
         ):
-            for target_node_id in ((state.get("map") or {}).get("adjacency") or {}).get(current_node_id, []) or []:
-                node_score, _entries, _distance = _node_followup_score(state, str(target_node_id), active_id)
-                candidates.append(
-                    _local_orchestrator_candidate(
-                        state,
-                        plan_id=f"local_move_{active_id}_{target_node_id}",
-                        title=f"Move to {target_node_id}",
-                        command={"type": "move_poulpita", "payload": {"capability_id": active_id, "target_node_id": str(target_node_id)}},
-                        base_score=38 + node_score,
-                    )
-                )
-    if _can_end_night_now(state):
-        candidates.append(
-            _local_orchestrator_candidate(
-                state,
-                plan_id="local_end_night",
-                title="End night",
-                command={"type": "end_night", "payload": {"capability_id": active_id}},
-                base_score=75 + _night_lateness_score(state),
+            target_nodes = (
+                [shelter_return["next_node_id"]]
+                if returning_to_shelter
+                else ((state.get("map") or {}).get("adjacency") or {}).get(current_node_id, []) or []
             )
-        )
+            for target_node_id in target_nodes:
+                node_score, _entries, _distance = _node_followup_score(state, str(target_node_id), active_id)
+                candidate = _local_orchestrator_candidate(
+                    state,
+                    plan_id=f"local_move_{active_id}_{target_node_id}",
+                    title=f"Move to {target_node_id}",
+                    command={"type": "move_poulpita", "payload": {"capability_id": active_id, "target_node_id": str(target_node_id)}},
+                    base_score=38 + node_score + (90 + float(shelter_return["urgency"]) if returning_to_shelter else 0),
+                )
+                if returning_to_shelter:
+                    candidate["statistics"]["safe_shelter_route"] = shelter_return["route"]
+                    candidate["statistics"]["shelter_return_start"] = shelter_return["return_start"]
+                candidates.append(
+                    candidate
+                )
     active_action_candidates = [
         candidate
         for candidate in candidates
@@ -4025,13 +4201,18 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
                 ),
                 default=0.0,
             )
+            return_bonus = 0.0
+            if returning_to_shelter:
+                return_bonus = float(shelter_return["urgency"])
+                if _can_pay_action_cost(state, next_capability, _action_cost(state, "move")):
+                    return_bonus += 65
             candidates.append(
                 _local_orchestrator_candidate(
                     state,
                     plan_id=f"local_switch_{ability_id}",
                     title=f"{next_capability.get('name') or ability_id} takes control",
                     command={"type": "take_control", "payload": {"capability_id": ability_id}},
-                    base_score=34 + min(8, int(next_capability.get("pa") or 0)) + tile_bonus,
+                    base_score=34 + min(8, int(next_capability.get("pa") or 0)) + tile_bonus + return_bonus,
                 )
             )
     return candidates

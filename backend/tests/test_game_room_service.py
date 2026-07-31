@@ -1600,6 +1600,94 @@ def test_shelter_proximity_becomes_more_valuable_as_night_gets_later():
     assert late_near - late_far > early_near - early_far
 
 
+def test_safe_shelter_route_avoids_known_compulsory_nodes():
+    state = _goldfish_state("room_safe_shelter_route", level_id="test-level", mode="bots_only")
+    state["map"]["adjacency"] = {
+        "start": ["shortcut", "safe-a"],
+        "shortcut": ["start", "shelter"],
+        "safe-a": ["start", "safe-b"],
+        "safe-b": ["safe-a", "shelter"],
+        "shelter": ["shortcut", "safe-b"],
+    }
+    state["poulpita"]["node_id"] = "start"
+    state["shelters"] = {"shelter": {"count": 1, "seashells": 0, "secure": False}}
+    state["tile_catalog"]["categories"] = {
+        "threat": {"id": "threat", "name": "Threat", "compulsory_on_same_node": True}
+    }
+    state["tile_catalog"]["events"] = {
+        "danger": {"id": "danger", "name": "Danger", "category_id": "threat"}
+    }
+    state["tile_catalog"]["tiles"] = {
+        "blocker": {"id": "blocker", "name": "Blocker", "event_id": "danger"}
+    }
+    state["tiles"] = {
+        "shortcut": [{"instance_id": "known_blocker", "tile_id": "blocker", "face_up": True}]
+    }
+
+    route = bot_planner._safe_route_to_closest_shelter(state, "start")
+
+    assert route == {
+        "shelter_node_id": "shelter",
+        "path": ["start", "safe-a", "safe-b", "shelter"],
+        "distance": 3,
+    }
+
+
+def test_local_orchestrator_returns_toward_safe_shelter_before_end_night_threshold():
+    state = _goldfish_state("room_shelter_return_window", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "force"
+    state["poulpita"]["node_id"] = "1A"
+    state["shelters"] = {"1D": {"count": 1, "seashells": 0, "secure": False}}
+    state["tiles"] = {}
+    state["night_time_spent"] = 12
+    state["night_shelter_available_at"] = 16
+    state["capabilities"]["force"]["pa"] = 5
+    state["capabilities"]["force"]["actions_taken_this_control"] = 0
+
+    context = bot_planner._shelter_return_context(state)
+    candidates = bot_planner._local_orchestrator_night_candidates(state)
+    commands = [bot_planner._orchestrator_command(candidate) for candidate in candidates]
+
+    assert context["should_return"] is True
+    assert context["next_node_id"] == "1B"
+    assert commands == [
+        {"type": "move_poulpita", "payload": {"capability_id": "force", "target_node_id": "1B"}}
+    ]
+
+
+def test_optimistic_rollout_does_not_stop_for_optional_tile_during_shelter_return():
+    state = _goldfish_state("room_rollout_shelter_return", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "force"
+    state["poulpita"]["node_id"] = "1A"
+    state["shelters"] = {"1D": {"count": 1, "seashells": 0, "secure": False}}
+    state["night_time_spent"] = 12
+    state["night_shelter_available_at"] = 16
+    state["capabilities"]["force"]["pa"] = 5
+    state["capabilities"]["force"]["initiates_event_ids"] = ["optional-event"]
+    state["tile_catalog"]["categories"] = {
+        "prey": {"id": "prey", "name": "Prey", "compulsory_on_same_node": False}
+    }
+    state["tile_catalog"]["events"] = {
+        "optional-event": {"id": "optional-event", "name": "Optional", "category_id": "prey"}
+    }
+    state["tile_catalog"]["tiles"] = {
+        "optional-tile": {"id": "optional-tile", "name": "Optional", "event_id": "optional-event"}
+    }
+    state["tiles"] = {
+        "1A": [{"instance_id": "optional-1", "tile_id": "optional-tile", "face_up": True}]
+    }
+
+    commands, interactions, label = bot_planner._rollout_next_commands(state, "force")
+
+    assert commands == [
+        {"type": "move_poulpita", "payload": {"capability_id": "force", "target_node_id": "1B"}}
+    ]
+    assert interactions == []
+    assert label == "safe shelter route via 1B"
+
+
 def test_simulated_no_actions_loss_has_extreme_negative_value():
     state = _goldfish_state("room_simulated_loss_value", level_id="test-level", mode="bots_only")
     state["phase"] = "night_action"
