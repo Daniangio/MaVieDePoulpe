@@ -1,4 +1,7 @@
 import asyncio
+from io import BytesIO
+
+from starlette.datastructures import UploadFile
 
 from backend.app import game_content_service as service
 from backend.app import map_service
@@ -88,6 +91,7 @@ def test_player_board_config_is_fixed_to_five_boards_and_validates_interactions(
         hand_size_upgrades=[{"cost_resource": "energy", "cost": 2, "hand_size_bonus": 1}],
         actions_per_control=2,
         control_takes_per_night=4,
+        initial_ap=7,
     )
     state = service.get_content_state()
 
@@ -95,6 +99,7 @@ def test_player_board_config_is_fixed_to_five_boards_and_validates_interactions(
     assert len(state["player_boards"]) == 5
     assert state["player_boards"][0]["initiates_event_ids"] == ["crab"]
     assert state["player_boards"][0]["actions_per_control"] == 2
+    assert state["player_boards"][0]["initial_ap"] == 7
 
 
 def test_player_board_can_define_deck_exchange_upgrades(tmp_path, monkeypatch):
@@ -158,7 +163,7 @@ def test_action_costs_and_shell_tile_requirement_are_configurable(tmp_path, monk
         }
     )
 
-    costs = service.update_action_costs({"interact": {"ap_cost": 2, "time_cost": 3}})
+    costs = service.update_action_costs({"interact": {"ap_cost": 2, "time_cost": 3, "neuron_cost": 1}})
     tile = service.save_tile(
         name="Shell threat",
         event_id="crab",
@@ -168,8 +173,8 @@ def test_action_costs_and_shell_tile_requirement_are_configurable(tmp_path, monk
     )
 
     state = service.get_content_state()
-    assert costs["interact"] == {"ap_cost": 2, "time_cost": 3}
-    assert costs["move"] == {"ap_cost": 1, "time_cost": 1}
+    assert costs["interact"] == {"ap_cost": 2, "time_cost": 3, "neuron_cost": 1}
+    assert costs["move"] == {"ap_cost": 1, "time_cost": 1, "neuron_cost": 0}
     assert tile["shell_requirement_count"] == 2
     assert state["action_costs"]["interact"]["time_cost"] == 3
 
@@ -274,14 +279,37 @@ def test_level_save_validates_group_capacity_and_node_assignment(tmp_path, monke
         ],
         objectives=[{"type": "increase_size", "target": 2}, {"type": "find_shelter"}],
         starting_energy=7,
+        max_energy=24,
         starting_neurons=4,
         night_duration_steps=18,
+        max_nights=6,
+        courtship_min_size_index=2,
+        courtship_min_energy=9,
+        win_min_energy=6,
+        size_deadline_night=5,
+        tile_sets=[
+            {
+                "id": "adult-set",
+                "size_index": 2,
+                "groups": [
+                    {"id": "shore", "name": "Shore", "tile_counts": {"fish": 2}},
+                    {"id": "deep", "name": "Deep", "tile_counts": {"crab": 1}},
+                ],
+            }
+        ],
     )
 
     assert level["node_tile_counts"] == {"N1": 2, "N2": 1}
     assert level["starting_energy"] == 7
+    assert level["max_energy"] == 24
     assert level["starting_neurons"] == 4
     assert level["night_duration_steps"] == 18
+    assert level["max_nights"] == 6
+    assert level["courtship_min_size_index"] == 2
+    assert level["courtship_min_energy"] == 9
+    assert level["win_min_energy"] == 6
+    assert level["size_deadline_night"] == 5
+    assert level["tile_sets"][0]["groups"][0]["tile_counts"] == {"fish": 2}
     assert level["objectives"] == [
         {"id": "objective-1", "type": "increase_size", "target": 2},
         {"id": "objective-2", "type": "find_shelter"},
@@ -309,7 +337,7 @@ def test_tokens_and_poulpita_panel_are_configurable(tmp_path, monkeypatch):
 
     state = service.get_content_state()
 
-    assert [token["id"] for token in state["tokens"]] == ["neuron", "seashell", "shelter", "octopus"]
+    assert [token["id"] for token in state["tokens"]] == ["neuron", "seashell", "shelter", "octopus", "courtship"]
     assert set(state["poulpita_panel"]["zones"]) == {"neurons", "seashells"}
 
     saved = run(
@@ -336,8 +364,51 @@ def test_tokens_and_poulpita_panel_are_configurable(tmp_path, monkeypatch):
             image_height=600,
         )
     )
-    assert resized["sizes"] == [{"amount": 500.0, "unit": "mg", "energy_cost": 0}, {"amount": 1.2, "unit": "g", "energy_cost": 2}]
+    assert [{key: size[key] for key in ["amount", "unit", "energy_cost"]} for size in resized["sizes"]] == [
+        {"amount": 500.0, "unit": "mg", "energy_cost": 0},
+        {"amount": 1.2, "unit": "g", "energy_cost": 2},
+    ]
+    with_size_image = run(
+        service.update_poulpita_panel(
+            zones=resized["zones"],
+            sizes=resized["sizes"],
+            size_images={0: UploadFile(filename="poulpita.png", file=BytesIO(b"poulpita-image"))},
+            image=None,
+            image_width=800,
+            image_height=600,
+        )
+    )
+    assert with_size_image["sizes"][0]["image_url"].startswith("/static/content/images/poulpita-size-1-")
+    assert with_size_image["sizes"][1]["image_url"] == with_size_image["sizes"][0]["image_url"]
+    assert with_size_image["sizes"][1]["uses_previous_image"] is True
     assert service.get_game_content_catalog()["poulpita_panel"]["zones"]["seashells"]["x"] == 0.5
+
+
+def test_courtship_cards_preserve_repeated_required_symbols(tmp_path, monkeypatch):
+    monkeypatch.setattr(service, "CONTENT_ROOT", tmp_path)
+    monkeypatch.setattr(service, "CONTENT_IMAGES_ROOT", tmp_path / "images")
+    monkeypatch.setattr(service, "CONTENT_JSON_PATH", tmp_path / "content.json")
+    service._write_content(
+        {
+            "categories": [],
+            "interactions": [
+                {"id": "dance", "name": "Dance", "image_filename": None},
+                {"id": "display", "name": "Display", "image_filename": None},
+            ],
+            "events": [],
+            "tiles": [],
+        }
+    )
+
+    card = run(
+        service.save_courtship_card(
+            name="Reef dance",
+            interaction_ids=["dance", "dance", "display"],
+        )
+    )
+
+    assert card["interaction_ids"] == ["dance", "dance", "display"]
+    assert service.get_game_content_catalog()["courtship_cards"][card["id"]]["image_url"] is None
 
 
 def test_octopus_token_rules_and_level_node_tokens_are_configurable(tmp_path, monkeypatch):

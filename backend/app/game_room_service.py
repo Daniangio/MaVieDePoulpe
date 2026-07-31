@@ -45,6 +45,10 @@ OCTOPUS_TOKEN_ID = "octopus"
 OCTOPUS_TILE_ID = "__octopus_token__"
 OCTOPUS_EVENT_ID = "__octopus_token_event__"
 OCTOPUS_CATEGORY_ID = "__octopus_token_threat__"
+COURTSHIP_TOKEN_ID = "courtship"
+COURTSHIP_TILE_ID = "__courtship_token__"
+COURTSHIP_EVENT_ID = "__courtship_token_event__"
+COURTSHIP_CATEGORY_ID = "__courtship_token_category__"
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -245,6 +249,7 @@ def _setup_state(room_id: str, *, level_id: str | None = None, mode: str = "gold
         "night_time_spent": 0,
         "night_time_total": max(1, int(level_config.get("night_duration_steps") or NIGHT_OVERRUN_CHUNKS)),
         "selected_map_id": map_config["id"],
+        "poulpita_starting_node_id": str(level_config.get("poulpita_starting_node_id") or map_config["starting_node_id"]),
         "active_capability_id": None,
         "last_active_capability_id": None,
         "focused_capability_id": str((bot_config or {}).get("human_ability_id") or DEFAULT_FOCUSED_CAPABILITY_ID),
@@ -362,7 +367,7 @@ def _initial_capabilities(*, deal_hands: bool = False) -> dict[str, dict[str, An
         capabilities[capability_id] = {
             "id": capability_id,
             "name": board.get("name") or CAPABILITY_NAMES[capability_id],
-            "pa": 0,
+            "pa": max(0, int(board.get("initial_ap") if board.get("initial_ap") is not None else 5)),
             "control_takes_this_night": 0,
             "actions_taken_this_control": 0,
             "max_actions_per_control": int(board.get("actions_per_control") or 3),
@@ -376,6 +381,7 @@ def _initial_capabilities(*, deal_hands: bool = False) -> dict[str, dict[str, An
             "discard": [],
             "hand_size_upgrades": deepcopy(board.get("hand_size_upgrades") or []),
             "purchased_hand_size_upgrade_indices": [],
+            "initial_ap": max(0, int(board.get("initial_ap") if board.get("initial_ap") is not None else 5)),
         }
     return capabilities
 
@@ -456,6 +462,32 @@ def _build_tile_catalog() -> dict[str, Any]:
         catalog.setdefault("events", {})[OCTOPUS_EVENT_ID] = octopus_event
         catalog.setdefault("categories", {})[OCTOPUS_CATEGORY_ID] = octopus_category
         public_tiles[OCTOPUS_TILE_ID] = octopus_tile
+    courtship_token = token_catalog.get(COURTSHIP_TOKEN_ID) or {}
+    if courtship_token:
+        courtship_event = {
+            "id": COURTSHIP_EVENT_ID,
+            "name": courtship_token.get("name") or "Courtship token",
+            "category_id": COURTSHIP_CATEGORY_ID,
+            "image_url": courtship_token.get("image_url"),
+        }
+        catalog.setdefault("events", {})[COURTSHIP_EVENT_ID] = courtship_event
+        catalog.setdefault("categories", {})[COURTSHIP_CATEGORY_ID] = {
+            "id": COURTSHIP_CATEGORY_ID,
+            "name": "Courtship",
+            "compulsory_on_same_node": False,
+        }
+        public_tiles[COURTSHIP_TILE_ID] = {
+            "id": COURTSHIP_TILE_ID,
+            "name": courtship_event["name"],
+            "event_id": COURTSHIP_EVENT_ID,
+            "event": courtship_event,
+            "image_url": courtship_event["image_url"],
+            "interaction_ids": [],
+            "counter_attack_interaction_ids": [],
+            "success_effects": [],
+            "failure_effects": [],
+            "token_type": COURTSHIP_TOKEN_ID,
+        }
     cards = catalog.get("cards") or {}
     if isinstance(cards, list):
         cards = {card["id"]: card for card in cards if card.get("id")}
@@ -467,6 +499,7 @@ def _build_tile_catalog() -> dict[str, Any]:
         "cards": cards,
         "surprise_cards": catalog.get("surprise_cards") or {},
         "surprise_decks": catalog.get("surprise_decks") or {},
+        "courtship_cards": catalog.get("courtship_cards") or {},
         "card_categories": catalog.get("card_categories") or [],
         "tokens": token_catalog,
         "poulpita_panel": catalog.get("poulpita_panel") or {},
@@ -475,9 +508,14 @@ def _build_tile_catalog() -> dict[str, Any]:
     }
 
 
-def _level_tiles(level_config: dict[str, Any], catalog: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+def _level_tiles(
+    level_config: dict[str, Any],
+    catalog: dict[str, Any],
+    *,
+    groups: list[dict[str, Any]] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
     node_tiles = {node_id: [] for node_id in level_config.get("node_tile_counts") or {}}
-    for group in level_config.get("groups") or []:
+    for group in (groups if groups is not None else level_config.get("groups") or []):
         expanded = []
         for tile_id, count in (group.get("tile_counts") or {}).items():
             for _index in range(max(0, int(count or 0))):
@@ -502,7 +540,33 @@ def _level_tiles(level_config: dict[str, Any], catalog: dict[str, Any]) -> dict[
                         "token_type": OCTOPUS_TOKEN_ID,
                     }
                 )
+            elif str(token.get("type") if isinstance(token, dict) else token) == COURTSHIP_TOKEN_ID:
+                node_tiles.setdefault(str(node_id), []).append(
+                    {
+                        "instance_id": f"courtship_{node_id}_{uuid.uuid4().hex}",
+                        "tile_id": COURTSHIP_TILE_ID,
+                        "face_up": True,
+                        "token_type": COURTSHIP_TOKEN_ID,
+                    }
+                )
     return node_tiles
+
+
+def _replace_tiles_for_size(next_state: dict[str, Any], size_index: int) -> bool:
+    tile_sets = list(next_state.get("level_tile_sets") or [])
+    eligible = [entry for entry in tile_sets if int(entry.get("size_index") or 0) <= size_index]
+    if not eligible:
+        return False
+    selected = max(eligible, key=lambda entry: int(entry.get("size_index") or 0))
+    selected_id = str(selected.get("id") or selected.get("size_index") or "")
+    if selected_id == str(next_state.get("active_tile_set_id") or ""):
+        return False
+    level_layout = next_state.get("level_layout") or {}
+    replacement = _level_tiles(level_layout, next_state.get("tile_catalog") or {}, groups=selected.get("groups") or [])
+    next_state["tiles"] = replacement
+    next_state["active_tile_set_id"] = selected_id
+    _apply_tile_visibility(next_state)
+    return True
 
 
 def _level_shelters(level_config: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -548,7 +612,8 @@ def _goldfish_state(room_id: str, *, level_id: str | None = None, mode: str = "g
     map_config = get_map(level_config["map_id"])
     _validate_map_config(map_config)
     tile_catalog = _build_tile_catalog()
-    starting_energy = max(0, min(32, int(level_config.get("starting_energy") or 3)))
+    max_energy = max(1, min(32, int(level_config.get("max_energy") or 32)))
+    starting_energy = max(0, min(max_energy, int(level_config.get("starting_energy") if level_config.get("starting_energy") is not None else 8)))
     starting_neurons = max(0, int(level_config.get("starting_neurons") or 0))
     surprise_deck_id = str(level_config.get("surprise_deck_id") or "")
     surprise_draw_pile = list(((tile_catalog.get("surprise_decks") or {}).get(surprise_deck_id) or {}).get("card_ids") or [])
@@ -564,6 +629,19 @@ def _goldfish_state(room_id: str, *, level_id: str | None = None, mode: str = "g
         "day_index": 1,
         "night_time_spent": 0,
         "night_time_total": max(1, int(level_config.get("night_duration_steps") or NIGHT_OVERRUN_CHUNKS)),
+        "max_nights": max(1, int(level_config.get("max_nights") or 5)),
+        "courtship_min_size_index": max(0, int(level_config.get("courtship_min_size_index") if level_config.get("courtship_min_size_index") is not None else 3)),
+        "courtship_min_energy": max(1, int(level_config.get("courtship_min_energy") or 8)),
+        "win_min_energy": max(1, int(level_config.get("win_min_energy") or 5)),
+        "size_deadline_night": max(1, int(level_config.get("size_deadline_night") or 4)),
+        "level_tile_sets": deepcopy(level_config.get("tile_sets") or []),
+        "active_tile_set_id": "base",
+        "level_layout": {
+            "node_tile_counts": deepcopy(level_config.get("node_tile_counts") or {}),
+            "node_group_ids": deepcopy(level_config.get("node_group_ids") or {}),
+            "groups": deepcopy(level_config.get("groups") or []),
+            "node_tokens": deepcopy(level_config.get("node_tokens") or {}),
+        },
         "selected_map_id": map_config["id"],
         "active_capability_id": None,
         "last_active_capability_id": None,
@@ -573,6 +651,7 @@ def _goldfish_state(room_id: str, *, level_id: str | None = None, mode: str = "g
             "node_id": str(level_config.get("poulpita_starting_node_id") or map_config["starting_node_id"]),
             "previous_node_id": None,
             "energy": starting_energy,
+            "max_energy": max_energy,
             "neurons": starting_neurons,
             "seashells": 0,
             "size_index": 0,
@@ -587,6 +666,13 @@ def _goldfish_state(room_id: str, *, level_id: str | None = None, mode: str = "g
         "surprise_deck_card_count": len(surprise_draw_pile),
         "surprise_deck_exhausted": not bool(surprise_draw_pile),
         "pending_surprise": None,
+        "courtship_completed": False,
+        "courtship_blocked_node_id": None,
+        "courtship_required": any(
+            str(token.get("type") if isinstance(token, dict) else token) == COURTSHIP_TOKEN_ID
+            for tokens in (level_config.get("node_tokens") or {}).values()
+            for token in tokens or []
+        ),
         "objectives": deepcopy(level_config.get("objectives") or []),
         "objective_progress": {"size_increases": 0, "found_shelter": False, "secured_shelter": False},
         "tile_catalog": tile_catalog,
@@ -649,6 +735,7 @@ def _project_state(state: dict[str, Any]) -> dict[str, Any]:
         tile_catalog["poulpita_panel"] = latest_catalog.get("poulpita_panel") or tile_catalog.get("poulpita_panel") or {}
         tile_catalog["surprise_cards"] = latest_catalog.get("surprise_cards") or tile_catalog.get("surprise_cards") or {}
         tile_catalog["surprise_decks"] = latest_catalog.get("surprise_decks") or tile_catalog.get("surprise_decks") or {}
+        tile_catalog["courtship_cards"] = latest_catalog.get("courtship_cards") or tile_catalog.get("courtship_cards") or {}
         tile_catalog["action_costs"] = latest_catalog.get("action_costs") or tile_catalog.get("action_costs") or {}
         tile_catalog["bot_settings"] = latest_catalog.get("bot_settings") or tile_catalog.get("bot_settings") or {}
     except Exception:
@@ -669,13 +756,17 @@ def _project_state(state: dict[str, Any]) -> dict[str, Any]:
         "bot_config": bot_config,
         "version": int(state["version"]),
         "phase": state["phase"],
+        "game_outcome": state.get("game_outcome"),
+        "game_over_reason": state.get("game_over_reason"),
         "level_id": state["level_id"],
         "selected_level_id": state.get("selected_level_id") or state.get("level_id"),
         "day_index": int(state.get("day_index") or 1),
         "night_time_spent": int(state.get("night_time_spent") or 0),
         "night_time_total": max(1, int(state.get("night_time_total") or NIGHT_OVERRUN_CHUNKS)),
+        "max_nights": max(1, int(state.get("max_nights") or 5)),
         "night_shelter_available_at": NIGHT_SHELTER_AVAILABLE_CHUNKS,
         "selected_map_id": state.get("selected_map_id") or "",
+        "poulpita_starting_node_id": state.get("poulpita_starting_node_id") or "",
         "active_capability_id": state.get("active_capability_id"),
         "last_active_capability_id": state.get("last_active_capability_id"),
         "focused_capability_id": state.get("focused_capability_id") or DEFAULT_FOCUSED_CAPABILITY_ID,
@@ -698,6 +789,8 @@ def _project_state(state: dict[str, Any]) -> dict[str, Any]:
         "tiles": projected_tiles,
         "shelters": _projected_shelters(state),
         "pending_surprise": deepcopy(state.get("pending_surprise")),
+        "courtship_completed": bool(state.get("courtship_completed")),
+        "courtship_blocked_node_id": state.get("courtship_blocked_node_id"),
         "objectives": _objective_status(state),
         "objective_progress": deepcopy(state.get("objective_progress") or {}),
         "tile_catalog": tile_catalog,
@@ -708,23 +801,27 @@ def _project_state(state: dict[str, Any]) -> dict[str, Any]:
 
 def _configured_action_cost(state: dict[str, Any], action_id: str) -> dict[str, int]:
     defaults = {
-        "gain_ap": {"ap_cost": 0, "time_cost": 0},
-        "move": {"ap_cost": 1, "time_cost": 1},
-        "interact": {"ap_cost": 1, "time_cost": 2},
-        "special_power": {"ap_cost": 1, "time_cost": 0},
+        "gain_ap": {"ap_cost": 0, "time_cost": 0, "neuron_cost": 0},
+        "move": {"ap_cost": 1, "time_cost": 1, "neuron_cost": 0},
+        "draw": {"ap_cost": 1, "time_cost": 1, "neuron_cost": 0},
+        "interact": {"ap_cost": 2, "time_cost": 2, "neuron_cost": 0},
+        "special_power": {"ap_cost": 2, "time_cost": 2, "neuron_cost": 1},
     }
     raw = ((state.get("tile_catalog") or {}).get("action_costs") or {}).get(action_id) or {}
-    fallback = defaults.get(action_id) or {"ap_cost": 0, "time_cost": 0}
+    fallback = defaults.get(action_id) or {"ap_cost": 0, "time_cost": 0, "neuron_cost": 0}
     return {
         "ap_cost": max(0, int(raw.get("ap_cost") if raw.get("ap_cost") is not None else fallback["ap_cost"])),
         "time_cost": max(0, int(raw.get("time_cost") if raw.get("time_cost") is not None else fallback["time_cost"])),
+        "neuron_cost": max(0, int(raw.get("neuron_cost") if raw.get("neuron_cost") is not None else fallback["neuron_cost"])),
     }
 
 
-def _require_active_action(service: "GameRoomService", state: dict[str, Any], command_id: str, capability_id: str, *, ap_cost: int = 0) -> dict[str, Any]:
+def _require_active_action(service: "GameRoomService", state: dict[str, Any], command_id: str, capability_id: str, *, ap_cost: int = 0, neuron_cost: int = 0) -> dict[str, Any]:
     capability = _require_active_control(service, state, command_id, capability_id)
     if int(capability.get("pa") or 0) < ap_cost:
         service._reject(state, command_id, "insufficient_pa", f"This action costs {ap_cost} AP.")
+    if int((state.get("poulpita") or {}).get("neurons") or 0) < neuron_cost:
+        service._reject(state, command_id, "insufficient_neurons", f"This action costs {neuron_cost} neurons.")
     if int(capability.get("actions_taken_this_control") or 0) >= int(capability.get("max_actions_per_control") or 3):
         service._reject(state, command_id, "action_limit_reached", "This capability has already taken all actions during this control.")
     return capability
@@ -746,14 +843,14 @@ def _reset_night_runtime(next_state: dict[str, Any]) -> None:
     next_state["active_capability_id"] = None
     next_state.setdefault("poulpita", {})["size_upgraded_today"] = False
     for capability in (next_state.get("capabilities") or {}).values():
-        capability["pa"] = 0
         capability["control_takes_this_night"] = 0
         capability["actions_taken_this_control"] = 0
 
 
-def _spend_action(next_state: dict[str, Any], capability_id: str, *, ap_cost: int = 0, time_cost: int = 0) -> None:
+def _spend_action(next_state: dict[str, Any], capability_id: str, *, ap_cost: int = 0, time_cost: int = 0, neuron_cost: int = 0) -> None:
     capability = next_state["capabilities"][capability_id]
     capability["pa"] = int(capability.get("pa") or 0) - ap_cost
+    next_state.setdefault("poulpita", {})["neurons"] = max(0, int(next_state.setdefault("poulpita", {}).get("neurons") or 0) - neuron_cost)
     capability["actions_taken_this_control"] = int(capability.get("actions_taken_this_control") or 0) + 1
     if time_cost > 0:
         _advance_night_clock(next_state, chunks=time_cost)
@@ -894,9 +991,19 @@ def _objective_status(state: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _mark_game_won_if_needed(next_state: dict[str, Any]) -> bool:
     objectives = next_state.get("objectives") or []
-    if not objectives or next_state.get("phase") == PHASE_FINISHED:
+    if next_state.get("phase") == PHASE_FINISHED:
         return False
-    if not all(objective.get("completed") for objective in _objective_status(next_state)):
+    if objectives and not all(objective.get("completed") for objective in _objective_status(next_state)):
+        return False
+    if next_state.get("courtship_required"):
+        current_node_id = str((next_state.get("poulpita") or {}).get("node_id") or "")
+        if not next_state.get("courtship_completed"):
+            return False
+        if not _shelter_entry(next_state, current_node_id).get("secure"):
+            return False
+        if int((next_state.get("poulpita") or {}).get("energy") or 0) < int(next_state.get("win_min_energy") or 5):
+            return False
+    elif not objectives:
         return False
     next_state["phase"] = PHASE_FINISHED
     next_state["game_outcome"] = "won"
@@ -919,6 +1026,50 @@ def _find_tile_instance(state: dict[str, Any], tile_instance_id: str) -> tuple[s
             if tile_instance.get("instance_id") == tile_instance_id:
                 return node_id, tile_instance
     return None, None
+
+
+def _maybe_start_courtship_interaction(next_state: dict[str, Any]) -> bool:
+    if next_state.get("interaction") or next_state.get("pending_surprise") or next_state.get("courtship_completed"):
+        return False
+    current_node_id = str((next_state.get("poulpita") or {}).get("node_id") or "")
+    if not current_node_id or str(next_state.get("courtship_blocked_node_id") or "") == current_node_id:
+        return False
+    courtship_instance = next(
+        (
+            instance
+            for instance in (next_state.get("tiles") or {}).get(current_node_id, []) or []
+            if str(instance.get("token_type") or "") == COURTSHIP_TOKEN_ID
+        ),
+        None,
+    )
+    if not courtship_instance or _compulsory_tile_choices(next_state, current_node_id):
+        return False
+    if int((next_state.get("poulpita") or {}).get("size_index") or 0) < int(next_state.get("courtship_min_size_index") if next_state.get("courtship_min_size_index") is not None else 3):
+        return False
+    if int((next_state.get("poulpita") or {}).get("energy") or 0) < int(next_state.get("courtship_min_energy") or 8):
+        return False
+    courtship_cards = list(((next_state.get("tile_catalog") or {}).get("courtship_cards") or {}).values())
+    if not courtship_cards:
+        return False
+    next_state["interaction"] = {
+        "tile_instance_id": courtship_instance.get("instance_id"),
+        "tile_id": COURTSHIP_TILE_ID,
+        "node_id": current_node_id,
+        "initiator_capability_id": next_state.get("active_capability_id"),
+        "initiator_confirmed": False,
+        "played_cards": [],
+        "requirement_reduction": 1 if next_state.get("force_reduces_next_interaction") else 0,
+        "courtship_card": deepcopy(random.choice(courtship_cards)),
+    }
+    next_state["force_reduces_next_interaction"] = False
+    next_state.setdefault("event_log", []).append(
+        {
+            "event_id": f"evt_{uuid.uuid4().hex}",
+            "type": "courtship_started",
+            "created_at": _now_iso(),
+        }
+    )
+    return True
 
 
 def _compulsory_tile_choices(state: dict[str, Any], node_id: str) -> list[dict[str, Any]]:
@@ -1095,6 +1246,17 @@ def _criteria_met(required: list[str], played: list[str]) -> bool:
     return not remaining
 
 
+def _criteria_met_with_reduction(required: list[str], played: list[str], reduction: int = 0) -> bool:
+    if reduction <= 0:
+        return _criteria_met(required, played)
+    if len(required) <= reduction:
+        return True
+    return any(
+        _criteria_met(required[:index] + required[index + 1 :], played)
+        for index in range(len(required))
+    )
+
+
 def _shell_requirement_count(tile: dict[str, Any]) -> int:
     return max(0, int(tile.get("shell_requirement_count") or 0))
 
@@ -1119,7 +1281,8 @@ def _apply_effects(next_state: dict[str, Any], effects: list[dict[str, Any]], *,
         effect_type = str(effect.get("type") or "")
         amount = int(effect.get("amount") or 0)
         if effect_type == "gain_energy":
-            next_state["poulpita"]["energy"] = int(next_state["poulpita"].get("energy") or 0) + amount
+            max_energy = max(1, int(next_state["poulpita"].get("max_energy") or 32))
+            next_state["poulpita"]["energy"] = min(max_energy, int(next_state["poulpita"].get("energy") or 0) + amount)
         elif effect_type == "gain_neurons":
             next_state["poulpita"]["neurons"] = int(next_state["poulpita"].get("neurons") or 0) + amount
         elif effect_type == "gain_seashells":
@@ -1223,7 +1386,8 @@ def _apply_surprise_effects(next_state: dict[str, Any], effects: list[dict[str, 
         elif effect_type == "advance_night":
             _advance_night_clock(next_state, chunks=amount)
         elif effect_type == "gain_energy":
-            next_state["poulpita"]["energy"] = int(next_state["poulpita"].get("energy") or 0) + amount
+            max_energy = max(1, int(next_state["poulpita"].get("max_energy") or 32))
+            next_state["poulpita"]["energy"] = min(max_energy, int(next_state["poulpita"].get("energy") or 0) + amount)
         elif effect_type == "lose_energy":
             _damage_poulpita(next_state, amount=amount, reason="surprise_card")
             if int((next_state.get("poulpita") or {}).get("energy") or 0) <= 0:
@@ -1889,19 +2053,32 @@ class GameRoomService:
             capability_id = str(payload.get("capability_id") or "")
             target_node_id = str(payload.get("target_node_id") or "")
             action_cost = _configured_action_cost(state, "move")
-            _require_active_action(self, state, command_id, capability_id, ap_cost=action_cost["ap_cost"])
+            _require_active_action(self, state, command_id, capability_id, ap_cost=action_cost["ap_cost"], neuron_cost=action_cost["neuron_cost"])
             nodes = state["map"]["nodes"]
             if target_node_id not in nodes:
                 self._reject(state, command_id, "unknown_target_node", "Target node does not exist.")
             current_node_id = str(state["poulpita"]["node_id"])
+            active_interaction = state.get("interaction") or {}
+            if active_interaction and not active_interaction.get("courtship_card"):
+                self._reject(state, command_id, "interaction_in_progress", "Resolve the active interaction before moving.")
+            if _compulsory_tile_choices(state, current_node_id):
+                self._reject(state, command_id, "compulsory_interaction_blocks_move", "Resolve compulsory interactions before moving.")
             if target_node_id not in (state["map"]["adjacency"].get(current_node_id) or []):
                 self._reject(state, command_id, "non_adjacent_node", "Poulpita can move only to an adjacent node.")
             next_state = deepcopy(state)
+            if (next_state.get("interaction") or {}).get("courtship_card"):
+                for played_card in next_state["interaction"].get("played_cards") or []:
+                    owner = (next_state.get("capabilities") or {}).get(played_card.get("capability_id"))
+                    if owner is not None:
+                        owner.setdefault("discard", []).append(deepcopy(played_card))
+                next_state["interaction"] = None
             next_state["version"] = int(state["version"]) + 1
             next_state["poulpita"]["previous_node_id"] = current_node_id
             next_state["poulpita"]["node_id"] = target_node_id
-            _spend_action(next_state, capability_id, ap_cost=action_cost["ap_cost"], time_cost=action_cost["time_cost"])
+            next_state["courtship_blocked_node_id"] = None
+            _spend_action(next_state, capability_id, ap_cost=action_cost["ap_cost"], time_cost=action_cost["time_cost"], neuron_cost=action_cost["neuron_cost"])
             _apply_tile_visibility(next_state)
+            _maybe_start_courtship_interaction(next_state)
             if _has_shelter(next_state, target_node_id):
                 next_state.setdefault("objective_progress", {})["found_shelter"] = True
                 _mark_game_won_if_needed(next_state)
@@ -2102,7 +2279,8 @@ class GameRoomService:
                 self._reject(state, command_id, "max_size_reached", "Poulpita is already at the maximum configured size.")
             next_size = sizes[next_size_index] or {}
             base_cost = max(1, int(next_size.get("energy_cost") or 1))
-            cost = max(0, base_cost - (1 if _current_shelter_secure(state) else 0))
+            shelter_shells = int(_shelter_entry(state, (state.get("poulpita") or {}).get("node_id")).get("seashells") or 0)
+            cost = max(0, base_cost - max(0, shelter_shells - 2))
             current_energy = int(poulpita.get("energy") or 0)
             if cost > 0 and current_energy - cost <= 0:
                 self._reject(state, command_id, "insufficient_energy", "Poulpita must have enough energy and cannot spend down to 0.")
@@ -2112,6 +2290,7 @@ class GameRoomService:
             next_state["poulpita"]["size_upgraded_today"] = True
             next_state["version"] = int(state["version"]) + 1
             next_state.setdefault("objective_progress", {})["size_increases"] = int((next_state.get("objective_progress") or {}).get("size_increases") or 0) + 1
+            _replace_tiles_for_size(next_state, next_size_index)
             _mark_game_won_if_needed(next_state)
             event = {
                 "event_id": f"evt_{uuid.uuid4().hex}",
@@ -2202,6 +2381,13 @@ class GameRoomService:
             if state["phase"] != PHASE_DAY:
                 self._reject(state, command_id, "phase_not_day", "Day can be ended only during the day.")
             next_state = deepcopy(state)
+            if int(state.get("day_index") or 1) >= int(state.get("max_nights") or 5):
+                next_state["version"] = int(state["version"]) + 1
+                _mark_game_lost_if_needed(next_state, reason="maximum_nights_reached")
+                event = next_state["event_log"][-1]
+                event["command_id"] = command_id
+                event["version"] = int(next_state["version"])
+                return next_state, [event]
             next_state["phase"] = PHASE_NIGHT_IDLE
             next_state["day_index"] = int(state.get("day_index") or 1) + 1
             next_state["night_time_spent"] = 0
@@ -2209,7 +2395,6 @@ class GameRoomService:
             next_state["last_active_capability_id"] = None
             next_state.setdefault("poulpita", {})["size_upgraded_today"] = False
             for capability in (next_state.get("capabilities") or {}).values():
-                capability["pa"] = 0
                 capability["control_takes_this_night"] = 0
                 capability["actions_taken_this_control"] = 0
                 _apply_unmigrated_deck_exchange_upgrades(capability)
@@ -2226,19 +2411,115 @@ class GameRoomService:
             next_state.setdefault("event_log", []).append(event)
             return next_state, [event]
 
+        if command_type == "use_special_power":
+            payload = command.get("payload") or {}
+            if not isinstance(payload, dict):
+                self._reject(state, command_id, "invalid_payload", "Command payload must be an object.")
+            capability_id = str(payload.get("capability_id") or "")
+            action_cost = _configured_action_cost(state, "special_power")
+            _require_active_action(
+                self,
+                state,
+                command_id,
+                capability_id,
+                ap_cost=action_cost["ap_cost"],
+                neuron_cost=action_cost["neuron_cost"],
+            )
+            next_state = deepcopy(state)
+            current_node_id = str((state.get("poulpita") or {}).get("node_id") or "")
+            adjacency = (state.get("map") or {}).get("adjacency") or {}
+            details: dict[str, Any] = {}
+            if capability_id == "intelligence":
+                tile_instance_id = str(payload.get("tile_instance_id") or "")
+                node_id, tile_instance = _find_tile_instance(next_state, tile_instance_id)
+                if not tile_instance or str(node_id) not in [str(value) for value in adjacency.get(current_node_id, []) or []]:
+                    self._reject(state, command_id, "invalid_reveal_target", "Choose a hidden tile on an adjacent node.")
+                if tile_instance.get("face_up"):
+                    self._reject(state, command_id, "tile_already_revealed", "This tile is already revealed.")
+                tile_instance["face_up"] = True
+                details = {"tile_instance_id": tile_instance_id, "node_id": node_id}
+            elif capability_id == "agility":
+                drawn_by: list[str] = []
+                for target_id, target in (next_state.get("capabilities") or {}).items():
+                    _refill_draw_pile_from_discard(target)
+                    if target.get("draw_pile"):
+                        target.setdefault("hand", []).append(target["draw_pile"].pop(0))
+                        drawn_by.append(str(target_id))
+                details = {"drawn_by": drawn_by}
+            elif capability_id == "propulsion":
+                path = [str(node_id) for node_id in (payload.get("path") or [])]
+                if len(path) != 2 or path[0] not in (adjacency.get(current_node_id) or []) or path[1] not in (adjacency.get(path[0]) or []):
+                    self._reject(state, command_id, "invalid_propulsion_path", "Propulsion must follow exactly two connected edges.")
+                if path[1] == str(state.get("poulpita_starting_node_id") or ""):
+                    self._reject(state, command_id, "propulsion_starting_node_forbidden", "Propulsion cannot return Poulpita to the level starting node.")
+                next_state["poulpita"]["previous_node_id"] = current_node_id
+                next_state["poulpita"]["node_id"] = path[0]
+                _apply_tile_visibility(next_state)
+                next_state["poulpita"]["node_id"] = path[1]
+                next_state["courtship_blocked_node_id"] = None
+                _apply_tile_visibility(next_state)
+                details = {"path": path}
+            elif capability_id == "force":
+                next_state["force_reduces_next_interaction"] = True
+            elif capability_id == "camouflage":
+                target_node_id = str(payload.get("target_node_id") or "")
+                if target_node_id not in (adjacency.get(current_node_id) or []):
+                    self._reject(state, command_id, "non_adjacent_node", "Camouflage must move to an adjacent node.")
+                next_state["poulpita"]["previous_node_id"] = current_node_id
+                next_state["poulpita"]["node_id"] = target_node_id
+                next_state["courtship_blocked_node_id"] = None
+                _apply_tile_visibility(next_state)
+                details = {"target_node_id": target_node_id}
+            else:
+                self._reject(state, command_id, "unknown_special_power", "This ability has no special power.")
+            _spend_action(
+                next_state,
+                capability_id,
+                ap_cost=action_cost["ap_cost"],
+                time_cost=action_cost["time_cost"],
+                neuron_cost=action_cost["neuron_cost"],
+            )
+            next_state["version"] = int(state["version"]) + 1
+            _maybe_start_courtship_interaction(next_state)
+            destination_node_id = str((next_state.get("poulpita") or {}).get("node_id") or "")
+            if _has_shelter(next_state, destination_node_id):
+                next_state.setdefault("objective_progress", {})["found_shelter"] = True
+                _mark_game_won_if_needed(next_state)
+            _mark_game_lost_if_needed(next_state)
+            event = {
+                "event_id": f"evt_{uuid.uuid4().hex}",
+                "type": "special_power_used",
+                "command_id": command_id,
+                "capability_id": capability_id,
+                **details,
+                "version": int(next_state["version"]),
+                "created_at": _now_iso(),
+            }
+            next_state.setdefault("event_log", []).append(event)
+            if (
+                int(next_state.get("day_index") or 1) >= int(next_state.get("size_deadline_night") or 4)
+                and int((next_state.get("poulpita") or {}).get("size_index") or 0) < int(next_state.get("courtship_min_size_index") if next_state.get("courtship_min_size_index") is not None else 3)
+            ):
+                _mark_game_lost_if_needed(next_state, reason="size_deadline_missed")
+                loss_event = next_state["event_log"][-1]
+                loss_event["command_id"] = command_id
+                loss_event["version"] = int(next_state["version"])
+                return next_state, [event, loss_event]
+            return next_state, [event]
+
         if command_type == "collect_action_points":
             payload = command.get("payload") or {}
             if not isinstance(payload, dict):
                 self._reject(state, command_id, "invalid_payload", "Command payload must be an object.")
             capability_id = str(payload.get("capability_id") or "")
             action_cost = _configured_action_cost(state, "gain_ap")
-            _require_active_action(self, state, command_id, capability_id, ap_cost=action_cost["ap_cost"])
+            _require_active_action(self, state, command_id, capability_id, ap_cost=action_cost["ap_cost"], neuron_cost=action_cost["neuron_cost"])
             amount = random.randint(1, 6)
             next_state = deepcopy(state)
             next_state["version"] = int(state["version"]) + 1
             next_capability = next_state["capabilities"][capability_id]
             next_capability["pa"] = int(next_capability.get("pa") or 0) + amount
-            _spend_action(next_state, capability_id, ap_cost=action_cost["ap_cost"], time_cost=action_cost["time_cost"])
+            _spend_action(next_state, capability_id, ap_cost=action_cost["ap_cost"], time_cost=action_cost["time_cost"], neuron_cost=action_cost["neuron_cost"])
             _mark_game_lost_if_needed(next_state)
             event = {
                 "event_id": f"evt_{uuid.uuid4().hex}",
@@ -2257,8 +2538,8 @@ class GameRoomService:
             if not isinstance(payload, dict):
                 self._reject(state, command_id, "invalid_payload", "Command payload must be an object.")
             capability_id = str(payload.get("capability_id") or "")
-            action_cost = _configured_action_cost(state, "special_power")
-            capability = _require_active_action(self, state, command_id, capability_id, ap_cost=action_cost["ap_cost"])
+            action_cost = _configured_action_cost(state, "draw")
+            capability = _require_active_action(self, state, command_id, capability_id, ap_cost=action_cost["ap_cost"], neuron_cost=action_cost["neuron_cost"])
             discard_card_id = str(payload.get("discard_card_id") or "").strip()
             hand = capability.get("hand") or []
             hand_limit = int(capability.get("current_max_cards_in_hand") or 3)
@@ -2289,7 +2570,7 @@ class GameRoomService:
             card = next_capability["draw_pile"].pop(0)
             next_capability.setdefault("hand", []).append(card)
             _refill_draw_pile_from_discard(next_capability)
-            _spend_action(next_state, capability_id, ap_cost=action_cost["ap_cost"], time_cost=action_cost["time_cost"])
+            _spend_action(next_state, capability_id, ap_cost=action_cost["ap_cost"], time_cost=action_cost["time_cost"], neuron_cost=action_cost["neuron_cost"])
             next_state["version"] = int(state["version"]) + 1
             _mark_game_lost_if_needed(next_state)
             event = {
@@ -2313,7 +2594,6 @@ class GameRoomService:
             tile_instance_id = str(payload.get("tile_instance_id") or "")
             selected_card_ids = [str(card_id) for card_id in (payload.get("card_ids") or [])]
             action_cost = _configured_action_cost(state, "interact")
-            _require_active_action(self, state, command_id, capability_id, ap_cost=action_cost["ap_cost"])
             if state.get("interaction"):
                 self._reject(state, command_id, "interaction_already_active", "Resolve or fail the current interaction first.")
             node_id, tile_instance = _find_tile_instance(state, tile_instance_id)
@@ -2331,6 +2611,24 @@ class GameRoomService:
             tile = (tile_catalog.get("tiles") or {}).get(lookup_tile_id)
             if not tile:
                 self._reject(state, command_id, "unknown_tile", "Tile definition not found.")
+            is_courtship_instance = str(tile_instance.get("token_type") or "") == COURTSHIP_TOKEN_ID
+            courtship_card = None
+            if is_courtship_instance:
+                _require_active_control(self, state, command_id, capability_id)
+                if _compulsory_tile_choices(state, str(node_id)):
+                    self._reject(state, command_id, "courtship_blocked_by_threat", "Resolve compulsory threats before courtship.")
+                if int((state.get("poulpita") or {}).get("size_index") or 0) < int(state.get("courtship_min_size_index") if state.get("courtship_min_size_index") is not None else 3):
+                    self._reject(state, command_id, "courtship_size_too_small", "Poulpita has not reached the required courtship size.")
+                if int((state.get("poulpita") or {}).get("energy") or 0) < int(state.get("courtship_min_energy") or 8):
+                    self._reject(state, command_id, "courtship_energy_too_low", "Poulpita does not have enough energy for courtship.")
+                if str(state.get("courtship_blocked_node_id") or "") == str(node_id):
+                    self._reject(state, command_id, "courtship_requires_movement", "Move away before attempting courtship again.")
+                courtship_cards = list(((state.get("tile_catalog") or {}).get("courtship_cards") or {}).values())
+                if not courtship_cards:
+                    self._reject(state, command_id, "courtship_deck_empty", "No courtship cards are configured.")
+                courtship_card = deepcopy(random.choice(courtship_cards))
+            else:
+                _require_active_action(self, state, command_id, capability_id, ap_cost=action_cost["ap_cost"], neuron_cost=action_cost["neuron_cost"])
             compulsory_choices = _compulsory_tile_choices(state, str(node_id))
             if compulsory_choices and tile_instance_id not in {str(choice.get("instance_id")) for choice in compulsory_choices}:
                 highest_priority = max(int(choice.get("priority") or 0) for choice in compulsory_choices)
@@ -2345,7 +2643,9 @@ class GameRoomService:
                         f"A compulsory interaction with priority {highest_priority} must be resolved first.",
                     )
             capability = (state.get("capabilities") or {}).get(capability_id) or {}
-            if tile.get("token_type") == OCTOPUS_TOKEN_ID:
+            if is_courtship_instance:
+                pass
+            elif tile.get("token_type") == OCTOPUS_TOKEN_ID:
                 allowed_initiators = tile.get("initiator_capability_ids")
                 if allowed_initiators is None:
                     allowed_initiators = list((state.get("capabilities") or {}).keys())
@@ -2365,19 +2665,24 @@ class GameRoomService:
                 "tile_id": lookup_tile_id,
                 "node_id": node_id,
                 "initiator_capability_id": capability_id,
+                "initiator_confirmed": False,
                 "played_cards": [],
+                "requirement_reduction": 1 if next_state.get("force_reduces_next_interaction") else 0,
+                "courtship_card": courtship_card,
             }
+            next_state["force_reduces_next_interaction"] = False
             if payload.get("auto_select_cards"):
                 selected_card_ids = _auto_selected_interaction_card_ids(
                     next_state,
                     capability_id,
-                    list(tile.get("interaction_ids") or []),
+                    list((courtship_card or {}).get("interaction_ids") or tile.get("interaction_ids") or []),
                 )
             try:
                 _sync_interaction_cards(next_state, capability_id, selected_card_ids)
             except ValueError as exc:
                 self._reject(state, command_id, "invalid_selected_cards", str(exc))
-            _spend_action(next_state, capability_id, ap_cost=action_cost["ap_cost"], time_cost=action_cost["time_cost"])
+            if not is_courtship_instance:
+                _spend_action(next_state, capability_id, ap_cost=action_cost["ap_cost"], time_cost=action_cost["time_cost"], neuron_cost=action_cost["neuron_cost"])
             next_state["version"] = int(state["version"]) + 1
             _mark_game_lost_if_needed(next_state)
             event = {
@@ -2398,10 +2703,19 @@ class GameRoomService:
                 self._reject(state, command_id, "invalid_payload", "Command payload must be an object.")
             capability_id = str(payload.get("capability_id") or "")
             card_id = str(payload.get("card_id") or "")
-            if capability_id != state.get("active_capability_id"):
-                self._reject(state, command_id, "not_active_capability", "Only the active capability can play or withdraw cards.")
             if not state.get("interaction"):
                 self._reject(state, command_id, "no_active_interaction", "No interaction is active.")
+            interaction = state["interaction"]
+            if (
+                capability_id != str(interaction.get("initiator_capability_id") or "")
+                and not interaction.get("initiator_confirmed", True)
+            ):
+                self._reject(
+                    state,
+                    command_id,
+                    "initiator_confirmation_required",
+                    "The initiating ability must confirm its cards before support cards can be committed.",
+                )
             next_state = deepcopy(state)
             next_interaction = next_state["interaction"]
             capability = next_state["capabilities"].get(capability_id)
@@ -2440,9 +2754,14 @@ class GameRoomService:
                 self._reject(state, command_id, "no_active_interaction", "No interaction is active.")
             interaction = state["interaction"]
             tile = (state.get("tile_catalog") or {}).get("tiles", {}).get(interaction.get("tile_id")) or {}
+            required_interaction_ids = list(
+                ((interaction.get("courtship_card") or {}).get("interaction_ids"))
+                or tile.get("interaction_ids")
+                or []
+            )
             if (
                 command_type == "fail_interaction"
-                and not (tile.get("interaction_ids") or [])
+                and not required_interaction_ids
                 and max(0, int(tile.get("shell_requirement_count") or 0)) == 0
             ):
                 self._reject(
@@ -2458,23 +2777,48 @@ class GameRoomService:
                 payload = command.get("payload") or {}
                 if payload and not isinstance(payload, dict):
                     self._reject(state, command_id, "invalid_payload", "Command payload must be an object.")
-                capability_id = str((payload or {}).get("capability_id") or "")
+                submitted_capability_id = str((payload or {}).get("capability_id") or "")
+                capability_id = str(
+                    submitted_capability_id
+                    or interaction.get("initiator_capability_id")
+                    or state.get("active_capability_id")
+                    or ""
+                )
+                if capability_id and capability_id not in (state.get("capabilities") or {}):
+                    self._reject(state, command_id, "unknown_capability", "Unknown capability.")
+                initiator_id = str(interaction.get("initiator_capability_id") or "")
+                if capability_id != initiator_id and not interaction.get("initiator_confirmed", True):
+                    self._reject(
+                        state,
+                        command_id,
+                        "initiator_confirmation_required",
+                        "The initiating ability must confirm its cards before another ability can support.",
+                    )
                 selected_card_ids = [str(card_id) for card_id in ((payload or {}).get("card_ids") or [])]
-                if capability_id:
-                    if capability_id != state.get("active_capability_id"):
-                        self._reject(state, command_id, "not_active_capability", "Only the active capability can confirm cards.")
+                should_sync_cards = bool(
+                    submitted_capability_id
+                    or (payload or {}).get("auto_select_cards")
+                    or "card_ids" in (payload or {})
+                )
+                if capability_id and should_sync_cards:
                     if (payload or {}).get("auto_select_cards"):
                         selected_card_ids = _auto_selected_interaction_card_ids(
                             next_state,
                             capability_id,
-                            list(tile.get("interaction_ids") or []) + list(tile.get("counter_attack_interaction_ids") or []),
+                            required_interaction_ids + list(tile.get("counter_attack_interaction_ids") or []),
                         )
                     try:
                         _sync_interaction_cards(next_state, capability_id, selected_card_ids)
                     except ValueError as exc:
                         self._reject(state, command_id, "invalid_selected_cards", str(exc))
+                if capability_id == initiator_id:
+                    next_state["interaction"]["initiator_confirmed"] = True
                 played = _played_interactions(next_state)
-                success = _criteria_met(tile.get("interaction_ids") or [], played) and _shell_requirement_met(next_state, tile)
+                success = _criteria_met_with_reduction(
+                    required_interaction_ids,
+                    played,
+                    int(interaction.get("requirement_reduction") or 0),
+                ) and _shell_requirement_met(next_state, tile)
                 counter_required = tile.get("counter_attack_interaction_ids") or []
                 counter_success = success and bool(counter_required) and _criteria_met(counter_required, played)
                 if not success:
@@ -2491,6 +2835,9 @@ class GameRoomService:
                     }
                     next_state.setdefault("event_log", []).append(event)
                     return next_state, [event]
+                if interaction.get("courtship_card"):
+                    next_state["courtship_completed"] = True
+                    next_state["courtship_blocked_node_id"] = None
                 _spend_required_shells(next_state, tile)
                 _apply_effects(next_state, tile.get("success_effects") or [], node_id=str(interaction.get("node_id") or ""))
                 if counter_success:
@@ -2504,7 +2851,36 @@ class GameRoomService:
                 payload = command.get("payload") or {}
                 if payload and not isinstance(payload, dict):
                     self._reject(state, command_id, "invalid_payload", "Command payload must be an object.")
-                failure_effects = tile.get("failure_effects") or []
+                if interaction.get("courtship_card"):
+                    retry = bool((payload or {}).get("spend_energy_to_retry"))
+                    if retry:
+                        if int((next_state.get("poulpita") or {}).get("energy") or 0) <= 1:
+                            self._reject(state, command_id, "courtship_retry_energy_too_low", "Poulpita cannot spend its last energy.")
+                        _damage_poulpita(next_state, amount=1, reason="courtship_retry")
+                        courtship_cards = list(((next_state.get("tile_catalog") or {}).get("courtship_cards") or {}).values())
+                        if not courtship_cards:
+                            self._reject(state, command_id, "courtship_deck_empty", "No courtship cards are configured.")
+                        for card in interaction.get("played_cards") or []:
+                            owner = (next_state.get("capabilities") or {}).get(card.get("capability_id"))
+                            if owner is not None:
+                                owner.setdefault("discard", []).append(deepcopy(card))
+                        next_state["interaction"]["played_cards"] = []
+                        next_state["interaction"]["courtship_card"] = deepcopy(random.choice(courtship_cards))
+                        next_state["interaction"]["initiator_confirmed"] = False
+                        next_state["version"] = int(state["version"]) + 1
+                        event = {
+                            "event_id": f"evt_{uuid.uuid4().hex}",
+                            "type": "courtship_retried",
+                            "command_id": command_id,
+                            "version": int(next_state["version"]),
+                            "created_at": _now_iso(),
+                        }
+                        next_state.setdefault("event_log", []).append(event)
+                        return next_state, [event]
+                    next_state["courtship_blocked_node_id"] = str(interaction.get("node_id") or "")
+                    failure_effects = []
+                else:
+                    failure_effects = tile.get("failure_effects") or []
                 free_move_target_node_id = str((payload or {}).get("target_node_id") or "")
                 if any(effect.get("type") == "pulpita_move_free" for effect in failure_effects):
                     current_node_id = str(state.get("poulpita", {}).get("node_id") or "")
@@ -2540,6 +2916,7 @@ class GameRoomService:
                         }
                     )
             next_state["interaction"] = None
+            _maybe_start_courtship_interaction(next_state)
             next_state["version"] = int(state["version"]) + 1
             event = {
                 "event_id": f"evt_{uuid.uuid4().hex}",

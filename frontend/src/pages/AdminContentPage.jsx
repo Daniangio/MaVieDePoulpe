@@ -30,6 +30,7 @@ const emptyTile = {
 };
 const emptySurpriseCard = { id: "", name: "", image_url: "", costs: [], effects: [] };
 const emptySurpriseDeck = { id: "", name: "", card_ids: [] };
+const emptyCourtshipCard = { id: "", name: "", image_url: "", interaction_ids: [] };
 const emptyPlayerBoard = {
   id: "",
   name: "",
@@ -39,6 +40,7 @@ const emptyPlayerBoard = {
   hand_size_upgrades: [],
   actions_per_control: 3,
   control_takes_per_night: 3,
+  initial_ap: 5,
 };
 
 const successEffectOptions = [
@@ -91,6 +93,7 @@ const contentTabs = [
   ["bot_settings", "Bot"],
   ["surprise_cards", "Surprise Cards"],
   ["surprise_decks", "Surprise Decks"],
+  ["courtship_cards", "Courtship Cards"],
   ["player_boards", "Player Boards"],
   ["tokens", "Tokens"],
   ["poulpita_panel", "Poulpita Panel"],
@@ -111,6 +114,7 @@ const importSummaryLabels = {
   levels: "Levels",
   surprise_cards: "Surprise Cards",
   surprise_decks: "Surprise Decks",
+  courtship_cards: "Courtship Cards",
   player_boards: "Player Boards",
   tokens: "Tokens",
   action_costs: "Action Costs",
@@ -121,15 +125,17 @@ const importSummaryLabels = {
 const actionCostLabels = {
   gain_ap: "Gain AP",
   move: "Move",
+  draw: "Draw action card",
   interact: "Interact",
   special_power: "Use special power",
 };
 
 const defaultActionCosts = {
-  gain_ap: { ap_cost: 0, time_cost: 0 },
-  move: { ap_cost: 1, time_cost: 1 },
-  interact: { ap_cost: 1, time_cost: 2 },
-  special_power: { ap_cost: 1, time_cost: 0 },
+  gain_ap: { ap_cost: 0, time_cost: 0, neuron_cost: 0 },
+  move: { ap_cost: 1, time_cost: 1, neuron_cost: 0 },
+  draw: { ap_cost: 1, time_cost: 1, neuron_cost: 0 },
+  interact: { ap_cost: 2, time_cost: 2, neuron_cost: 0 },
+  special_power: { ap_cost: 2, time_cost: 2, neuron_cost: 1 },
 };
 
 const botAbilityOptions = [
@@ -213,7 +219,7 @@ const formatImportSummary = (result) => {
 
 const AdminContentPage = () => {
   const { token, user } = useStore();
-  const [content, setContent] = useState({ categories: [], card_categories: [], interactions: [], events: [], tiles: [], levels: [], surprise_cards: [], surprise_decks: [], player_boards: [], tokens: [], poulpita_panel: null, action_costs: defaultActionCosts, bot_settings: defaultBotSettings, cards: [] });
+  const [content, setContent] = useState({ categories: [], card_categories: [], interactions: [], events: [], tiles: [], levels: [], surprise_cards: [], surprise_decks: [], courtship_cards: [], player_boards: [], tokens: [], poulpita_panel: null, action_costs: defaultActionCosts, bot_settings: defaultBotSettings, cards: [] });
   const [categoryName, setCategoryName] = useState("");
   const [categoryCompulsory, setCategoryCompulsory] = useState(false);
   const [interactionDraft, setInteractionDraft] = useState(emptyInteraction);
@@ -221,6 +227,7 @@ const AdminContentPage = () => {
   const [tileDraft, setTileDraft] = useState(emptyTile);
   const [surpriseCardDraft, setSurpriseCardDraft] = useState(emptySurpriseCard);
   const [surpriseDeckDraft, setSurpriseDeckDraft] = useState(emptySurpriseDeck);
+  const [courtshipCardDraft, setCourtshipCardDraft] = useState(emptyCourtshipCard);
   const [playerBoardDraft, setPlayerBoardDraft] = useState(emptyPlayerBoard);
   const [poulpitaPanelDraft, setPoulpitaPanelDraft] = useState(null);
   const [poulpitaPanelPreviewUrl, setPoulpitaPanelPreviewUrl] = useState("");
@@ -232,6 +239,7 @@ const AdminContentPage = () => {
   const eventImageRef = useRef(null);
   const tokenImageRefs = useRef({});
   const surpriseCardImageRef = useRef(null);
+  const courtshipCardImageRef = useRef(null);
   const poulpitaPanelImageRef = useRef(null);
   const importFileRef = useRef(null);
 
@@ -343,6 +351,10 @@ const AdminContentPage = () => {
     if (surpriseCardImageRef.current) surpriseCardImageRef.current.value = "";
   };
   const resetSurpriseDeck = () => setSurpriseDeckDraft(emptySurpriseDeck);
+  const resetCourtshipCard = () => {
+    setCourtshipCardDraft(emptyCourtshipCard);
+    if (courtshipCardImageRef.current) courtshipCardImageRef.current.value = "";
+  };
 
   const saveCategory = async (category = null) => {
     setBusy(true);
@@ -494,6 +506,28 @@ const AdminContentPage = () => {
     }
   };
 
+  const saveCourtshipCard = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const form = new FormData();
+      form.set("name", courtshipCardDraft.name);
+      form.set("interaction_ids_json", JSON.stringify(courtshipCardDraft.interaction_ids || []));
+      const file = courtshipCardImageRef.current?.files?.[0] || null;
+      if (file) form.set("image", file);
+      await request(courtshipCardDraft.id ? `/api/admin/content/courtship-cards/${courtshipCardDraft.id}` : "/api/admin/content/courtship-cards", {
+        method: courtshipCardDraft.id ? "PUT" : "POST",
+        body: form,
+      });
+      resetCourtshipCard();
+      await loadContent();
+    } catch (saveError) {
+      setError(saveError.message || "Failed to save courtship card.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const savePlayerBoard = async () => {
     if (!playerBoardDraft.id) return;
     setBusy(true);
@@ -507,6 +541,7 @@ const AdminContentPage = () => {
       form.set("hand_size_upgrades_json", JSON.stringify(playerBoardDraft.hand_size_upgrades || []));
       form.set("actions_per_control", String(playerBoardDraft.actions_per_control || 3));
       form.set("control_takes_per_night", String(playerBoardDraft.control_takes_per_night || 3));
+      form.set("initial_ap", String(Math.max(0, Number(playerBoardDraft.initial_ap ?? 5))));
       await request(`/api/admin/content/player-boards/${playerBoardDraft.id}`, { method: "PUT", body: form });
       await loadContent();
     } catch (saveError) {
@@ -581,7 +616,17 @@ const AdminContentPage = () => {
     try {
       const form = new FormData();
       form.set("zones_json", JSON.stringify(poulpitaPanelDraft.zones || {}));
-      form.set("sizes_json", JSON.stringify(poulpitaPanelDraft.sizes || []));
+      const sizeImageIndices = [];
+      const serializedSizes = (poulpitaPanelDraft.sizes || []).map((size, index) => {
+        const { _image_file, _preview_url, image_url, uses_previous_image, ...persistedSize } = size;
+        if (_image_file) {
+          sizeImageIndices.push(index);
+          form.append("size_images", _image_file);
+        }
+        return persistedSize;
+      });
+      form.set("sizes_json", JSON.stringify(serializedSizes));
+      form.set("size_image_indices_json", JSON.stringify(sizeImageIndices));
       if (poulpitaPanelDraft.image_width) form.set("image_width", String(poulpitaPanelDraft.image_width));
       if (poulpitaPanelDraft.image_height) form.set("image_height", String(poulpitaPanelDraft.image_height));
       const file = poulpitaPanelImageRef.current?.files?.[0] || null;
@@ -589,6 +634,9 @@ const AdminContentPage = () => {
       await request("/api/admin/content/poulpita-panel", { method: "PUT", body: form });
       if (poulpitaPanelImageRef.current) poulpitaPanelImageRef.current.value = "";
       if (poulpitaPanelPreviewUrl) URL.revokeObjectURL(poulpitaPanelPreviewUrl);
+      for (const size of poulpitaPanelDraft.sizes || []) {
+        if (size._preview_url) URL.revokeObjectURL(size._preview_url);
+      }
       setPoulpitaPanelPreviewUrl("");
       await loadContent();
     } catch (saveError) {
@@ -877,6 +925,20 @@ const AdminContentPage = () => {
         />
       ) : null}
 
+      {activeTab === "courtship_cards" ? (
+        <CourtshipCardEditor
+          busy={busy}
+          cards={content.courtship_cards || []}
+          deleteItem={deleteItem}
+          draft={courtshipCardDraft}
+          imageRef={courtshipCardImageRef}
+          interactions={content.interactions || []}
+          reset={resetCourtshipCard}
+          save={saveCourtshipCard}
+          setDraft={setCourtshipCardDraft}
+        />
+      ) : null}
+
       {activeTab === "player_boards" ? (
         <PlayerBoardEditor
           boards={content.player_boards || []}
@@ -1091,7 +1153,7 @@ const ActionCostEditor = ({ actionCosts, onSave, busy }) => {
         {Object.entries(actionCostLabels).map(([actionId, label]) => (
           <article className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3" key={actionId}>
             <h3 className="text-sm font-semibold text-teal-950">{label}</h3>
-            <div className="mt-3 grid grid-cols-2 gap-2">
+            <div className="mt-3 grid grid-cols-3 gap-2">
               <label className="text-xs text-slate-600">
                 AP cost
                 <input className={`${input} mt-1`} min="0" type="number" value={Number(draft[actionId]?.ap_cost || 0)} onChange={(event) => updateCost(actionId, "ap_cost", event.target.value)} />
@@ -1099,6 +1161,10 @@ const ActionCostEditor = ({ actionCosts, onSave, busy }) => {
               <label className="text-xs text-slate-600">
                 Time steps
                 <input className={`${input} mt-1`} min="0" type="number" value={Number(draft[actionId]?.time_cost || 0)} onChange={(event) => updateCost(actionId, "time_cost", event.target.value)} />
+              </label>
+              <label className="text-xs text-slate-600">
+                Neurons
+                <input className={`${input} mt-1`} min="0" type="number" value={Number(draft[actionId]?.neuron_cost || 0)} onChange={(event) => updateCost(actionId, "neuron_cost", event.target.value)} />
               </label>
             </div>
           </article>
@@ -1506,6 +1572,40 @@ const SurpriseDeckEditor = ({ busy, deleteItem, draft, onSetCardCount, reset, sa
   );
 };
 
+const CourtshipCardEditor = ({ busy, cards, deleteItem, draft, imageRef, interactions, reset, save, setDraft }) => {
+  const addSymbol = () => {
+    const interactionId = interactions[0]?.id || "";
+    if (interactionId) setDraft((current) => ({ ...current, interaction_ids: [...(current.interaction_ids || []), interactionId] }));
+  };
+  return (
+    <section className="grid gap-4 lg:grid-cols-[24rem_1fr]">
+      <div className={panel}>
+        <div className="flex items-center justify-between gap-2"><h2 className="font-semibold text-teal-950">Courtship card</h2><button className={subtleButton} onClick={reset} type="button">New</button></div>
+        <label className="mt-4 block text-sm text-slate-600">Name<input className={`${input} mt-1`} value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} /></label>
+        <label className="mt-3 block text-sm text-slate-600">Image<input accept="image/*" className="mt-1 block w-full text-sm" ref={imageRef} type="file" /></label>
+        <div className="mt-4">
+          <div className="flex items-center justify-between"><h3 className="text-sm font-semibold text-teal-950">Required symbols</h3><button className={subtleButton} onClick={addSymbol} type="button">Add symbol</button></div>
+          <div className="mt-2 space-y-2">
+            {(draft.interaction_ids || []).map((interactionId, index) => (
+              <div className="flex gap-2" key={`${index}-${interactionId}`}>
+                <select className={input} value={interactionId} onChange={(event) => setDraft((current) => ({ ...current, interaction_ids: (current.interaction_ids || []).map((value, itemIndex) => itemIndex === index ? event.target.value : value) }))}>{interactions.map((interaction) => <option key={interaction.id} value={interaction.id}>{interaction.name}</option>)}</select>
+                <button className={dangerButton} onClick={() => setDraft((current) => ({ ...current, interaction_ids: (current.interaction_ids || []).filter((_value, itemIndex) => itemIndex !== index) }))} type="button">Remove</button>
+              </div>
+            ))}
+          </div>
+        </div>
+        <button className={`${primaryButton} mt-4 w-full`} disabled={busy || !draft.name || !(draft.interaction_ids || []).length} onClick={save} type="button">{draft.id ? "Update" : "Create"} card</button>
+      </div>
+      <div className={panel}>
+        <h2 className="font-semibold text-teal-950">Courtship cards</h2>
+        <div className="mt-4 grid gap-3 md:grid-cols-2">
+          {cards.map((card) => <article className="rounded-md border border-cyan-100 bg-cyan-50/60 p-3" key={card.id}><div className="flex gap-3">{imageUrl(card) ? <img alt="" className="h-20 w-14 rounded object-cover" src={imageUrl(card)} /> : <div className="h-20 w-14 rounded bg-slate-100" />}<div className="min-w-0 flex-1"><h3 className="font-semibold text-teal-950">{card.name}</h3><p className="mt-1 text-xs text-slate-600">{(card.interaction_ids || []).map((id) => interactions.find((entry) => entry.id === id)?.name || id).join(", ")}</p></div></div><div className="mt-3 flex gap-2"><button className={subtleButton} onClick={() => setDraft(card)} type="button">Edit</button><button className={dangerButton} onClick={() => deleteItem(`/api/admin/content/courtship-cards/${card.id}`, card.name)} type="button">Delete</button></div></article>)}
+        </div>
+      </div>
+    </section>
+  );
+};
+
 const PlayerBoardEditor = ({
   boards,
   events,
@@ -1570,6 +1670,10 @@ const PlayerBoardEditor = ({
               <label className="block text-sm">
                 <span className="text-slate-600">Control takes per night</span>
                 <input className={`${input} mt-1`} min="1" type="number" value={draft.control_takes_per_night || 3} onChange={(event) => setDraft((current) => ({ ...current, control_takes_per_night: Number(event.target.value) }))} />
+              </label>
+              <label className="block text-sm">
+                <span className="text-slate-600">Initial AP</span>
+                <input className={`${input} mt-1`} min="0" type="number" value={Number(draft.initial_ap ?? 5)} onChange={(event) => setDraft((current) => ({ ...current, initial_ap: Math.max(0, Number(event.target.value || 0)) }))} />
               </label>
               <button className={primaryButton} disabled={busy} onClick={onSave} type="button">Save player board</button>
             </div>
@@ -1937,11 +2041,36 @@ const PoulpitaPanelEditor = ({ draft, setDraft, imageRef, previewUrl, setPreview
     }));
   };
   const addSize = () => {
-    setDraft((current) => ({ ...current, sizes: [...(current.sizes || [{ amount: 1, unit: "kg", energy_cost: 0 }]), { amount: 1, unit: "kg", energy_cost: 1 }] }));
+    setDraft((current) => ({ ...current, sizes: [...(current.sizes || [{ amount: 1, unit: "kg", energy_cost: 0 }]), { amount: 1, unit: "kg", energy_cost: 1, image_filename: null }] }));
   };
   const removeSize = (index) => {
     if (index === 0) return;
-    setDraft((current) => ({ ...current, sizes: (current.sizes || []).filter((_entry, entryIndex) => entryIndex !== index) }));
+    setDraft((current) => {
+      const removed = (current.sizes || [])[index];
+      if (removed?._preview_url) URL.revokeObjectURL(removed._preview_url);
+      return { ...current, sizes: (current.sizes || []).filter((_entry, entryIndex) => entryIndex !== index) };
+    });
+  };
+  const updateSizeImage = (index, file) => {
+    setDraft((current) => {
+      const nextSizes = [...(current.sizes || [])];
+      const previousPreview = nextSizes[index]?._preview_url;
+      if (previousPreview) URL.revokeObjectURL(previousPreview);
+      nextSizes[index] = {
+        ...nextSizes[index],
+        _image_file: file || null,
+        _preview_url: file ? URL.createObjectURL(file) : "",
+      };
+      return { ...current, sizes: nextSizes };
+    });
+  };
+  const sizePreviewUrl = (index) => {
+    for (let candidate = index; candidate >= 0; candidate -= 1) {
+      const size = sizes[candidate];
+      const url = size?._preview_url || imageUrl(size);
+      if (url) return url;
+    }
+    return "";
   };
   return (
     <section className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
@@ -1995,6 +2124,16 @@ const PoulpitaPanelEditor = ({ draft, setDraft, imageRef, previewUrl, setPreview
           <div className="mt-2 space-y-2">
             {sizes.map((size, index) => (
               <div className="rounded border border-cyan-100 bg-cyan-50 p-2" key={index}>
+                <div className="mb-2 flex items-center gap-2">
+                  <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded border border-cyan-200 bg-white">
+                    {sizePreviewUrl(index) ? <img alt={`Poulpita size ${index + 1}`} className="h-full w-full object-contain" src={sizePreviewUrl(index)} /> : <span className="text-[0.65rem] text-rose-600">Image required</span>}
+                  </div>
+                  <label className="min-w-0 flex-1 text-xs text-slate-600">
+                    Poulpita image
+                    <input className={`${input} mt-1 py-1 text-xs`} accept="image/png,image/jpeg,image/webp" onChange={(event) => updateSizeImage(index, event.target.files?.[0] || null)} type="file" />
+                    <span className="mt-1 block text-[0.62rem] text-slate-500">{index === 0 ? "Required for the initial size." : "Leave empty to use the previous size image."}</span>
+                  </label>
+                </div>
                 <div className="grid grid-cols-2 gap-2">
                   <label className="text-xs text-slate-600">
                     Amount
@@ -2026,7 +2165,7 @@ const PoulpitaPanelEditor = ({ draft, setDraft, imageRef, previewUrl, setPreview
             </div>
           ))}
         </div>
-        <button className={`${primaryButton} mt-4 w-full`} disabled={busy} onClick={save} type="button">Save panel layout</button>
+        <button className={`${primaryButton} mt-4 w-full`} disabled={busy || !sizePreviewUrl(0)} onClick={save} type="button">Save panel layout</button>
       </aside>
     </section>
   );

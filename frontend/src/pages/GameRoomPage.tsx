@@ -62,16 +62,17 @@ const TimeTracker = ({ projection }: { projection: GameProjection | null }) => {
   );
 };
 
-const EnergyBar = ({ energy }: { energy: number }) => {
-  const current = Math.max(0, Math.min(32, Number(energy || 0)));
+const EnergyBar = ({ energy, maximum = 32 }: { energy: number; maximum?: number }) => {
+  const maxEnergy = Math.max(1, Math.min(32, Number(maximum || 32)));
+  const current = Math.max(0, Math.min(maxEnergy, Number(energy || 0)));
   return (
     <div className="shrink-0 rounded bg-slate-800 p-2">
       <div className="flex items-center justify-between text-xs">
         <span className="text-slate-400">Energy</span>
-        <strong>{current}/32</strong>
+        <strong>{current}/{maxEnergy}</strong>
       </div>
       <div className="mt-1.5 flex flex-wrap gap-0.5">
-        {Array.from({ length: 32 }).map((_, index) => (
+        {Array.from({ length: maxEnergy }).map((_, index) => (
           <span
             aria-hidden="true"
             className={["h-2.5 w-2.5 shrink-0 rounded-[2px] border", index < current ? "border-emerald-300 bg-emerald-300" : "border-slate-600 bg-slate-900"].join(" ")}
@@ -156,6 +157,7 @@ const CapabilityBoard = ({
   onCollect,
   onDraw,
   onMoveMode,
+  onSpecialPower,
   onEndNight,
   onEndDay,
   onBuyUpgrade,
@@ -173,6 +175,7 @@ const CapabilityBoard = ({
   onCollect?: () => void;
   onDraw?: () => void;
   onMoveMode?: () => void;
+  onSpecialPower?: () => void;
   onEndNight?: () => void;
   onEndDay?: () => void;
   onBuyUpgrade?: (upgradeIndex: number) => void;
@@ -381,6 +384,7 @@ const ActionPanel = ({
   onEndDay,
   onEndNight,
   onMoveMode,
+  onSpecialPower,
   onTakeControl,
   pending,
   projection,
@@ -393,6 +397,7 @@ const ActionPanel = ({
   onEndDay: () => void;
   onEndNight: () => void;
   onMoveMode: () => void;
+  onSpecialPower: () => void;
   onTakeControl: () => void;
   pending: boolean;
   projection: GameProjection | null;
@@ -401,6 +406,17 @@ const ActionPanel = ({
   const isNightAction = projection?.phase === "night_action";
   const isNight = projection?.phase === "night_idle" || projection?.phase === "night_action";
   const currentNodeId = projection?.poulpita?.node_id || "";
+  const actionCosts = projection?.tile_catalog?.action_costs || {};
+  const actionCost = (actionId: string, defaultAp: number, defaultTime: number, defaultNeurons = 0) => ({
+    ap: Number(actionCosts[actionId]?.ap_cost ?? defaultAp),
+    time: Number(actionCosts[actionId]?.time_cost ?? defaultTime),
+    neurons: Number(actionCosts[actionId]?.neuron_cost ?? defaultNeurons),
+  });
+  const gainCost = actionCost("gain_ap", 0, 0);
+  const moveCost = actionCost("move", 1, 1);
+  const drawCost = actionCost("draw", 1, 1);
+  const specialCost = actionCost("special_power", 2, 2, 1);
+  const canAfford = (cost: { ap: number; neurons: number }) => Number(capability.pa || 0) >= cost.ap && Number(projection?.poulpita?.neurons || 0) >= cost.neurons;
   const canEndNight =
     active &&
     projection?.phase === "night_action" &&
@@ -415,19 +431,22 @@ const ActionPanel = ({
         <button className="rounded bg-teal-400 px-1.5 py-2 text-[0.68rem] font-semibold leading-tight text-slate-950 hover:bg-teal-300 disabled:opacity-50" disabled={pending || active || !isNight} onClick={onTakeControl} type="button">
           Take control
         </button>
-        <button className="rounded border border-slate-600 px-1.5 py-2 text-[0.68rem] leading-tight text-slate-100 hover:bg-slate-800 disabled:opacity-50" disabled={pending || !active || !isNightAction} onClick={onCollect} type="button">
-          Collect AP
+        <button className="rounded border border-slate-600 px-1.5 py-2 text-[0.68rem] leading-tight text-slate-100 hover:bg-slate-800 disabled:opacity-50" disabled={pending || !active || !isNightAction || !canAfford(gainCost)} onClick={onCollect} type="button">
+          Collect AP ({gainCost.ap} AP)
         </button>
         <button
           className={["rounded border px-1.5 py-2 text-[0.68rem] leading-tight text-slate-100 disabled:opacity-50", moveMode ? "border-amber-300 bg-amber-950" : "border-slate-600 hover:bg-slate-800"].join(" ")}
-          disabled={pending || !active || !isNightAction || capability.pa < 1}
+          disabled={pending || !active || !isNightAction || !canAfford(moveCost)}
           onClick={onMoveMode}
           type="button"
         >
-          Move
+          Move ({moveCost.ap} AP)
         </button>
-        <button className="rounded border border-slate-600 px-1.5 py-2 text-[0.68rem] leading-tight text-slate-100 hover:bg-slate-800 disabled:opacity-50" disabled={pending || !active || !isNightAction || capability.pa < 1} onClick={onDraw} type="button">
-          Draw
+        <button className="rounded border border-slate-600 px-1.5 py-2 text-[0.68rem] leading-tight text-slate-100 hover:bg-slate-800 disabled:opacity-50" disabled={pending || !active || !isNightAction || !canAfford(drawCost)} onClick={onDraw} type="button">
+          Draw ({drawCost.ap} AP)
+        </button>
+        <button className="rounded border border-fuchsia-500 px-1.5 py-2 text-[0.68rem] leading-tight text-fuchsia-100 hover:bg-fuchsia-950 disabled:opacity-50" disabled={pending || !active || !isNightAction || !canAfford(specialCost)} onClick={onSpecialPower} type="button">
+          Special ({specialCost.ap} AP, {specialCost.neurons} N)
         </button>
         {projection?.phase === "day" ? (
           <button className="rounded border border-cyan-300 px-1.5 py-2 text-[0.68rem] leading-tight text-cyan-100 hover:bg-cyan-950 disabled:opacity-50" disabled={pending} onClick={onEndDay} type="button">
@@ -638,7 +657,7 @@ const PoulpitaResourcePanel = ({
   const nextSize = sizes[sizeIndex + 1] || null;
   const currentShelter = shelterData(projection?.shelters?.[projection?.poulpita.node_id || ""]);
   const baseNextSizeCost = Number(nextSize?.energy_cost || 0);
-  const nextSizeCost = Math.max(0, baseNextSizeCost - (currentShelter.secure ? 1 : 0));
+  const nextSizeCost = Math.max(0, baseNextSizeCost - Math.max(0, Number(currentShelter.seashells || 0) - 2));
   const energy = Number(projection?.poulpita.energy || 0);
   const canBuySize = projection?.phase === "day" && Boolean(nextSize) && !projection?.poulpita.size_upgraded_today && (nextSizeCost === 0 || energy - nextSizeCost > 0);
   const canMoveShellToShelter = projection?.phase === "day" && currentShelter.count > 0 && Number(projection?.poulpita.seashells || 0) > 0 && !pending;
@@ -736,7 +755,7 @@ const InteractionPanel = ({
   onResolve: () => void;
   failMoveTargetNodeId: string;
   onFailMoveTargetChange: (nodeId: string) => void;
-  onFail: () => void;
+  onFail: (spendEnergyToRetry?: boolean) => void;
   onClose: () => void;
 }) => {
   const activeInteraction = projection.interaction;
@@ -760,6 +779,11 @@ const InteractionPanel = ({
   const interactionsById = projection.tile_catalog?.interactions || {};
   const activePlayedCards = activeInteraction?.played_cards || [];
   const selectedCapabilityId = selectedCapability?.id;
+  const initiatorConfirmationRequired = Boolean(
+    activeInteraction
+    && activeInteraction.initiator_confirmed === false
+    && activeInteraction.initiator_capability_id !== selectedCapabilityId,
+  );
   const activeOwnedPlayedCards = activePlayedCards.filter((card: CardProjection) => card.capability_id === selectedCapabilityId);
   const lockedPlayedCards = activePlayedCards.filter((card: CardProjection) => card.capability_id !== selectedCapabilityId);
   const handCards = selectedCapability?.hand || [];
@@ -772,7 +796,8 @@ const InteractionPanel = ({
     selected.push(chooseCardInteractionForTile(card, tile, selected));
     return selected;
   }, []);
-  const missingSuccess = [...(tile.interaction_ids || [])];
+  const requiredInteractionIds = activeInteraction?.courtship_card?.interaction_ids || tile.interaction_ids || [];
+  const missingSuccess = [...requiredInteractionIds];
   playedInteractions.forEach((interactionId: string) => {
     const index = missingSuccess.indexOf(interactionId);
     if (index >= 0) missingSuccess.splice(index, 1);
@@ -788,6 +813,7 @@ const InteractionPanel = ({
   const canResolve = missingSuccess.length === 0 && missingShells === 0;
   const canInitiate = !activeInteraction && projection.active_capability_id === selectedCapability?.id;
   const requiresFreeFailureMove = Boolean(activeInteraction && (tile.failure_effects || []).some((effect: any) => effect.type === "pulpita_move_free"));
+  const isCourtship = Boolean(activeInteraction?.courtship_card);
   const currentNodeId = projection.poulpita?.node_id || "";
   const adjacentNodeIds = currentNodeId ? projection.map?.adjacency?.[currentNodeId] || [] : [];
   const panelTone = visualState === "success"
@@ -833,7 +859,7 @@ const InteractionPanel = ({
             {!activeInteraction ? <button className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-200 hover:bg-slate-800" onClick={onClose} type="button">Close</button> : null}
           </div>
             <div className="mt-3 rounded-md border border-slate-700 bg-slate-950 p-3">
-              <HexTilePreview className="max-w-[15rem]" event={event} interactionsById={interactionsById} tile={tile} />
+              {isCourtship && activeInteraction.courtship_card.image_url ? <img alt={activeInteraction.courtship_card.name || "Courtship card"} className="mx-auto max-h-64 max-w-full rounded object-contain" src={buildApiUrl(activeInteraction.courtship_card.image_url)} /> : <HexTilePreview className="max-w-[15rem]" event={event} interactionsById={interactionsById} tile={tile} />}
             <p className="mt-2 text-center font-semibold text-white">{tile.name || tileInstance.tile_id}</p>
             <p className="mt-1 text-center text-xs text-slate-400">Node {activeInteraction?.node_id || projection.poulpita.node_id || "-"}</p>
           </div>
@@ -871,7 +897,7 @@ const InteractionPanel = ({
               {handCards.map((card: CardProjection) => (
                 <CardButton
                   card={card}
-                  disabled={pending || projection.active_capability_id !== selectedCapability?.id}
+                  disabled={pending || initiatorConfirmationRequired}
                   key={card.card_id}
                   onClick={() => onToggleCard(card.card_id)}
                   projection={projection}
@@ -890,8 +916,9 @@ const InteractionPanel = ({
                     {adjacentNodeIds.map((nodeId: string) => <option key={nodeId} value={nodeId}>{nodeId}</option>)}
                   </select>
                 ) : null}
-                <button className="rounded border border-rose-500 px-3 py-2 text-sm text-rose-100 hover:bg-rose-950 disabled:opacity-50" disabled={pending || (requiresFreeFailureMove && !failMoveTargetNodeId)} onClick={onFail} type="button">Fail</button>
-                <button className="rounded bg-teal-400 px-3 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-300 disabled:opacity-50" disabled={pending} onClick={onResolve} type="button">{canResolve ? "Confirm interaction" : "Confirm cards"}</button>
+                {isCourtship ? <button className="rounded border border-amber-400 px-3 py-2 text-sm text-amber-100 hover:bg-amber-950 disabled:opacity-50" disabled={pending || Number(projection.poulpita.energy || 0) <= 1} onClick={() => onFail(true)} type="button">Spend 1 energy and retry</button> : null}
+                <button className="rounded border border-rose-500 px-3 py-2 text-sm text-rose-100 hover:bg-rose-950 disabled:opacity-50" disabled={pending || (requiresFreeFailureMove && !failMoveTargetNodeId)} onClick={() => onFail(false)} type="button">{isCourtship ? "Leave and move away" : "Fail"}</button>
+                <button className="rounded bg-teal-400 px-3 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-300 disabled:opacity-50" disabled={pending || initiatorConfirmationRequired} onClick={onResolve} type="button">{initiatorConfirmationRequired ? "Waiting for initiator" : canResolve ? "Confirm interaction" : "Confirm cards"}</button>
               </>
             ) : (
               <button className="rounded bg-teal-400 px-3 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-300 disabled:opacity-50" disabled={pending || !canInitiate} onClick={onInitiate} type="button">Initiate interaction</button>
@@ -1694,6 +1721,7 @@ const GameRoomPage = () => {
   const [levels, setLevels] = useState<Array<any>>([]);
   const [focusedCapabilityId, setFocusedCapabilityId] = useState<string | null>(null);
   const [moveMode, setMoveMode] = useState(false);
+  const [specialTargetMode, setSpecialTargetMode] = useState<"intelligence" | "propulsion" | "camouflage" | null>(null);
   const [feedback, setFeedback] = useState("");
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
@@ -1756,6 +1784,10 @@ const GameRoomPage = () => {
   }, [focusedCapabilityId, projection]);
 
   useEffect(() => {
+    setSpecialTargetMode(null);
+  }, [focusedCapabilityId, projection?.version]);
+
+  useEffect(() => {
     if (!botsOnlyMode || botsOnlyPaused) return;
     const activeCapabilityId = projection?.active_capability_id;
     if (!activeCapabilityId || activeCapabilityId === focusedCapabilityId) return;
@@ -1802,13 +1834,12 @@ const GameRoomPage = () => {
     if (!projection?.interaction) return;
     setSelectedTileInstanceId(projection.interaction.tile_instance_id || null);
     setInteractionPanelState("open");
-    const activeCapabilityId = projection.active_capability_id;
-    const activePlayedCardIds = (projection.interaction.played_cards || [])
-      .filter((card: CardProjection) => card.capability_id === activeCapabilityId)
+    const focusedPlayedCardIds = (projection.interaction.played_cards || [])
+      .filter((card: CardProjection) => card.capability_id === focusedCapabilityId)
       .map((card: CardProjection) => card.card_id);
-    setSelectedCardIds(activePlayedCardIds);
+    setSelectedCardIds(focusedPlayedCardIds);
     setFailMoveTargetNodeId("");
-  }, [projection?.active_capability_id, projection?.interaction?.tile_instance_id, projection?.version]);
+  }, [focusedCapabilityId, projection?.interaction?.tile_instance_id, projection?.version]);
 
   useEffect(() => {
     if (!projection?.pending_surprise) setSurpriseSelectedCardIds([]);
@@ -1819,6 +1850,15 @@ const GameRoomPage = () => {
     return events.length ? events[events.length - 1] : null;
   }, [projection?.events]);
   const gameWon = projection?.phase === "game_over" && (latestEvent?.type === "game_won" || Boolean(projection?.objectives?.length && projection.objectives.every((objective: any) => objective.completed)));
+  const gameOverTitle = gameWon
+    ? "All objectives completed"
+    : ({
+        poulpita_no_energy: "Poulpita has no energy left",
+        maximum_nights_reached: "The final day has ended",
+        size_deadline_missed: "The required size was not reached in time",
+        no_controls_or_actions: "No actions remain",
+      } as Record<string, string>)[projection?.game_over_reason || String(latestEvent?.reason || "")]
+      || "The game is lost";
 
   const loadProjection = useCallback(async () => {
     if (!token || !roomId) return;
@@ -2209,6 +2249,42 @@ const GameRoomPage = () => {
     });
   };
 
+  const useSpecialPower = () => {
+    if (!selectedCapabilityId || !projection) return;
+    const payload: Record<string, any> = { capability_id: selectedCapabilityId };
+    if (["intelligence", "propulsion", "camouflage"].includes(selectedCapabilityId)) {
+      setMoveMode(false);
+      setSpecialTargetMode(selectedCapabilityId as "intelligence" | "propulsion" | "camouflage");
+      setFeedback(selectedCapabilityId === "intelligence" ? "Select a hidden tile on an adjacent node." : "Select a highlighted destination node.");
+      return;
+    }
+    setMoveMode(false);
+    setSpecialTargetMode(null);
+    void submitCommand("use_special_power", payload);
+  };
+
+  const selectSpecialTile = (tileInstanceId: string) => {
+    if (specialTargetMode !== "intelligence" || !selectedCapabilityId) return;
+    setSpecialTargetMode(null);
+    void submitCommand("use_special_power", { capability_id: selectedCapabilityId, tile_instance_id: tileInstanceId });
+  };
+
+  const selectSpecialNode = (targetNodeId: NodeId) => {
+    if (!projection || !selectedCapabilityId || !specialTargetMode) return;
+    const currentNodeId = projection.poulpita?.node_id || "";
+    if (specialTargetMode === "propulsion") {
+      const middleNodeId = (projection.map?.adjacency?.[currentNodeId] || []).find((nodeId: string) => (projection.map?.adjacency?.[nodeId] || []).includes(targetNodeId));
+      if (!middleNodeId) return;
+      setSpecialTargetMode(null);
+      void submitCommand("use_special_power", { capability_id: selectedCapabilityId, path: [middleNodeId, targetNodeId] });
+      return;
+    }
+    if (specialTargetMode === "camouflage") {
+      setSpecialTargetMode(null);
+      void submitCommand("use_special_power", { capability_id: selectedCapabilityId, target_node_id: targetNodeId });
+    }
+  };
+
   const inspectTile = (tileInstanceId: string) => {
     setMoveMode(false);
     setSelectedTileInstanceId(tileInstanceId);
@@ -2276,8 +2352,8 @@ const GameRoomPage = () => {
     }
   };
 
-  const failInteraction = async () => {
-    const result = await submitCommand("fail_interaction", failMoveTargetNodeId ? { target_node_id: failMoveTargetNodeId } : {});
+  const failInteraction = async (spendEnergyToRetry = false) => {
+    const result = await submitCommand("fail_interaction", { ...(failMoveTargetNodeId ? { target_node_id: failMoveTargetNodeId } : {}), spend_energy_to_retry: spendEnergyToRetry });
     if (result?.ok !== false) {
       setFailMoveTargetNodeId("");
       setInteractionPanelState("failure");
@@ -2409,11 +2485,7 @@ const GameRoomPage = () => {
           <div className={["animate-[pulse_1.2s_ease-in-out_2] rounded-lg border px-8 py-5 text-center shadow-2xl", gameWon ? "border-teal-300 bg-teal-950" : "border-rose-300 bg-rose-950"].join(" ")}>
             <p className={["text-sm uppercase tracking-wide", gameWon ? "text-teal-200" : "text-rose-200"].join(" ")}>{gameWon ? "Game won" : "Game lost"}</p>
             <h2 className="mt-1 text-2xl font-semibold text-white">
-              {gameWon
-                ? "All objectives completed"
-                : String(latestEvent?.reason || "") === "poulpita_no_energy"
-                  ? "Poulpita has no energy left"
-                  : "No actions remain"}
+              {gameOverTitle}
             </h2>
             <p className={["mt-2 text-sm", gameWon ? "text-teal-100" : "text-rose-100"].join(" ")}>Post-game opens in a few seconds.</p>
           </div>
@@ -2462,7 +2534,7 @@ const GameRoomPage = () => {
         <div className="relative min-w-0 overflow-hidden border-r border-slate-800">
           {projection ? (
             <>
-              <BoardView focusedCapabilityId={selectedCapabilityId} moveMode={moveMode} onInspectTile={inspectTile} onMove={movePoulpita} onMoveShellFromShelter={moveShellFromShelter} pending={gameplayPending} projection={projection} />
+              <BoardView focusedCapabilityId={selectedCapabilityId} moveMode={moveMode} onInspectTile={inspectTile} onMove={movePoulpita} onMoveShellFromShelter={moveShellFromShelter} onSpecialNode={selectSpecialNode} onSpecialTile={selectSpecialTile} pending={gameplayPending} projection={projection} specialTargetMode={specialTargetMode} />
               {botModeEnabled ? (
                 <BotPlanTree
                   onExecuteOption={executePlanTreeOption}
@@ -2546,7 +2618,7 @@ const GameRoomPage = () => {
           </div>
           <ObjectivesPanel projection={projection} />
           <TimeTracker projection={projection} />
-          <EnergyBar energy={Number(projection?.poulpita.energy || 0)} />
+          <EnergyBar energy={Number(projection?.poulpita.energy || 0)} maximum={Number(projection?.poulpita.max_energy || 32)} />
           <PoulpitaResourcePanel onBuySize={buyPoulpitaSize} onMoveShellToShelter={moveShellToShelter} pending={gameplayPending} projection={projection} />
         </aside>
         <div className="grid min-h-0 grid-cols-[11rem_1fr] gap-2 overflow-hidden border-t border-r border-slate-800 bg-slate-950 p-1">
@@ -2558,7 +2630,8 @@ const GameRoomPage = () => {
             onDraw={drawActionCard}
             onEndDay={endDay}
             onEndNight={endNight}
-            onMoveMode={() => setMoveMode((value) => !value)}
+            onMoveMode={() => { setSpecialTargetMode(null); setMoveMode((value) => !value); }}
+            onSpecialPower={useSpecialPower}
             onTakeControl={takeControl}
             pending={gameplayPending}
             projection={projection}

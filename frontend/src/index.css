@@ -29,6 +29,48 @@ select {
   font: inherit;
 }
 
+@keyframes board-tile-placed {
+  from {
+    opacity: 0;
+    translate: 0 -1.75rem;
+    scale: 0.82;
+  }
+  to {
+    opacity: 1;
+    translate: 0 0;
+    scale: 1;
+  }
+}
+
+@keyframes board-tile-removed {
+  from {
+    opacity: 1;
+    translate: 0 0;
+    scale: 1;
+  }
+  to {
+    opacity: 0;
+    translate: 0 -1.75rem;
+    scale: 0.82;
+  }
+}
+
+.board-tile-placing {
+  animation: board-tile-placed 420ms ease-out both;
+}
+
+.board-tile-removing {
+  animation: board-tile-removed 420ms ease-in both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .board-tile-placing,
+  .board-tile-removing {
+    animation-duration: 1ms;
+    animation-delay: 0ms !important;
+  }
+}
+
 .font-interface {
   font-family:
     Inter,

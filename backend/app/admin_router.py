@@ -16,6 +16,7 @@ from .game_content_service import (
     create_event,
     create_interaction,
     delete_category,
+    delete_courtship_card,
     delete_event,
     delete_interaction,
     delete_level,
@@ -26,6 +27,7 @@ from .game_content_service import (
     get_content_state,
     import_admin_content_package,
     save_level,
+    save_courtship_card,
     save_surprise_card,
     save_surprise_deck,
     save_tile,
@@ -658,6 +660,53 @@ async def admin_delete_surprise_card(card_id: str, _admin: User = Depends(requir
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.post("/admin/content/courtship-cards")
+async def admin_create_courtship_card(
+    name: str = Form(...),
+    interaction_ids_json: str = Form(default="[]"),
+    image: UploadFile | None = File(default=None),
+    _admin: User = Depends(require_admin),
+):
+    try:
+        return await save_courtship_card(
+            name=name,
+            interaction_ids=[str(item) for item in _json_form_list(interaction_ids_json, "interaction_ids_json")],
+            image=image,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/admin/content/courtship-cards/{card_id}")
+async def admin_update_courtship_card(
+    card_id: str,
+    name: str = Form(...),
+    interaction_ids_json: str = Form(default="[]"),
+    image: UploadFile | None = File(default=None),
+    _admin: User = Depends(require_admin),
+):
+    try:
+        return await save_courtship_card(
+            card_id=card_id,
+            name=name,
+            interaction_ids=[str(item) for item in _json_form_list(interaction_ids_json, "interaction_ids_json")],
+            image=image,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/admin/content/courtship-cards/{card_id}")
+async def admin_delete_courtship_card(card_id: str, _admin: User = Depends(require_admin)):
+    try:
+        delete_courtship_card(card_id)
+        return {"status": "deleted"}
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.post("/admin/content/surprise-decks")
 async def admin_create_surprise_deck(
     name: str = Form(...),
@@ -704,9 +753,16 @@ async def admin_create_level(
     node_group_ids_json: str = Form(...),
     groups_json: str = Form(...),
     objectives_json: str = Form(default="[]"),
-    starting_energy: int = Form(default=3),
+    starting_energy: int = Form(default=8),
+    max_energy: int = Form(default=32),
     starting_neurons: int = Form(default=0),
     night_duration_steps: int = Form(default=24),
+    max_nights: int = Form(default=5),
+    courtship_min_size_index: int = Form(default=3),
+    courtship_min_energy: int = Form(default=8),
+    win_min_energy: int = Form(default=5),
+    size_deadline_night: int = Form(default=4),
+    tile_sets_json: str = Form(default="[]"),
     surprise_deck_id: str = Form(default=""),
     poulpita_starting_node_id: str = Form(default=""),
     node_tokens_json: str = Form(default="{}"),
@@ -721,8 +777,15 @@ async def admin_create_level(
             groups=_json_form_list(groups_json, "groups_json"),
             objectives=_json_form_list(objectives_json, "objectives_json"),
             starting_energy=starting_energy,
+            max_energy=max_energy,
             starting_neurons=starting_neurons,
             night_duration_steps=night_duration_steps,
+            max_nights=max_nights,
+            courtship_min_size_index=courtship_min_size_index,
+            courtship_min_energy=courtship_min_energy,
+            win_min_energy=win_min_energy,
+            size_deadline_night=size_deadline_night,
+            tile_sets=_json_form_list(tile_sets_json, "tile_sets_json"),
             surprise_deck_id=surprise_deck_id,
             poulpita_starting_node_id=poulpita_starting_node_id,
             node_tokens=_json_form_object(node_tokens_json, "node_tokens_json"),
@@ -742,9 +805,16 @@ async def admin_update_level(
     node_group_ids_json: str = Form(...),
     groups_json: str = Form(...),
     objectives_json: str = Form(default="[]"),
-    starting_energy: int = Form(default=3),
+    starting_energy: int = Form(default=8),
+    max_energy: int = Form(default=32),
     starting_neurons: int = Form(default=0),
     night_duration_steps: int = Form(default=24),
+    max_nights: int = Form(default=5),
+    courtship_min_size_index: int = Form(default=3),
+    courtship_min_energy: int = Form(default=8),
+    win_min_energy: int = Form(default=5),
+    size_deadline_night: int = Form(default=4),
+    tile_sets_json: str = Form(default="[]"),
     surprise_deck_id: str = Form(default=""),
     poulpita_starting_node_id: str = Form(default=""),
     node_tokens_json: str = Form(default="{}"),
@@ -760,8 +830,15 @@ async def admin_update_level(
             groups=_json_form_list(groups_json, "groups_json"),
             objectives=_json_form_list(objectives_json, "objectives_json"),
             starting_energy=starting_energy,
+            max_energy=max_energy,
             starting_neurons=starting_neurons,
             night_duration_steps=night_duration_steps,
+            max_nights=max_nights,
+            courtship_min_size_index=courtship_min_size_index,
+            courtship_min_energy=courtship_min_energy,
+            win_min_energy=win_min_energy,
+            size_deadline_night=size_deadline_night,
+            tile_sets=_json_form_list(tile_sets_json, "tile_sets_json"),
             surprise_deck_id=surprise_deck_id,
             poulpita_starting_node_id=poulpita_starting_node_id,
             node_tokens=_json_form_object(node_tokens_json, "node_tokens_json"),
@@ -816,15 +893,22 @@ async def admin_update_token(
 async def admin_update_poulpita_panel(
     zones_json: str = Form(...),
     sizes_json: str = Form(default="[]"),
+    size_image_indices_json: str = Form(default="[]"),
     image_width: int | None = Form(default=None),
     image_height: int | None = Form(default=None),
     image: UploadFile | None = File(default=None),
+    size_images: list[UploadFile] | None = File(default=None),
     _admin: User = Depends(require_admin),
 ):
     try:
+        size_image_indices = [int(index) for index in _json_form_list(size_image_indices_json, "size_image_indices_json")]
+        uploaded_size_images = list(size_images or [])
+        if len(size_image_indices) != len(uploaded_size_images):
+            raise ValueError("Each Poulpita size image requires a matching size index.")
         return await update_poulpita_panel(
             zones=_json_form_object(zones_json, "zones_json"),
             sizes=_json_form_list(sizes_json, "sizes_json"),
+            size_images=dict(zip(size_image_indices, uploaded_size_images)),
             image=image,
             image_width=image_width,
             image_height=image_height,
@@ -843,6 +927,7 @@ async def admin_update_player_board(
     hand_size_upgrades_json: str = Form(default="[]"),
     actions_per_control: int = Form(default=3),
     control_takes_per_night: int = Form(default=3),
+    initial_ap: int = Form(default=5),
     _admin: User = Depends(require_admin),
 ):
     try:
@@ -857,6 +942,7 @@ async def admin_update_player_board(
             hand_size_upgrades=_json_form_list(hand_size_upgrades_json, "hand_size_upgrades_json"),
             actions_per_control=actions_per_control,
             control_takes_per_night=control_takes_per_night,
+            initial_ap=initial_ap,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

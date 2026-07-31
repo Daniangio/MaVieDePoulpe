@@ -633,7 +633,7 @@ def test_execute_bot_plan_runs_only_next_command_through_reducer():
         assert [entry["type"] for entry in result["command_results"]] == ["take_control"]
         assert result["projection"]["active_capability_id"] == "agility"
         assert result["projection"]["version"] == 2
-        assert result["projection"]["capabilities"]["agility"]["pa"] == 0
+        assert result["projection"]["capabilities"]["agility"]["pa"] == 5
 
     run(scenario())
 
@@ -961,11 +961,11 @@ def test_local_orchestrator_switches_to_bot_with_partial_interaction_support():
     camouflage = next(
         candidate
         for candidate in candidates
-        if candidate["commands"][0] == {"type": "take_control", "payload": {"capability_id": "camouflage"}}
+        if candidate["commands"][0] == {"type": "resolve_interaction", "payload": {"capability_id": "camouflage", "card_ids": ["hide-card"]}}
     )
     simulated = deepcopy(state)
     bot_planner._simulate_public_command(simulated, camouflage["commands"][0])
-    support_commands, _entries, _label = bot_planner._next_interaction_support_command(simulated, "camouflage")
+    support_commands, _entries, _label = bot_planner._next_interaction_support_command(simulated, "intelligence")
 
     assert support_commands[0]["type"] == "resolve_interaction"
     assert support_commands[0]["payload"]["auto_select_cards"] is True
@@ -980,7 +980,8 @@ def test_local_orchestrator_switches_to_bot_with_partial_interaction_support():
         "orchestrator_sampling_temperature": 0.1,
     }
     decision = choose_bot_orchestrator_action(state)
-    assert decision["command"] == {"type": "take_control", "payload": {"capability_id": "camouflage"}}
+    assert decision["command"]["type"] == "resolve_interaction"
+    assert decision["command"]["payload"]["capability_id"] in {"camouflage", "intelligence"}
 
 
 def test_local_orchestrator_does_not_draw_for_exhausted_interaction_initiator():
@@ -1040,7 +1041,7 @@ def test_local_orchestrator_does_not_draw_for_exhausted_interaction_initiator():
 
     assert {"type": "draw_action_card", "payload": {"capability_id": "force"}} not in commands
     assert {"type": "collect_action_points", "payload": {"capability_id": "force"}} not in commands
-    assert {"type": "take_control", "payload": {"capability_id": "camouflage"}} in commands
+    assert {"type": "resolve_interaction", "payload": {"capability_id": "camouflage", "card_ids": ["camouflage-hide"]}} in commands
 
 
 def test_local_orchestrator_interacts_instead_of_farming_ap_when_tile_is_available():
@@ -1333,8 +1334,7 @@ def test_bot_plans_use_shared_intelligence_cards_for_open_interaction_support():
         plan = next(plan for plan in plans["proposals"] if plan["plan_id"] == "support_interaction_intelligence_tile_fish")
 
         assert plan["proposer_ability_id"] == "intelligence"
-        assert plan["plan_chain"][0]["public_command"]["type"] == "take_control"
-        assert plan["plan_chain"][1]["public_command"]["type"] == "resolve_interaction"
+        assert plan["plan_chain"][0]["public_command"]["type"] == "resolve_interaction"
         assert plan["statistics"]["support_estimate"]["hand_matches"] == 1
         assert "analyse_card" not in str(plans)
 
@@ -1733,7 +1733,7 @@ def test_adjacent_movement_is_accepted_and_increments_version():
         assert projection["version"] == 4
         assert projection["poulpita"]["node_id"] == "1B"
         assert projection["poulpita"]["previous_node_id"] == "1A"
-        assert projection["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["pa"] == 0
+        assert projection["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["pa"] == 5
         assert projection["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["actions_taken_this_control"] == 2
         assert result["events"][0]["type"] == "poulpita_moved"
 
@@ -2184,7 +2184,7 @@ def test_octopus_token_hydrates_tile_definition_and_enforces_initiators(monkeypa
         state = service._memory_states[room["id"]]
         state["phase"] = "night_action"
         state["active_capability_id"] = "force"
-        state["capabilities"]["force"]["pa"] = 1
+        state["capabilities"]["force"]["pa"] = 2
         state["tile_catalog"] = {
             "categories": {},
             "tiles": {},
@@ -2234,7 +2234,7 @@ def test_octopus_token_hydrates_tile_definition_and_enforces_initiators(monkeypa
         state = service._memory_states[room["id"]]
         state["phase"] = "night_action"
         state["active_capability_id"] = "force"
-        state["capabilities"]["force"]["pa"] = 1
+        state["capabilities"]["force"]["pa"] = 2
         state["tile_catalog"] = {"categories": {}, "tiles": {}, "events": {}, "interactions": {}}
         state["tiles"] = {"1A": [{"instance_id": "octopus_legacy", "tile_id": "octopus", "face_up": True, "token_type": "octopus"}]}
 
@@ -2256,7 +2256,7 @@ def test_octopus_token_hydrates_tile_definition_and_enforces_initiators(monkeypa
         state = service._memory_states[room["id"]]
         state["phase"] = "night_action"
         state["active_capability_id"] = "agility"
-        state["capabilities"]["agility"]["pa"] = 1
+        state["capabilities"]["agility"]["pa"] = 2
         state["tile_catalog"] = {
             "categories": {},
             "tiles": {},
@@ -2300,7 +2300,7 @@ def test_higher_priority_optional_interaction_can_precede_lower_compulsory_inter
         state = service._memory_states[room["id"]]
         state["phase"] = "night_action"
         state["active_capability_id"] = DEFAULT_ACTIVE_CAPABILITY_ID
-        state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["pa"] = 3
+        state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["pa"] = 4
         state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["initiates_event_ids"] = ["shark", "crab"]
         state["tile_catalog"] = {
             "categories": {
@@ -2366,7 +2366,7 @@ def test_latest_tile_priority_metadata_allows_high_priority_optional_interaction
         state = service._memory_states[room["id"]]
         state["phase"] = "night_action"
         state["active_capability_id"] = DEFAULT_ACTIVE_CAPABILITY_ID
-        state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["pa"] = 1
+        state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["pa"] = 2
         state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["initiates_event_ids"] = ["shark", "surprise"]
         state["tile_catalog"] = {
             "categories": {
@@ -3081,6 +3081,243 @@ def test_tile_with_no_required_interactions_resolves_successfully():
         assert result["events"][0]["type"] == "interaction_resolved"
         assert result["projection"]["poulpita"]["neurons"] == 1
         assert result["projection"]["tiles"]["1A"] == []
+
+    run(scenario())
+
+
+def test_ap_persists_and_final_day_ends_in_loss():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = DEFAULT_ACTIVE_CAPABILITY_ID
+        state["day_index"] = 2
+        state["max_nights"] = 2
+        state["size_deadline_night"] = 99
+        state["night_time_spent"] = 16
+        state["shelters"] = {"1A": {"count": 1, "seashells": 0, "secure": False}}
+        state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["pa"] = 7
+
+        day = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_final_day",
+            expected_version=1,
+            command_type="end_night",
+            payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID},
+        )
+        lost = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_final_day_end",
+            expected_version=2,
+            command_type="end_day",
+        )
+
+        assert day["ok"] is True
+        assert day["projection"]["phase"] == "day"
+        assert day["projection"]["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["pa"] == 7
+        assert lost["ok"] is True
+        assert lost["projection"]["phase"] == "game_over"
+        assert lost["projection"]["game_outcome"] == "lost"
+        assert lost["events"][0]["reason"] == "maximum_nights_reached"
+
+    run(scenario())
+
+
+def test_interaction_support_requires_initiator_confirmation_and_not_initiative():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "force"
+        state["capabilities"]["force"]["initiates_event_ids"] = ["fish"]
+        state["tile_catalog"] = {
+            "categories": {"threat": {"id": "threat", "compulsory_on_same_node": True}},
+            "events": {"fish": {"id": "fish", "name": "Fish", "category_id": "threat"}},
+            "interactions": {
+                "charge": {"id": "charge", "name": "Charge"},
+                "hide": {"id": "hide", "name": "Hide"},
+                "analyse": {"id": "analyse", "name": "Analyse"},
+            },
+            "tiles": {
+                "fish-tile": {
+                    "id": "fish-tile",
+                    "event_id": "fish",
+                    "interaction_ids": ["charge", "hide", "analyse"],
+                    "success_effects": [{"type": "gain_neurons", "amount": 1}],
+                }
+            },
+        }
+        state["tiles"] = {"1A": [{"instance_id": "fish-instance", "tile_id": "fish-tile", "face_up": True}]}
+        state["capabilities"]["force"]["hand"] = [{"card_id": "charge-card", "interaction_id": "charge", "interaction_ids": ["charge"], "owner_capability_id": "force"}]
+        state["capabilities"]["camouflage"]["hand"] = [{"card_id": "hide-card", "interaction_id": "hide", "interaction_ids": ["hide"], "owner_capability_id": "camouflage"}]
+        state["capabilities"]["intelligence"]["hand"] = [{"card_id": "analyse-card", "interaction_id": "analyse", "interaction_ids": ["analyse"], "owner_capability_id": "intelligence"}]
+
+        started = await send_command(
+            service, user, room, command_id="cmd_support_start", expected_version=1,
+            command_type="start_interaction", payload={"capability_id": "force", "tile_instance_id": "fish-instance"},
+        )
+        early_support = await send_command(
+            service, user, room, command_id="cmd_support_early", expected_version=2,
+            command_type="resolve_interaction", payload={"capability_id": "camouflage", "card_ids": ["hide-card"]},
+        )
+        confirmed = await send_command(
+            service, user, room, command_id="cmd_support_confirm", expected_version=2,
+            command_type="resolve_interaction", payload={"capability_id": "force", "card_ids": ["charge-card"]},
+        )
+        first_support = await send_command(
+            service, user, room, command_id="cmd_support_first", expected_version=3,
+            command_type="resolve_interaction", payload={"capability_id": "camouflage", "card_ids": ["hide-card"]},
+        )
+        stale_support = await send_command(
+            service, user, room, command_id="cmd_support_stale", expected_version=3,
+            command_type="resolve_interaction", payload={"capability_id": "intelligence", "card_ids": ["analyse-card"]},
+        )
+        completed = await send_command(
+            service, user, room, command_id="cmd_support_complete", expected_version=4,
+            command_type="resolve_interaction", payload={"capability_id": "intelligence", "card_ids": ["analyse-card"]},
+        )
+
+        assert started["projection"]["interaction"]["initiator_confirmed"] is False
+        assert early_support["reason"] == "initiator_confirmation_required"
+        assert confirmed["projection"]["interaction"]["initiator_confirmed"] is True
+        assert first_support["ok"] is True
+        assert stale_support["reason"] == "state_version_conflict"
+        assert any(card["card_id"] == "analyse-card" for card in stale_support["projection"]["capabilities"]["intelligence"]["hand"])
+        assert completed["ok"] is True
+        assert completed["projection"]["interaction"] is None
+        assert completed["projection"]["poulpita"]["neurons"] == 1
+        assert completed["projection"]["active_capability_id"] == "force"
+
+    run(scenario())
+
+
+def test_special_power_spends_configured_resources_and_propulsion_cannot_return_to_start():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "force"
+        state["poulpita"]["neurons"] = 2
+        state["tile_catalog"]["action_costs"] = {
+            "special_power": {"ap_cost": 2, "time_cost": 2, "neuron_cost": 1}
+        }
+
+        force = await send_command(
+            service, user, room, command_id="cmd_force_special", expected_version=1,
+            command_type="use_special_power", payload={"capability_id": "force"},
+        )
+        next_state = service._memory_states[room["id"]]
+        next_state["active_capability_id"] = "propulsion"
+        next_state["poulpita"]["node_id"] = "1C"
+        next_state["poulpita_starting_node_id"] = "1A"
+        next_state["capabilities"]["propulsion"]["pa"] = 5
+        rejected = await send_command(
+            service, user, room, command_id="cmd_propulsion_home", expected_version=2,
+            command_type="use_special_power", payload={"capability_id": "propulsion", "path": ["1B", "1A"]},
+        )
+
+        assert force["ok"] is True
+        assert force["projection"]["capabilities"]["force"]["pa"] == 3
+        assert force["projection"]["poulpita"]["neurons"] == 1
+        assert force["projection"]["night_time_spent"] == 2
+        assert next_state["force_reduces_next_interaction"] is True
+        assert rejected["reason"] == "propulsion_starting_node_forbidden"
+        assert rejected["projection"]["poulpita"]["neurons"] == 1
+
+    run(scenario())
+
+
+def test_courtship_retry_draws_again_and_declining_blocks_until_movement():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "force"
+        state["poulpita"]["size_index"] = 3
+        state["poulpita"]["energy"] = 8
+        state["courtship_min_size_index"] = 3
+        state["courtship_min_energy"] = 8
+        state["tile_catalog"] = {
+            **state["tile_catalog"],
+            "categories": {"__courtship_category__": {"id": "__courtship_category__", "compulsory_on_same_node": False}},
+            "events": {"__courtship_event__": {"id": "__courtship_event__", "category_id": "__courtship_category__"}},
+            "interactions": {"dance": {"id": "dance", "name": "Dance"}},
+            "tiles": {"__courtship_token__": {"id": "__courtship_token__", "event_id": "__courtship_event__", "token_type": "courtship", "interaction_ids": []}},
+            "courtship_cards": {"dance-card": {"id": "dance-card", "name": "Dance", "interaction_ids": ["dance"]}},
+        }
+        state["tiles"] = {
+            "1A": [],
+            "1B": [{"instance_id": "courtship-1", "tile_id": "__courtship_token__", "token_type": "courtship", "face_up": True}],
+        }
+
+        moved = await send_command(
+            service, user, room, command_id="cmd_move_to_courtship", expected_version=1,
+            command_type="move_poulpita", payload={"capability_id": "force", "target_node_id": "1B"},
+        )
+        confirmed = await send_command(
+            service, user, room, command_id="cmd_confirm_empty_courtship", expected_version=2,
+            command_type="resolve_interaction", payload={"capability_id": "force", "card_ids": []},
+        )
+        retried = await send_command(
+            service, user, room, command_id="cmd_retry_courtship", expected_version=3,
+            command_type="fail_interaction", payload={"spend_energy_to_retry": True},
+        )
+        blocked = await send_command(
+            service, user, room, command_id="cmd_block_courtship", expected_version=4,
+            command_type="fail_interaction", payload={"spend_energy_to_retry": False},
+        )
+        left = await send_command(
+            service, user, room, command_id="cmd_leave_courtship", expected_version=5,
+            command_type="move_poulpita", payload={"capability_id": "force", "target_node_id": "1A"},
+        )
+
+        assert moved["projection"]["interaction"]["courtship_card"]["id"] == "dance-card"
+        assert confirmed["projection"]["interaction"]["initiator_confirmed"] is True
+        assert retried["projection"]["poulpita"]["energy"] == 7
+        assert retried["projection"]["interaction"]["initiator_confirmed"] is False
+        assert blocked["projection"]["interaction"] is None
+        assert blocked["projection"]["courtship_blocked_node_id"] == "1B"
+        assert left["projection"]["courtship_blocked_node_id"] is None
+
+    run(scenario())
+
+
+def test_size_upgrade_uses_all_shelter_shell_discount_and_replaces_tiles():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "day"
+        state["poulpita"]["energy"] = 10
+        state["poulpita"]["size_index"] = 0
+        state["shelters"] = {"1A": {"count": 1, "seashells": 4, "secure": True}}
+        state["tile_catalog"] = {
+            **state["tile_catalog"],
+            "poulpita_panel": {"sizes": [{"amount": 1, "unit": "kg", "energy_cost": 0}, {"amount": 2, "unit": "kg", "energy_cost": 3}]},
+            "tiles": {"adult-tile": {"id": "adult-tile", "event_id": "adult", "interaction_ids": []}},
+            "events": {"adult": {"id": "adult", "category_id": "prey"}},
+        }
+        state["level_layout"] = {
+            "node_tile_counts": {node_id: (1 if node_id == "1A" else 0) for node_id in TEST_MAP["nodes"]},
+            "node_group_ids": {node_id: "main" for node_id in TEST_MAP["nodes"]},
+            "groups": [{"id": "main", "name": "Main", "tile_counts": {}}],
+            "node_tokens": {},
+        }
+        state["level_tile_sets"] = [{"id": "adult", "size_index": 1, "groups": [{"id": "main", "name": "Main", "tile_counts": {"adult-tile": 1}}]}]
+        state["tiles"] = {node_id: [] for node_id in TEST_MAP["nodes"]}
+
+        result = await send_command(
+            service, user, room, command_id="cmd_size_replace", expected_version=1,
+            command_type="buy_poulpita_size",
+        )
+
+        assert result["ok"] is True
+        assert result["projection"]["poulpita"]["energy"] == 9
+        assert result["events"][0]["energy_cost"] == 1
+        assert result["projection"]["tiles"]["1A"][0]["tile_id"] == "adult-tile"
 
     run(scenario())
 

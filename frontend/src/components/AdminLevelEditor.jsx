@@ -10,9 +10,16 @@ const emptyLevelDraft = () => ({
   node_group_ids: {},
   groups: [{ id: "group-1", name: "Group 1", tile_counts: {} }],
   objectives: [],
-  starting_energy: 3,
+  starting_energy: 8,
+  max_energy: 32,
   starting_neurons: 0,
   night_duration_steps: 24,
+  max_nights: 5,
+  courtship_min_size_index: 3,
+  courtship_min_energy: 8,
+  win_min_energy: 5,
+  size_deadline_night: 4,
+  tile_sets: [],
   surprise_deck_id: "",
   poulpita_starting_node_id: "",
   node_tokens: {},
@@ -40,7 +47,20 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
     }));
   }, [draft.groups, draft.node_group_ids, draft.node_tile_counts, nodes]);
 
-  const canSave = nodes.length > 0 && nodes.every((node) => draft.node_group_ids[node.id]) && Object.values(groupStats).every((stats) => stats.valid);
+  const replacementSetsValid = useMemo(() => (draft.tile_sets || []).every((tileSet) => {
+    const replacementById = Object.fromEntries((tileSet.groups || []).map((group) => [group.id, group]));
+    return (draft.groups || []).every((group) => {
+      const replacement = replacementById[group.id];
+      const capacity = groupStats[group.id]?.capacity ?? 0;
+      const assigned = Object.values(replacement?.tile_counts || {}).reduce((total, count) => total + Number(count || 0), 0);
+      return Boolean(replacement) && assigned === capacity;
+    }) && Object.keys(replacementById).length === (draft.groups || []).length;
+  }), [draft.groups, draft.tile_sets, groupStats]);
+
+  const canSave = nodes.length > 0
+    && nodes.every((node) => draft.node_group_ids[node.id])
+    && Object.values(groupStats).every((stats) => stats.valid)
+    && replacementSetsValid;
 
   const levelFromMap = (map, base = emptyLevelDraft()) => {
     const groupId = base.groups?.[0]?.id || "group-1";
@@ -143,6 +163,47 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
     }));
   };
 
+  const addTileSet = () => {
+    setDraft((current) => ({
+      ...current,
+      tile_sets: [
+        ...(current.tile_sets || []),
+        {
+          id: `tile-set-${Date.now()}`,
+          size_index: (current.tile_sets || []).length + 1,
+          groups: (current.groups || []).map((group) => ({ ...group, tile_counts: {} })),
+        },
+      ],
+    }));
+  };
+
+  const updateTileSet = (setId, patch) => {
+    setDraft((current) => ({
+      ...current,
+      tile_sets: (current.tile_sets || []).map((tileSet) => (tileSet.id === setId ? { ...tileSet, ...patch } : tileSet)),
+    }));
+  };
+
+  const setReplacementTileCount = (setId, groupId, tileId, count) => {
+    setDraft((current) => ({
+      ...current,
+      tile_sets: (current.tile_sets || []).map((tileSet) => {
+        if (tileSet.id !== setId) return tileSet;
+        return {
+          ...tileSet,
+          groups: (tileSet.groups || []).map((group) => {
+            if (group.id !== groupId) return group;
+            const tileCounts = { ...(group.tile_counts || {}) };
+            const normalizedCount = Math.max(0, Number(count || 0));
+            if (normalizedCount) tileCounts[tileId] = normalizedCount;
+            else delete tileCounts[tileId];
+            return { ...group, tile_counts: tileCounts };
+          }),
+        };
+      }),
+    }));
+  };
+
   const saveLevel = async () => {
     setBusy(true);
     setError("");
@@ -154,9 +215,16 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
       form.set("node_group_ids_json", JSON.stringify(draft.node_group_ids || {}));
       form.set("groups_json", JSON.stringify(draft.groups || []));
       form.set("objectives_json", JSON.stringify(draft.objectives || []));
-      form.set("starting_energy", String(Math.max(0, Math.min(32, Number(draft.starting_energy ?? 3)))));
+      form.set("starting_energy", String(Math.max(0, Math.min(Number(draft.max_energy ?? 32), Number(draft.starting_energy ?? 8)))));
+      form.set("max_energy", String(Math.max(1, Math.min(32, Number(draft.max_energy ?? 32)))));
       form.set("starting_neurons", String(Math.max(0, Number(draft.starting_neurons ?? 0))));
       form.set("night_duration_steps", String(Math.max(1, Number(draft.night_duration_steps ?? 24))));
+      form.set("max_nights", String(Math.max(1, Number(draft.max_nights ?? 5))));
+      form.set("courtship_min_size_index", String(Math.max(0, Number(draft.courtship_min_size_index ?? 3))));
+      form.set("courtship_min_energy", String(Math.max(1, Number(draft.courtship_min_energy ?? 8))));
+      form.set("win_min_energy", String(Math.max(1, Number(draft.win_min_energy ?? 5))));
+      form.set("size_deadline_night", String(Math.max(1, Number(draft.size_deadline_night ?? 4))));
+      form.set("tile_sets_json", JSON.stringify(draft.tile_sets || []));
       form.set("surprise_deck_id", draft.surprise_deck_id || "");
       form.set("poulpita_starting_node_id", draft.poulpita_starting_node_id || "");
       form.set("node_tokens_json", JSON.stringify(draft.node_tokens || {}));
@@ -252,7 +320,7 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
         </aside>
 
         <div className="grid gap-4">
-          <div className="grid gap-3 lg:grid-cols-[1fr_13rem_7rem_7rem_8rem_13rem]">
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
             <label className="block text-sm">
               <span className="text-slate-600">Level name</span>
               <input className="mt-1 w-full rounded-md border border-cyan-200 bg-white px-3 py-2 text-slate-800" value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} />
@@ -270,9 +338,13 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
                 max="32"
                 min="0"
                 type="number"
-                value={Number(draft.starting_energy ?? 3)}
-                onChange={(event) => setDraft((current) => ({ ...current, starting_energy: Math.max(0, Math.min(32, Number(event.target.value || 0))) }))}
+                value={Number(draft.starting_energy ?? 8)}
+                onChange={(event) => setDraft((current) => ({ ...current, starting_energy: Math.max(0, Math.min(Number(current.max_energy || 32), Number(event.target.value || 0))) }))}
               />
+            </label>
+            <label className="block text-sm">
+              <span className="text-slate-600">Maximum energy</span>
+              <input className="mt-1 w-full rounded-md border border-cyan-200 bg-white px-3 py-2 text-slate-800" max="32" min="1" type="number" value={Number(draft.max_energy ?? 32)} onChange={(event) => setDraft((current) => ({ ...current, max_energy: Math.max(1, Math.min(32, Number(event.target.value || 1))) }))} />
             </label>
             <label className="block text-sm">
               <span className="text-slate-600">Starting neurons</span>
@@ -295,12 +367,23 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
               />
             </label>
             <label className="block text-sm">
+              <span className="text-slate-600">Maximum nights</span>
+              <input className="mt-1 w-full rounded-md border border-cyan-200 bg-white px-3 py-2 text-slate-800" min="1" type="number" value={Number(draft.max_nights ?? 5)} onChange={(event) => setDraft((current) => ({ ...current, max_nights: Math.max(1, Number(event.target.value || 1)) }))} />
+            </label>
+            <label className="block text-sm">
               <span className="text-slate-600">Surprise deck</span>
               <select className="mt-1 w-full rounded-md border border-cyan-200 bg-white px-3 py-2 text-slate-800" value={draft.surprise_deck_id || ""} onChange={(event) => setDraft((current) => ({ ...current, surprise_deck_id: event.target.value }))}>
                 <option value="">None</option>
                 {(content.surprise_decks || []).map((deck) => <option key={deck.id} value={deck.id}>{deck.name}</option>)}
               </select>
             </label>
+          </div>
+
+          <div className="grid gap-3 rounded-md border border-cyan-100 bg-cyan-50/70 p-3 md:grid-cols-2 xl:grid-cols-4">
+            <label className="text-sm text-slate-600">Courtship size step<input className="mt-1 w-full rounded-md border border-cyan-200 bg-white px-3 py-2 text-slate-800" min="0" type="number" value={Number(draft.courtship_min_size_index ?? 3)} onChange={(event) => setDraft((current) => ({ ...current, courtship_min_size_index: Math.max(0, Number(event.target.value || 0)) }))} /></label>
+            <label className="text-sm text-slate-600">Courtship minimum energy<input className="mt-1 w-full rounded-md border border-cyan-200 bg-white px-3 py-2 text-slate-800" min="1" type="number" value={Number(draft.courtship_min_energy ?? 8)} onChange={(event) => setDraft((current) => ({ ...current, courtship_min_energy: Math.max(1, Number(event.target.value || 1)) }))} /></label>
+            <label className="text-sm text-slate-600">Winning energy<input className="mt-1 w-full rounded-md border border-cyan-200 bg-white px-3 py-2 text-slate-800" min="1" type="number" value={Number(draft.win_min_energy ?? 5)} onChange={(event) => setDraft((current) => ({ ...current, win_min_energy: Math.max(1, Number(event.target.value || 1)) }))} /></label>
+            <label className="text-sm text-slate-600">Size deadline night<input className="mt-1 w-full rounded-md border border-cyan-200 bg-white px-3 py-2 text-slate-800" min="1" type="number" value={Number(draft.size_deadline_night ?? 4)} onChange={(event) => setDraft((current) => ({ ...current, size_deadline_night: Math.max(1, Number(event.target.value || 1)) }))} /></label>
           </div>
 
           <div>
@@ -319,6 +402,43 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
               selectedNodeId={selectedNodeId}
               setSelectedNodeId={setSelectedNodeId}
             />
+          </div>
+
+          <div className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold text-teal-950">Size replacement tile sets</h3>
+                <p className="text-xs text-slate-600">When Poulpita reaches the selected size step, remaining tiles are replaced and shuffled using this set.</p>
+              </div>
+              <button className="rounded-md border border-cyan-300 bg-white px-3 py-2 text-sm text-teal-900 hover:bg-cyan-50" onClick={addTileSet} type="button">Add set</button>
+            </div>
+            <div className="space-y-3">
+              {(draft.tile_sets || []).map((tileSet) => (
+                <article className="rounded-md border border-cyan-200 bg-white p-3" key={tileSet.id}>
+                  <div className="flex flex-wrap items-end justify-between gap-3">
+                    <label className="text-xs text-slate-600">Activate at size step<input className="mt-1 w-28 rounded-md border border-cyan-200 bg-white px-3 py-2 text-slate-800" min="1" type="number" value={Number(tileSet.size_index || 1)} onChange={(event) => updateTileSet(tileSet.id, { size_index: Math.max(1, Number(event.target.value || 1)) })} /></label>
+                    <button className="rounded border border-rose-300 px-2 py-1 text-xs text-rose-700" onClick={() => setDraft((current) => ({ ...current, tile_sets: (current.tile_sets || []).filter((entry) => entry.id !== tileSet.id) }))} type="button">Remove set</button>
+                  </div>
+                  <div className="mt-3 grid gap-3 lg:grid-cols-2">
+                    {(tileSet.groups || []).map((group) => {
+                      const capacity = nodes.reduce((total, node) => total + (draft.node_group_ids[node.id] === group.id ? Number(draft.node_tile_counts[node.id] || 0) : 0), 0);
+                      const assigned = Object.values(group.tile_counts || {}).reduce((total, count) => total + Number(count || 0), 0);
+                      return (
+                        <div className="rounded border border-cyan-100 p-2" key={group.id}>
+                          <div className="flex justify-between text-xs"><strong>{group.name}</strong><span className={capacity === assigned ? "text-emerald-700" : "text-rose-700"}>{assigned}/{capacity}</span></div>
+                          <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                            {(content.tiles || []).map((tile) => (
+                              <label className="flex items-center justify-between gap-2 text-xs text-slate-600" key={tile.id}><span className="truncate">{tile.name}</span><input className="w-16 rounded border border-cyan-200 px-2 py-1" min="0" type="number" value={Number(group.tile_counts?.[tile.id] || 0)} onChange={(event) => setReplacementTileCount(tileSet.id, group.id, tile.id, event.target.value)} /></label>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </article>
+              ))}
+              {(draft.tile_sets || []).length === 0 ? <p className="text-sm text-slate-500">No size-triggered replacement sets.</p> : null}
+            </div>
           </div>
 
           <div className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3">
@@ -384,7 +504,7 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
 
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-cyan-100 bg-white p-3">
             <p className={`text-sm ${canSave ? "text-teal-700" : "text-rose-700"}`}>
-              {canSave ? "Level is valid." : "Every node needs a group, and each group needs exactly as many tile copies as its node spaces."}
+              {canSave ? "Level is valid." : "Every node needs a group, and every base or replacement set needs exactly as many tile copies as its node spaces."}
             </p>
             <button className="rounded-md bg-teal-500 px-3 py-2 text-sm font-semibold text-white hover:bg-teal-600 disabled:opacity-60" disabled={busy || !canSave} onClick={saveLevel} type="button">
               {draft.id ? "Update level" : "Create level"}
@@ -427,7 +547,7 @@ const LevelMap = ({ map, groups, groupsById, nodeGroupIds, nodeTileCounts, nodeT
               {tokenTypes.length ? (
                 <div className="pointer-events-none absolute left-1/2 top-full mt-0.5 flex -translate-x-1/2 gap-1">
                   {tokenTypes.map((type) => (
-                    <span className="rounded-full border border-white bg-teal-950/90 px-1.5 py-0.5 text-[0.55rem] font-bold uppercase text-cyan-50 shadow" key={type}>{type === "shelter" ? "Shelter" : "Octopus"}</span>
+                    <span className="rounded-full border border-white bg-teal-950/90 px-1.5 py-0.5 text-[0.55rem] font-bold uppercase text-cyan-50 shadow" key={type}>{type === "shelter" ? "Shelter" : type === "octopus" ? "Octopus" : "Courtship"}</span>
                   ))}
                 </div>
               ) : null}
@@ -453,7 +573,7 @@ const LevelMap = ({ map, groups, groupsById, nodeGroupIds, nodeTileCounts, nodeT
             {startingNodeId === selectedNode.id ? "Poulpita starts here" : "Set Poulpita start"}
           </button>
           <div className="mb-2 grid grid-cols-2 gap-1">
-            {["shelter", "octopus"].map((tokenType) => {
+            {["shelter", "octopus", "courtship"].map((tokenType) => {
               const checked = (nodeTokens?.[selectedNode.id] || []).some((token) => (typeof token === "string" ? token : token.type) === tokenType);
               return (
                 <button
@@ -462,7 +582,7 @@ const LevelMap = ({ map, groups, groupsById, nodeGroupIds, nodeTileCounts, nodeT
                   onClick={() => onToggleNodeToken(selectedNode.id, tokenType)}
                   type="button"
                 >
-                  {checked ? "Remove" : "Add"} {tokenType === "shelter" ? "Shelter" : "Octopus"}
+                  {checked ? "Remove" : "Add"} {tokenType === "shelter" ? "Shelter" : tokenType === "octopus" ? "Octopus" : "Courtship"}
                 </button>
               );
             })}

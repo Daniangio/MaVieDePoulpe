@@ -25,6 +25,7 @@ export type PoulpitaProjection = {
   seashells?: number;
   size_index?: number;
   size_upgraded_today?: boolean;
+  max_energy?: number;
 };
 
 export type CardProjection = {
@@ -171,11 +172,15 @@ export type GameProjection = {
   bot_config?: BotRoomConfig | null;
   version: number;
   phase: "setup" | "night_idle" | "night_action" | "day" | "game_over";
+  game_outcome?: "won" | "lost" | null;
+  game_over_reason?: string | null;
   level_id: string;
   day_index: number;
   night_time_spent: number;
   night_time_total?: number;
   night_shelter_available_at?: number;
+  max_nights?: number;
+  poulpita_starting_node_id?: string;
   selected_level_id?: string;
   selected_map_id?: string;
   active_capability_id: string | null;
@@ -187,7 +192,7 @@ export type GameProjection = {
   player_boards: CapabilityProjection[];
   map: MapProjection;
   poulpita: PoulpitaProjection;
-  tiles?: Record<NodeId, Array<{ instance_id: string; tile_id: string; face_up?: boolean }>>;
+  tiles?: Record<NodeId, Array<{ instance_id: string; tile_id: string; face_up?: boolean; token_type?: string }>>;
   shelters?: Record<NodeId, number | { count?: number; seashells?: number; secure?: boolean }>;
   objectives?: Array<Record<string, any>>;
   objective_progress?: Record<string, any>;
@@ -200,6 +205,8 @@ export type GameProjection = {
     tokens?: Record<string, any>;
     poulpita_panel?: Record<string, any>;
     bot_settings?: Record<string, any>;
+    action_costs?: Record<string, { ap_cost?: number; time_cost?: number; neuron_cost?: number }>;
+    courtship_cards?: Record<string, any>;
   };
   interaction?: any;
   pending_surprise?: any;
