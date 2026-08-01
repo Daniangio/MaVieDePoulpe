@@ -91,6 +91,7 @@ def _safe_public_command(command: dict[str, Any]) -> dict[str, Any] | None:
         "buy_hand_size_upgrade": {"capability_id", "upgrade_index"},
         "buy_poulpita_size": set(),
         "resolve_surprise_card": {"accept", "capability_id", "auto_select_cards"},
+        "bot_no_actions_available": set(),
     }
     if command_type not in safe_payload_keys:
         return None
@@ -1517,7 +1518,11 @@ def _simulate_public_command(state: dict[str, Any], command: dict[str, Any]) -> 
     payload = command.get("payload") or {}
     ability_id = str(payload.get("capability_id") or state.get("active_capability_id") or "")
     capability = _capability(state, ability_id)
-    if command_type == "take_control" and ability_id:
+    if command_type == "bot_no_actions_available":
+        state["phase"] = "game_over"
+        state["game_outcome"] = "lost"
+        state["game_over_reason"] = "no_controls_or_actions"
+    elif command_type == "take_control" and ability_id:
         state["active_capability_id"] = ability_id
         state["phase"] = "night_action"
         capability["control_takes_this_night"] = int(capability.get("control_takes_this_night") or 0) + 1
@@ -1723,6 +1728,8 @@ def _simulate_public_command(state: dict[str, Any], command: dict[str, Any]) -> 
         for next_capability in (state.get("capabilities") or {}).values():
             next_capability["actions_taken_this_control"] = 0
             next_capability["control_takes_this_night"] = 0
+            initial_ap = next_capability.get("initial_ap")
+            next_capability["pa"] = max(0, int(initial_ap if initial_ap is not None else 5))
             _simulate_reshuffle_and_deal_starting_hand(next_capability)
         state.setdefault("poulpita", {})["size_upgraded_today"] = False
     _mark_simulated_loss_if_needed(state)
@@ -3966,18 +3973,74 @@ def _local_orchestrator_interaction_candidates(state: dict[str, Any]) -> list[di
             search_candidates.append(candidate)
 
     failure_gain = _weighted_expected_gain(state, _effect_delta(tile.get("failure_effects") or []))
+    late_failure_bonus = _night_lateness_score(state) * 0.6
+    remaining_controls = sum(
+        max(0, int(capability.get("max_control_takes_per_night") or 0) - int(capability.get("control_takes_this_night") or 0))
+        for capability in (state.get("capabilities") or {}).values()
+    )
+    control_scarcity_bonus = max(0, 4 - remaining_controls) * 12
     fail_candidate = _local_orchestrator_candidate(
         state,
         plan_id=f"local_fail_{(entry.get('instance') or {}).get('instance_id')}",
         title=f"Fail {_tile_display_name(state, tile)}",
         command=_local_orchestrator_fail_command(state, entry),
-        base_score=75 - best_search_probability * 35,
+        base_score=75 - best_search_probability * 35 + late_failure_bonus + control_scarcity_bonus,
         confidence=1.0,
         expected_gain=failure_gain,
     )
     fail_candidate["statistics"]["failure_effect_score"] = failure_gain
     fail_candidate["statistics"]["best_support_search_probability"] = round(best_search_probability, 2)
+    fail_candidate["statistics"]["late_night_failure_bonus"] = round(late_failure_bonus, 2)
+    fail_candidate["statistics"]["control_scarcity_bonus"] = round(control_scarcity_bonus, 2)
     return [*search_candidates, fail_candidate]
+
+
+def _control_take_followup_value(state: dict[str, Any], ability_id: str) -> float | None:
+    """Return the value of the action an ability can perform immediately after taking control."""
+    capability = _capability(state, ability_id)
+    if not capability or not _has_control_take_left(capability):
+        return None
+    current_node_id = str((state.get("poulpita") or {}).get("node_id") or "")
+    compulsory = _compulsory_choices_on_node(state, current_node_id)
+    visible = _visible_current_tiles(state)
+    interact_cost = _action_cost(state, "interact")
+    move_cost = _action_cost(state, "move")
+    draw_cost = _action_cost(state, "draw")
+
+    if compulsory:
+        initiable = [entry for entry in compulsory if _can_initiate(state, ability_id, entry.get("tile") or {})]
+        if not initiable:
+            return None
+        if _can_pay_action_cost(state, capability, interact_cost):
+            return 140 + max(int((entry.get("tile") or {}).get("priority") or 0) for entry in initiable)
+        if _can_collect_toward_action_cost(state, capability, interact_cost):
+            return 85
+        return None
+
+    shelter_return = _shelter_return_context(state, current_node_id)
+    if shelter_return["should_return"]:
+        if _can_pay_action_cost(state, capability, move_cost):
+            return 125 + float(shelter_return["urgency"])
+        if _can_collect_toward_action_cost(state, capability, move_cost):
+            return 70 + float(shelter_return["urgency"])
+        return None
+
+    initiable = [entry for entry in visible if _can_initiate(state, ability_id, entry.get("tile") or {})]
+    if initiable:
+        if _can_pay_action_cost(state, capability, interact_cost):
+            return 100 + max(int((entry.get("tile") or {}).get("priority") or 0) for entry in initiable)
+        if _can_collect_toward_action_cost(state, capability, interact_cost):
+            return 55
+        return None
+
+    adjacency = ((state.get("map") or {}).get("adjacency") or {}).get(current_node_id, []) or []
+    if adjacency and _can_pay_action_cost(state, capability, move_cost):
+        return 55
+    if (capability.get("draw_pile") or capability.get("discard")) and _can_pay_action_cost(state, capability, draw_cost):
+        return 40
+    if _can_pay_action_cost(state, capability, _action_cost(state, "gain_ap")):
+        return 10
+    return None
 
 
 def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str, Any]]:
@@ -3998,9 +4061,19 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
             if _has_control_take_left(_capability(state, ability_id))
             and any(_can_initiate(state, ability_id, entry.get("tile") or {}) for entry in visible)
         }
+        followup_values = {
+            ability_id: _control_take_followup_value(state, ability_id)
+            for ability_id in _all_capability_ids(state)
+        }
+        productive_followup_available = any(
+            value is not None and value > 10 for value in followup_values.values()
+        )
         for ability_id in _all_capability_ids(state):
             capability = _capability(state, ability_id)
-            if not _has_control_take_left(capability):
+            followup_value = followup_values.get(ability_id)
+            if followup_value is None:
+                continue
+            if productive_followup_available and followup_value <= 10:
                 continue
             if visible_initiators and ability_id not in visible_initiators and not returning_to_shelter:
                 continue
@@ -4032,7 +4105,18 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
                     plan_id=f"local_take_{ability_id}",
                     title=f"{capability.get('name') or ability_id} takes control",
                     command={"type": "take_control", "payload": {"capability_id": ability_id}},
-                    base_score=40 + min(10, int(capability.get("pa") or 0)) + tile_bonus + return_bonus,
+                    base_score=followup_value + min(10, int(capability.get("pa") or 0)) + tile_bonus + return_bonus,
+                )
+            )
+        if not candidates:
+            candidates.append(
+                _local_orchestrator_candidate(
+                    state,
+                    plan_id="local_no_controls_loss",
+                    title="No executable bot action remains",
+                    command={"type": "bot_no_actions_available", "payload": {}},
+                    base_score=-100000,
+                    confidence=1.0,
                 )
             )
         return candidates
@@ -4109,16 +4193,34 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
     if action_slot and active_can_address_compulsory:
         collect_cost = _action_cost(state, "gain_ap")
         move_cost = _action_cost(state, "move")
-        needs_shelter_ap = returning_to_shelter and not _can_pay_action_cost(state, capability, move_cost)
-        if active_interaction_candidate_count == 0 and _can_pay_action_cost(state, capability, collect_cost) and (not returning_to_shelter or needs_shelter_ap):
-            compulsory_ap_setup = bool(compulsory) and int(capability.get("pa") or 0) < interact_cost["ap_cost"]
+        active_initiable_entries = [
+            entry for entry in visible if _can_initiate(state, active_id, entry.get("tile") or {})
+        ]
+        collect_setup_score: float | None = None
+        if compulsory and active_can_initiate_compulsory and _can_collect_toward_action_cost(state, capability, interact_cost):
+            collect_setup_score = 110
+        elif returning_to_shelter and _can_collect_toward_action_cost(state, capability, move_cost):
+            collect_setup_score = 75 + float(shelter_return["urgency"])
+        elif active_initiable_entries and _can_collect_toward_action_cost(state, capability, interact_cost):
+            collect_setup_score = 65
+        elif (
+            not visible_initiators
+            and ((state.get("map") or {}).get("adjacency") or {}).get(current_node_id)
+            and _can_collect_toward_action_cost(state, capability, move_cost)
+        ):
+            collect_setup_score = 45
+        if (
+            active_interaction_candidate_count == 0
+            and collect_setup_score is not None
+            and _can_pay_action_cost(state, capability, collect_cost)
+        ):
             candidates.append(
                 _local_orchestrator_candidate(
                     state,
                     plan_id=f"local_collect_{active_id}",
                     title=f"{capability.get('name') or active_id} collects AP",
                     command={"type": "collect_action_points", "payload": {"capability_id": active_id}},
-                    base_score=(110 if compulsory_ap_setup else 30) + _expected_ap_roll(state) * 3 + (float(shelter_return["urgency"]) if needs_shelter_ap else 0),
+                    base_score=collect_setup_score + _expected_ap_roll(state) * 3,
                 )
             )
         draw_cost = _action_cost(state, "draw")
@@ -4166,6 +4268,21 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
                 candidates.append(
                     candidate
                 )
+    if (
+        not candidates
+        and action_slot
+        and active_can_address_compulsory
+        and _can_pay_action_cost(state, capability, _action_cost(state, "gain_ap"))
+    ):
+        candidates.append(
+            _local_orchestrator_candidate(
+                state,
+                plan_id=f"local_fallback_collect_{active_id}",
+                title=f"{capability.get('name') or active_id} uses its remaining action to collect AP",
+                command={"type": "collect_action_points", "payload": {"capability_id": active_id}},
+                base_score=5,
+            )
+        )
     active_action_candidates = [
         candidate
         for candidate in candidates
@@ -4177,11 +4294,22 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
             for ability_id in visible_initiators
             if ability_id != active_id and _has_control_take_left(_capability(state, ability_id))
         }
+        followup_values = {
+            ability_id: _control_take_followup_value(state, ability_id)
+            for ability_id in _all_capability_ids(state)
+            if ability_id != active_id
+        }
+        productive_followup_available = any(
+            value is not None and value > 10 for value in followup_values.values()
+        )
         for ability_id in _all_capability_ids(state):
             if ability_id == active_id:
                 continue
             next_capability = _capability(state, ability_id)
-            if not _has_control_take_left(next_capability):
+            followup_value = followup_values.get(ability_id)
+            if followup_value is None:
+                continue
+            if productive_followup_available and followup_value <= 10:
                 continue
             if available_visible_initiators and ability_id not in available_visible_initiators:
                 continue
@@ -4212,9 +4340,30 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
                     plan_id=f"local_switch_{ability_id}",
                     title=f"{next_capability.get('name') or ability_id} takes control",
                     command={"type": "take_control", "payload": {"capability_id": ability_id}},
-                    base_score=34 + min(8, int(next_capability.get("pa") or 0)) + tile_bonus + return_bonus,
+                    base_score=followup_value + min(8, int(next_capability.get("pa") or 0)) + tile_bonus + return_bonus,
                 )
             )
+    if not candidates and action_slot and _can_pay_action_cost(state, capability, _action_cost(state, "gain_ap")):
+        candidates.append(
+            _local_orchestrator_candidate(
+                state,
+                plan_id=f"local_last_resort_collect_{active_id}",
+                title=f"{capability.get('name') or active_id} uses its remaining action to collect AP",
+                command={"type": "collect_action_points", "payload": {"capability_id": active_id}},
+                base_score=-10,
+            )
+        )
+    if not candidates:
+        candidates.append(
+            _local_orchestrator_candidate(
+                state,
+                plan_id="local_no_actions_loss",
+                title="No executable bot action remains",
+                command={"type": "bot_no_actions_available", "payload": {}},
+                base_score=-100000,
+                confidence=1.0,
+            )
+        )
     return candidates
 
 
@@ -4236,6 +4385,13 @@ def _local_orchestrator_candidates(state: dict[str, Any]) -> list[dict[str, Any]
             deduplicated[key] = candidate
     limit = _orchestrator_int_setting(state, "orchestrator_max_candidates", 8, minimum=2, maximum=20)
     return sorted(deduplicated.values(), key=_orchestrator_plan_score, reverse=True)[:limit]
+
+
+def has_executable_bot_orchestrator_action(state: dict[str, Any]) -> bool:
+    return any(
+        str((_orchestrator_command(candidate) or {}).get("type") or "") != "bot_no_actions_available"
+        for candidate in _local_orchestrator_candidates(state)
+    )
 
 
 def _orchestrator_unexpected_boundary(state: dict[str, Any], next_command: dict[str, Any] | None) -> str | None:

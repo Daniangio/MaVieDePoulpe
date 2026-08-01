@@ -404,6 +404,50 @@ def test_bots_only_orchestrator_marks_an_early_shelter_dead_end_as_lost():
     run(scenario())
 
 
+def test_bots_only_orchestrator_marks_unaffordable_action_dead_end_as_lost():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+        room = await service.create_room(user=user, mode="bots_only", game_type="goldfish")
+        await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_start_unaffordable_dead_end",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "goldfish",
+                "expected_version": 0,
+                "type": "start_goldfish_game",
+                "payload": {},
+            },
+        )
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "force"
+        current_node_id = state["poulpita"]["node_id"]
+        state["map"]["adjacency"][current_node_id] = []
+        state["poulpita"]["neurons"] = 0
+        state["tile_catalog"]["action_costs"] = {
+            "gain_ap": {"ap_cost": 0, "time_cost": 0, "neuron_cost": 1},
+        }
+        for ability_id, capability in state["capabilities"].items():
+            capability["hand"] = []
+            capability["draw_pile"] = []
+            capability["discard"] = []
+            if ability_id != "force":
+                capability["control_takes_this_night"] = capability["max_control_takes_per_night"]
+
+        result = await service.execute_bot_orchestrator_step(room_id=room["id"], user=user)
+
+        assert result["ok"] is True
+        assert result["decision"]["command"]["type"] == "bot_no_actions_available"
+        assert result["projection"]["phase"] == "game_over"
+        assert service._memory_states[room["id"]]["game_over_reason"] == "no_controls_or_actions"
+
+    run(scenario())
+
+
 def test_bot_orchestrator_rollouts_do_not_mutate_authoritative_state():
     state = _goldfish_state(
         "room_bot_rollout_copy",
@@ -856,6 +900,115 @@ def test_local_orchestrator_switches_control_only_without_active_actions():
         (candidate.get("commands") or [{}])[0].get("type") == "take_control"
         for candidate in exhausted_candidates
     )
+
+
+def test_local_orchestrator_switches_to_compulsory_initiator_with_immediate_followup():
+    state = _goldfish_state("room_required_initiator", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "force"
+    current_node_id = state["poulpita"]["node_id"]
+    for ability_id, capability in state["capabilities"].items():
+        capability["initiates_event_ids"] = ["threat-event"] if ability_id == "camouflage" else []
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "categories": {"threat": {"id": "threat", "name": "Threat", "compulsory_on_same_node": True}},
+        "events": {"threat-event": {"id": "threat-event", "name": "Big fish", "category_id": "threat"}},
+        "tiles": {
+            "threat-tile": {
+                "id": "threat-tile",
+                "event_id": "threat-event",
+                "priority": 5,
+                "interaction_ids": [],
+            }
+        },
+    }
+    state["tiles"] = {
+        current_node_id: [{"instance_id": "threat-instance", "tile_id": "threat-tile", "face_up": True}]
+    }
+
+    candidates = bot_planner._local_orchestrator_night_candidates(state)
+
+    assert [candidate["commands"][0] for candidate in candidates] == [
+        {"type": "take_control", "payload": {"capability_id": "camouflage"}}
+    ]
+    simulated = deepcopy(state)
+    bot_planner._simulate_public_command(simulated, candidates[0]["commands"][0])
+    followups = bot_planner._local_orchestrator_night_candidates(simulated)
+    assert followups
+    assert followups[0]["commands"][0]["type"] == "start_interaction"
+
+
+def test_local_orchestrator_uses_active_fallback_before_switching_control():
+    state = _goldfish_state("room_active_fallback", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "force"
+    current_node_id = state["poulpita"]["node_id"]
+    state["map"]["adjacency"][current_node_id] = []
+    for capability in state["capabilities"].values():
+        capability["hand"] = []
+        capability["draw_pile"] = []
+        capability["discard"] = []
+
+    candidates = bot_planner._local_orchestrator_night_candidates(state)
+
+    assert [candidate["commands"][0] for candidate in candidates] == [
+        {"type": "collect_action_points", "payload": {"capability_id": "force"}}
+    ]
+
+
+def test_local_orchestrator_ignores_gain_only_control_when_productive_control_exists():
+    state = _goldfish_state("room_productive_control", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_idle"
+    state["active_capability_id"] = None
+    for ability_id, capability in state["capabilities"].items():
+        capability["pa"] = 0 if ability_id == "force" else 2
+        if ability_id not in {"force", "camouflage"}:
+            capability["control_takes_this_night"] = capability["max_control_takes_per_night"]
+
+    candidates = bot_planner._local_orchestrator_night_candidates(state)
+    commands = [candidate["commands"][0] for candidate in candidates]
+
+    assert {"type": "take_control", "payload": {"capability_id": "camouflage"}} in commands
+    assert {"type": "take_control", "payload": {"capability_id": "force"}} not in commands
+
+
+def test_local_orchestrator_finishes_when_no_control_can_start_the_night():
+    state = _goldfish_state("room_no_controls", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_idle"
+    state["active_capability_id"] = None
+    for capability in state["capabilities"].values():
+        capability["control_takes_this_night"] = capability["max_control_takes_per_night"]
+
+    candidates = bot_planner._local_orchestrator_night_candidates(state)
+
+    assert [candidate["commands"][0] for candidate in candidates] == [
+        {"type": "bot_no_actions_available", "payload": {}}
+    ]
+
+
+def test_local_orchestrator_finishes_instead_of_idling_when_no_action_is_affordable():
+    state = _goldfish_state("room_no_affordable_action", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "force"
+    current_node_id = state["poulpita"]["node_id"]
+    state["map"]["adjacency"][current_node_id] = []
+    state["poulpita"]["neurons"] = 0
+    state["tile_catalog"]["action_costs"] = {
+        "gain_ap": {"ap_cost": 0, "time_cost": 0, "neuron_cost": 1},
+    }
+    for ability_id, capability in state["capabilities"].items():
+        capability["hand"] = []
+        capability["draw_pile"] = []
+        capability["discard"] = []
+        if ability_id != "force":
+            capability["control_takes_this_night"] = capability["max_control_takes_per_night"]
+
+    candidates = bot_planner._local_orchestrator_night_candidates(state)
+
+    assert [candidate["commands"][0] for candidate in candidates] == [
+        {"type": "bot_no_actions_available", "payload": {}}
+    ]
+    assert bot_planner.has_executable_bot_orchestrator_action(state) is False
 
 
 def test_local_orchestrator_collects_ap_instead_of_switching_for_free_surprise_tile():
@@ -2759,8 +2912,15 @@ def test_end_night_is_free_and_day_upgrades_stack_before_next_night():
         state["night_time_spent"] = 16
         state["shelters"] = {"1A": 1}
         state["poulpita"]["neurons"] = 3
+        expected_initial_ap = {}
+        for index, (capability_id, configured_capability) in enumerate(state["capabilities"].items()):
+            configured_capability["initial_ap"] = index
+            configured_capability["pa"] = 99
+            expected_initial_ap[capability_id] = index
         capability = state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]
         capability["pa"] = 0
+        capability["initial_ap"] = 7
+        expected_initial_ap[DEFAULT_ACTIVE_CAPABILITY_ID] = 7
         capability["control_takes_this_night"] = 2
         capability["actions_taken_this_control"] = int(capability["max_actions_per_control"])
         capability["current_max_cards_in_hand"] = 3
@@ -2828,11 +2988,33 @@ def test_end_night_is_free_and_day_upgrades_stack_before_next_night():
         assert night["projection"]["phase"] == "night_idle"
         assert night["projection"]["day_index"] == 2
         assert night_capability["current_max_cards_in_hand"] == 8
+        assert night_capability["pa"] == 7
+        assert {
+            capability_id: projected_capability["pa"]
+            for capability_id, projected_capability in night["projection"]["capabilities"].items()
+        } == expected_initial_ap
         assert night_capability["control_takes_this_night"] == 0
         assert len(night_capability["hand"]) == min(8, len(night_capability["hand"]) + len(night_capability["draw_pile"]))
         assert night_capability["discard"] == []
 
     run(scenario())
+
+
+def test_planner_simulation_resets_ap_to_initial_value_when_day_ends():
+    state = _goldfish_state("room_simulated_night_reset", level_id="test-level", mode="bots_only")
+    state["phase"] = "day"
+    state["day_index"] = 1
+    state["max_nights"] = 5
+    for index, capability in enumerate(state["capabilities"].values()):
+        capability["initial_ap"] = index
+        capability["pa"] = 99
+
+    bot_planner._simulate_public_command(state, {"type": "end_day", "payload": {}})
+
+    assert state["phase"] == "night_idle"
+    assert [capability["pa"] for capability in state["capabilities"].values()] == list(
+        range(len(state["capabilities"]))
+    )
 
 
 def test_day_can_buy_deck_exchange_upgrade():

@@ -13,7 +13,12 @@ from typing import Any, Optional
 
 from fastapi import WebSocket
 
-from .bots.planner import choose_bot_orchestrator_action, generate_bot_plan_status, public_bot_plan_status
+from .bots.planner import (
+    choose_bot_orchestrator_action,
+    generate_bot_plan_status,
+    has_executable_bot_orchestrator_action,
+    public_bot_plan_status,
+)
 from .game_content_service import get_game_content_catalog, get_level_config, get_player_board_configs
 from .map_service import get_map
 from .server_models import User
@@ -887,7 +892,7 @@ def _damage_poulpita(next_state: dict[str, Any], *, amount: int = 1, reason: str
 def _active_capability_is_out_of_actions(state: dict[str, Any]) -> bool:
     active_id = state.get("active_capability_id")
     if not active_id:
-        return False
+        return True
     capability = (state.get("capabilities") or {}).get(active_id) or {}
     remaining_actions = int(capability.get("max_actions_per_control") or 0) - int(capability.get("actions_taken_this_control") or 0)
     return remaining_actions <= 0
@@ -2042,7 +2047,7 @@ class GameRoomService:
                 )
             if state.get("phase") not in {PHASE_NIGHT_IDLE, PHASE_NIGHT_ACTION}:
                 self._reject(state, command_id, "phase_not_night", "This dead-end check applies only during the night.")
-            if not (_active_capability_is_out_of_actions(state) and _no_other_control_takes_available(state)):
+            if has_executable_bot_orchestrator_action(state):
                 self._reject(
                     state,
                     command_id,
@@ -2410,6 +2415,8 @@ class GameRoomService:
             for capability in (next_state.get("capabilities") or {}).values():
                 capability["control_takes_this_night"] = 0
                 capability["actions_taken_this_control"] = 0
+                initial_ap = capability.get("initial_ap")
+                capability["pa"] = max(0, int(initial_ap if initial_ap is not None else 5))
                 _apply_unmigrated_deck_exchange_upgrades(capability)
                 _reshuffle_and_deal_starting_hand(capability)
             next_state["version"] = int(state["version"]) + 1
