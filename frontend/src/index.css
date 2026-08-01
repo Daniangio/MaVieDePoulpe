@@ -56,11 +56,11 @@ select {
 }
 
 .board-tile-placing {
-  animation: board-tile-placed 420ms ease-out both;
+  animation: board-tile-placed 280ms ease-out both;
 }
 
 .board-tile-removing {
-  animation: board-tile-removed 420ms ease-in both;
+  animation: board-tile-removed 280ms ease-in both;
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -145,7 +145,13 @@ const normalizeShelter = (entry: any) => {
   };
 };
 
-type AnimatedTile = any & { __animation?: "placing" | "removing" };
+type AnimatedTile = any & {
+  __animation?: "placing" | "removing";
+  __animationDelayMs?: number;
+};
+
+const TILE_ANIMATION_MS = 280;
+const TILE_STAGGER_MS = 32;
 
 const flattenTiles = (tiles: Record<string, any[]> | undefined) => {
   const flattened = new Map<string, { nodeId: string; tile: any }>();
@@ -163,12 +169,26 @@ const groupTiles = (entries: Array<{ nodeId: string; tile: AnimatedTile }>) => {
   return grouped;
 };
 
+const sortTileEntries = (
+  entries: Array<{ nodeId: string; tile: any }>,
+  nodeOrder: Map<string, number>,
+) => entries.sort((left, right) => {
+  const nodeDifference = (nodeOrder.get(left.nodeId) ?? Number.MAX_SAFE_INTEGER) - (nodeOrder.get(right.nodeId) ?? Number.MAX_SAFE_INTEGER);
+  if (nodeDifference) return nodeDifference;
+  return String(left.tile?.instance_id || "").localeCompare(String(right.tile?.instance_id || ""), undefined, { numeric: true });
+});
+
 const BoardView = ({ projection, focusedCapabilityId, moveMode, specialTargetMode, pending, onMove, onSpecialNode, onSpecialTile, onInspectTile, onMoveShellFromShelter }: BoardViewProps) => {
   const boardRef = useRef<HTMLElement | null>(null);
   const currentNodeId = projection.poulpita.node_id;
   const focusedCapability = focusedCapabilityId ? projection.capabilities?.[focusedCapabilityId] : null;
   const adjacentNodeIds = currentNodeId ? projection.map.adjacency[currentNodeId] || [] : [];
   const nodes = useMemo(() => Object.values(projection.map.nodes).sort((a, b) => a.x - b.x || a.y - b.y), [projection.map.nodes]);
+  const orderedNodeIds = useMemo(
+    () => Object.keys(projection.map.nodes).sort((left, right) => left.localeCompare(right, undefined, { numeric: true })),
+    [projection.map.nodes],
+  );
+  const nodeOrder = useMemo(() => new Map(orderedNodeIds.map((nodeId, index) => [nodeId, index])), [orderedNodeIds]);
   const imageUrl = projection.map.image_url ? buildApiUrl(projection.map.image_url) : "";
   const imageWidth = Number(projection.map.image_width || 0);
   const imageHeight = Number(projection.map.image_height || 0);
@@ -186,27 +206,80 @@ const BoardView = ({ projection, focusedCapabilityId, moveMode, specialTargetMod
   } | null>(null);
   const dragRef = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
   const previousTilesRef = useRef<Map<string, { nodeId: string; tile: any }>>(new Map());
-  const [displayTiles, setDisplayTiles] = useState<Record<string, AnimatedTile[]>>(() =>
-    groupTiles(Array.from(flattenTiles(projection.tiles).values()).map((entry) => ({ ...entry, tile: { ...entry.tile, __animation: "placing" } }))),
-  );
+  const animationTimersRef = useRef<number[]>([]);
+  const [displayTiles, setDisplayTiles] = useState<Record<string, AnimatedTile[]>>(() => {
+    const initialEntries = sortTileEntries(Array.from(flattenTiles(projection.tiles).values()), nodeOrder);
+    return groupTiles(initialEntries.map((entry, index) => ({
+      ...entry,
+      tile: { ...entry.tile, __animation: "placing", __animationDelayMs: index * TILE_STAGGER_MS },
+    })));
+  });
 
   useEffect(() => {
     const previous = previousTilesRef.current;
     const current = flattenTiles(projection.tiles);
     const addedIds = new Set(Array.from(current.keys()).filter((instanceId) => !previous.has(instanceId)));
-    const removed = Array.from(previous.entries())
+    const removedIds = new Set(Array.from(previous.keys()).filter((instanceId) => !current.has(instanceId)));
+    const layoutChanged = addedIds.size > 0 || removedIds.size > 0 || Array.from(current.entries()).some(([instanceId, entry]) => previous.get(instanceId)?.nodeId !== entry.nodeId);
+
+    if (!layoutChanged) {
+      setDisplayTiles((displayed) => {
+        const displayedById = flattenTiles(displayed);
+        const synchronized = Array.from(current.entries()).map(([instanceId, entry]) => {
+          const animated = displayedById.get(instanceId)?.tile;
+          return {
+            ...entry,
+            tile: {
+              ...entry.tile,
+              ...(animated?.__animation ? { __animation: animated.__animation } : {}),
+              ...(animated?.__animationDelayMs !== undefined ? { __animationDelayMs: animated.__animationDelayMs } : {}),
+            },
+          };
+        });
+        const removing = Array.from(displayedById.values()).filter((entry) => entry.tile?.__animation === "removing" && !current.has(String(entry.tile.instance_id)));
+        return groupTiles([...synchronized, ...removing]);
+      });
+      previousTilesRef.current = current;
+      return;
+    }
+
+    animationTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    animationTimersRef.current = [];
+    const removed = sortTileEntries(Array.from(previous.entries())
       .filter(([instanceId]) => !current.has(instanceId))
-      .map(([, entry]) => ({ ...entry, tile: { ...entry.tile, __animation: "removing" as const } }));
-    const timers: number[] = [];
+      .map(([, entry]) => ({ ...entry })), nodeOrder)
+      .map((entry, index) => ({
+        ...entry,
+        tile: { ...entry.tile, __animation: "removing" as const, __animationDelayMs: index * TILE_STAGGER_MS },
+      }));
+    const removalDuration = removed.length ? TILE_ANIMATION_MS + (removed.length - 1) * TILE_STAGGER_MS : 0;
 
     const showCurrent = () => {
-      setDisplayTiles(groupTiles(Array.from(current.entries()).map(([instanceId, entry]) => ({
-        ...entry,
-        tile: { ...entry.tile, ...(addedIds.has(instanceId) ? { __animation: "placing" as const } : {}) },
-      }))));
-      timers.push(window.setTimeout(() => {
-        setDisplayTiles(groupTiles(Array.from(current.values()).map((entry) => ({ ...entry, tile: { ...entry.tile } }))));
-      }, 850));
+      const orderedAdded = sortTileEntries(
+        Array.from(current.entries()).filter(([instanceId]) => addedIds.has(instanceId)).map(([, entry]) => ({ ...entry })),
+        nodeOrder,
+      );
+      const addedOrder = new Map(orderedAdded.map((entry, index) => [String(entry.tile.instance_id), index]));
+      setDisplayTiles(groupTiles(Array.from(current.entries()).map(([instanceId, entry]) => {
+        const animationIndex = addedOrder.get(instanceId);
+        return {
+          ...entry,
+          tile: {
+            ...entry.tile,
+            ...(animationIndex !== undefined
+              ? { __animation: "placing" as const, __animationDelayMs: animationIndex * TILE_STAGGER_MS }
+              : {}),
+          },
+        };
+      })));
+      const placementDuration = orderedAdded.length ? TILE_ANIMATION_MS + (orderedAdded.length - 1) * TILE_STAGGER_MS : 0;
+      animationTimersRef.current.push(window.setTimeout(() => {
+        setDisplayTiles((displayed) => groupTiles(
+          Array.from(flattenTiles(displayed).values())
+            .filter((entry) => entry.tile?.__animation !== "removing")
+            .map((entry) => ({ ...entry, tile: { ...entry.tile, __animation: undefined, __animationDelayMs: undefined } })),
+        ));
+      }, placementDuration + 40));
     };
 
     if (removed.length) {
@@ -214,13 +287,16 @@ const BoardView = ({ projection, focusedCapabilityId, moveMode, specialTargetMod
         .filter(([instanceId]) => !addedIds.has(instanceId))
         .map(([, entry]) => ({ ...entry, tile: { ...entry.tile } }));
       setDisplayTiles(groupTiles([...surviving, ...removed]));
-      timers.push(window.setTimeout(showCurrent, 420));
+      animationTimersRef.current.push(window.setTimeout(showCurrent, removalDuration));
     } else {
       showCurrent();
     }
     previousTilesRef.current = current;
-    return () => timers.forEach((timer) => window.clearTimeout(timer));
-  }, [projection.tiles]);
+  }, [nodeOrder, projection.tiles]);
+
+  useEffect(() => () => {
+    animationTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+  }, []);
 
   const showTilePreview = (target: HTMLElement, tile: any, event: any, interactionsById: Record<string, any>, token: any, isRoundToken: boolean) => {
     const boardRect = boardRef.current?.getBoundingClientRect();
@@ -406,7 +482,7 @@ const BoardView = ({ projection, focusedCapabilityId, moveMode, specialTargetMod
                           onMouseLeave={() => setHoveredTile(null)}
                           onPointerDown={(event) => event.stopPropagation()}
                           style={{
-                            animationDelay: tileInstance.__animation === "placing" ? `${Math.min(tileIndex, 8) * 45}ms` : undefined,
+                            animationDelay: tileInstance.__animation ? `${tileInstance.__animationDelayMs || 0}ms` : undefined,
                             transform: `translate(calc(-50% + ${position.x*1.2}px), calc(-50% + ${position.y*1.2}px))`,
                           }}
                           title={title}
