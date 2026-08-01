@@ -233,7 +233,10 @@ const AdminContentPage = () => {
   const [playerBoardDraft, setPlayerBoardDraft] = useState(emptyPlayerBoard);
   const [poulpitaPanelDraft, setPoulpitaPanelDraft] = useState(null);
   const [poulpitaPanelPreviewUrl, setPoulpitaPanelPreviewUrl] = useState("");
-  const [activeTab, setActiveTab] = useState("map");
+  const [activeTab, setActiveTab] = useState(() => {
+    const requestedTab = window.location.hash.replace(/^#/, "");
+    return contentTabs.some(([id]) => id === requestedTab) ? requestedTab : "map";
+  });
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
@@ -818,7 +821,7 @@ const AdminContentPage = () => {
 
       <nav className="mb-4 flex flex-wrap gap-2">
         {contentTabs.map(([id, label]) => (
-          <button className={`rounded-md px-3 py-2 text-sm font-medium ${activeTab === id ? "bg-teal-500 text-white" : "border border-cyan-300 bg-white text-teal-900 hover:bg-cyan-50"}`} key={id} onClick={() => setActiveTab(id)} type="button">
+          <button className={`rounded-md px-3 py-2 text-sm font-medium ${activeTab === id ? "bg-teal-500 text-white" : "border border-cyan-300 bg-white text-teal-900 hover:bg-cyan-50"}`} key={id} onClick={() => { setActiveTab(id); window.history.replaceState(null, "", `#${id}`); }} type="button">
             {label}
           </button>
         ))}

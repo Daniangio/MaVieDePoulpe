@@ -1884,6 +1884,14 @@ const GameRoomPage = ({ replayMode = false }: { replayMode?: boolean }) => {
   }, [navigate, projection?.phase, replayMode, roomId]);
 
   useEffect(() => {
+    if (!replayMode || !replay?.frames?.length) return undefined;
+    const lastFrameIndex = replay.frames.length - 1;
+    if (replayFrameIndex < lastFrameIndex) return undefined;
+    const timer = window.setTimeout(() => navigate("/admin/content#bot_simulations"), 3500);
+    return () => window.clearTimeout(timer);
+  }, [navigate, replay, replayFrameIndex, replayMode]);
+
+  useEffect(() => {
     if (!selectedCapability) {
       setDiscardBeforeDraw(false);
       return;
@@ -2577,7 +2585,7 @@ const GameRoomPage = ({ replayMode = false }: { replayMode?: boolean }) => {
               <select aria-label="Replay speed" className="h-8 rounded border border-slate-700 bg-slate-950 px-2 text-xs text-white" onChange={(event) => setReplaySpeed(Number(event.target.value))} value={replaySpeed}>
                 {[0.5, 1, 2, 4, 8, 16].map((speed) => <option key={speed} value={speed}>{speed}x</option>)}
               </select>
-              <button aria-label="Exit replay" className="flex h-8 w-8 items-center justify-center rounded border border-slate-600 hover:bg-slate-800" onClick={() => navigate("/admin/content")} title="Exit replay" type="button"><LogOut size={16} /></button>
+              <button aria-label="Exit replay" className="flex h-8 w-8 items-center justify-center rounded border border-slate-600 hover:bg-slate-800" onClick={() => navigate("/admin/content#bot_simulations")} title="Exit replay" type="button"><LogOut size={16} /></button>
             </>
           ) : null}
           {!replayMode && botsOnlyMode && projection?.phase !== "setup" && projection?.phase !== "game_over" ? (

@@ -274,6 +274,25 @@ def _fallback_night_command(state: dict[str, Any]) -> dict[str, Any]:
     return {"type": "bot_no_actions_available", "payload": {}}
 
 
+def _playable_initial_state(
+    *,
+    room_id: str,
+    level_id: str,
+    bot_config: dict[str, Any],
+    max_attempts: int = 50,
+) -> tuple[dict[str, Any], int]:
+    for attempt in range(1, max_attempts + 1):
+        state = _goldfish_state(room_id, level_id=level_id, mode="bots_only", bot_config=bot_config)
+        first_decision = choose_fast_bot_orchestrator_action(state)
+        first_command_type = str(((first_decision.get("command") or {}).get("type") or ""))
+        if first_command_type != "bot_no_actions_available":
+            return state, attempt
+    raise RuntimeError(
+        "Could not create a playable initial layout after "
+        f"{max_attempts} shuffles. Check compulsory tile initiator configuration."
+    )
+
+
 def run_bot_simulation(
     *,
     level_id: str,
@@ -300,7 +319,11 @@ def run_bot_simulation(
     reducer = GameRoomService()
     started = time.perf_counter()
     random.seed(seed)
-    state = _goldfish_state(room_id, level_id=level["id"], mode="bots_only", bot_config=bot_config)
+    state, setup_attempts = _playable_initial_state(
+        room_id=room_id,
+        level_id=level["id"],
+        bot_config=bot_config,
+    )
     initial_projection = _project_state(state)
     frames = [_frame(index=0, projection=initial_projection, command=None, events=initial_projection.get("events") or [])]
     stop_reason = "game_finished"
@@ -401,6 +424,7 @@ def run_bot_simulation(
             "duration_ms": elapsed_ms,
             "final_day": int(state.get("day_index") or 1),
             "final_energy": int(poulpita.get("energy") or 0),
+            "setup_rerolls": max(0, setup_attempts - 1),
         },
         "frames": frames,
     }

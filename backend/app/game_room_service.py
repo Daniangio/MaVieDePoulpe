@@ -2047,7 +2047,12 @@ class GameRoomService:
                 )
             if state.get("phase") not in {PHASE_NIGHT_IDLE, PHASE_NIGHT_ACTION}:
                 self._reject(state, command_id, "phase_not_night", "This dead-end check applies only during the night.")
-            if has_executable_bot_orchestrator_action(state):
+            # Planner viability is advisory. An unscored board position must not
+            # become an authoritative loss while another control take remains.
+            if not _no_other_control_takes_available(state) or (
+                not _active_capability_is_out_of_actions(state)
+                and has_executable_bot_orchestrator_action(state)
+            ):
                 self._reject(
                     state,
                     command_id,

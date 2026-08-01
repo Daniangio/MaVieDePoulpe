@@ -399,6 +399,32 @@ def test_background_bot_simulations_are_listed_immediately_as_queued(tmp_path, m
     release_worker.set()
 
 
+def test_backend_simulation_reshuffles_an_initial_no_action_layout(tmp_path, monkeypatch):
+    monkeypatch.setattr(bot_simulation_service, "REPLAYS_ROOT", tmp_path)
+    monkeypatch.setattr(bot_simulation_service, "get_level_config", lambda level_id: TEST_LEVEL)
+    playable_state = _goldfish_state("simulation_template", level_id="test-level", mode="bots_only")
+    dead_state = deepcopy(playable_state)
+    for capability in dead_state["capabilities"].values():
+        capability["max_control_takes_per_night"] = 0
+    generated_states = [dead_state, playable_state]
+
+    def generate_state(*_args, **_kwargs):
+        return deepcopy(generated_states.pop(0) if generated_states else playable_state)
+
+    monkeypatch.setattr(bot_simulation_service, "_goldfish_state", generate_state)
+
+    summary = bot_simulation_service.run_bot_simulation(
+        level_id="test-level",
+        seed=700,
+        max_steps=10,
+    )
+    replay = bot_simulation_service.get_bot_replay(summary["id"])
+
+    assert replay["metadata"]["setup_rerolls"] == 1
+    assert replay["frames"][1]["command"]["type"] != "bot_no_actions_available"
+    assert not (summary["outcome"] == "lost" and summary["steps"] == 1)
+
+
 def test_bots_only_orchestrator_marks_an_early_shelter_dead_end_as_lost():
     async def scenario():
         service = GameRoomService()
@@ -479,6 +505,52 @@ def test_bots_only_orchestrator_marks_unaffordable_action_dead_end_as_lost():
         assert result["decision"]["command"]["type"] == "bot_no_actions_available"
         assert result["projection"]["phase"] == "game_over"
         assert service._memory_states[room["id"]]["game_over_reason"] == "no_controls_or_actions"
+
+    run(scenario())
+
+
+def test_bot_no_actions_command_is_rejected_while_another_control_take_remains():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+        room = await service.create_room(user=user, mode="bots_only", game_type="goldfish")
+        await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_start_false_dead_end",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "goldfish",
+                "expected_version": 0,
+                "type": "start_goldfish_game",
+                "payload": {},
+            },
+        )
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "intelligence"
+        active = state["capabilities"]["intelligence"]
+        active["actions_taken_this_control"] = active["max_actions_per_control"]
+        state["capabilities"]["force"]["control_takes_this_night"] = 0
+
+        result = await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_false_dead_end",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "bot_orchestrator",
+                "expected_version": state["version"],
+                "type": "bot_no_actions_available",
+                "payload": {},
+            },
+        )
+
+        assert result["ok"] is False
+        assert result["reason"] == "bot_actions_still_available"
+        assert service._memory_states[room["id"]]["phase"] == "night_action"
 
     run(scenario())
 
@@ -989,6 +1061,33 @@ def test_local_orchestrator_uses_active_fallback_before_switching_control():
     assert [candidate["commands"][0] for candidate in candidates] == [
         {"type": "collect_action_points", "payload": {"capability_id": "force"}}
     ]
+
+
+def test_local_orchestrator_does_not_lose_when_unassigned_compulsory_tile_blocks_scoring():
+    state = _goldfish_state("room_unassigned_compulsory", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "intelligence"
+    active = state["capabilities"]["intelligence"]
+    active["actions_taken_this_control"] = active["max_actions_per_control"]
+    current_node_id = state["poulpita"]["node_id"]
+    for capability in state["capabilities"].values():
+        capability["initiates_event_ids"] = []
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "categories": {"threat": {"id": "threat", "name": "Threat", "compulsory_on_same_node": True}},
+        "events": {"moray": {"id": "moray", "name": "Moray", "category_id": "threat"}},
+        "tiles": {"moray-tile": {"id": "moray-tile", "event_id": "moray", "priority": 6, "interaction_ids": []}},
+    }
+    state["tiles"] = {
+        current_node_id: [{"instance_id": "moray-instance", "tile_id": "moray-tile", "face_up": True}]
+    }
+
+    candidates = bot_planner._local_orchestrator_night_candidates(state)
+    commands = [candidate["commands"][0] for candidate in candidates]
+
+    assert commands
+    assert all(command["type"] == "take_control" for command in commands)
+    assert all(command["type"] != "bot_no_actions_available" for command in commands)
 
 
 def test_local_orchestrator_ignores_gain_only_control_when_productive_control_exists():

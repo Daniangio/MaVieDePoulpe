@@ -4154,6 +4154,20 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
                 )
             )
         if not candidates:
+            for ability_id in _all_capability_ids(state):
+                capability = _capability(state, ability_id)
+                if not _has_control_take_left(capability):
+                    continue
+                candidates.append(
+                    _local_orchestrator_candidate(
+                        state,
+                        plan_id=f"local_fallback_take_{ability_id}",
+                        title=f"{capability.get('name') or ability_id} takes control",
+                        command={"type": "take_control", "payload": {"capability_id": ability_id}},
+                        base_score=-25 + min(5, int(capability.get("pa") or 0)),
+                    )
+                )
+        if not candidates:
             candidates.append(
                 _local_orchestrator_candidate(
                     state,
@@ -4398,6 +4412,22 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
                 base_score=-10,
             )
         )
+    if not candidates:
+        for ability_id in _all_capability_ids(state):
+            if ability_id == active_id:
+                continue
+            next_capability = _capability(state, ability_id)
+            if not _has_control_take_left(next_capability):
+                continue
+            candidates.append(
+                _local_orchestrator_candidate(
+                    state,
+                    plan_id=f"local_fallback_switch_{ability_id}",
+                    title=f"{next_capability.get('name') or ability_id} takes control",
+                    command={"type": "take_control", "payload": {"capability_id": ability_id}},
+                    base_score=-30 + min(5, int(next_capability.get("pa") or 0)),
+                )
+            )
     if not candidates:
         candidates.append(
             _local_orchestrator_candidate(
