@@ -763,6 +763,39 @@ def _safe_route_to_closest_shelter(state: dict[str, Any], start_node_id: str) ->
     return None
 
 
+def _route_to_closest_known_shelter(state: dict[str, Any], start_node_id: str) -> dict[str, Any] | None:
+    """Find the shortest shelter route when every known route contains a compulsory blocker."""
+    start_node_id = str(start_node_id or "")
+    shelter_nodes = _known_shelter_nodes(state)
+    if not start_node_id or not shelter_nodes:
+        return None
+    if start_node_id in shelter_nodes:
+        return {"shelter_node_id": start_node_id, "path": [start_node_id], "distance": 0}
+
+    adjacency = (state.get("map") or {}).get("adjacency") or {}
+    frontier = [start_node_id]
+    previous: dict[str, str | None] = {start_node_id: None}
+    while frontier:
+        node_id = frontier.pop(0)
+        for raw_next_node_id in adjacency.get(node_id, []) or []:
+            next_node_id = str(raw_next_node_id)
+            if next_node_id in previous:
+                continue
+            previous[next_node_id] = node_id
+            if next_node_id in shelter_nodes:
+                path = [next_node_id]
+                while previous[path[-1]] is not None:
+                    path.append(str(previous[path[-1]]))
+                path.reverse()
+                return {
+                    "shelter_node_id": next_node_id,
+                    "path": path,
+                    "distance": len(path) - 1,
+                }
+            frontier.append(next_node_id)
+    return None
+
+
 def _distance_to_closest_shelter(state: dict[str, Any], start_node_id: str) -> int | None:
     route = _safe_route_to_closest_shelter(state, start_node_id)
     return int(route["distance"]) if route else None
@@ -770,14 +803,24 @@ def _distance_to_closest_shelter(state: dict[str, Any], start_node_id: str) -> i
 
 def _shelter_return_context(state: dict[str, Any], start_node_id: str | None = None) -> dict[str, Any]:
     current_node_id = str(start_node_id or (state.get("poulpita") or {}).get("node_id") or "")
-    route = _safe_route_to_closest_shelter(state, current_node_id)
+    safe_route = _safe_route_to_closest_shelter(state, current_node_id)
+    route = safe_route or _route_to_closest_known_shelter(state, current_node_id)
     spent = int(state.get("night_time_spent") or 0)
     total = max(1, int(state.get("night_time_total") or 24))
     shelter_at = min(total, max(0, int(state.get("night_shelter_available_at") or 16)))
     move_time = max(1, int(_action_cost(state, "move").get("time_cost") or 0))
+    interact_time = max(0, int(_action_cost(state, "interact").get("time_cost") or 0))
     distance = int(route.get("distance") or 0) if route else None
     travel_time = distance * move_time if distance is not None else total
-    safety_margin = max(1, move_time)
+    configured_margin = _bot_settings(state).get("shelter_return_safety_steps")
+    try:
+        requested_margin = int(configured_margin) if configured_margin is not None else max(move_time, interact_time)
+    except (TypeError, ValueError):
+        requested_margin = max(move_time, interact_time)
+    safety_margin = max(
+        1,
+        requested_margin,
+    )
     return_start = max(0, shelter_at - travel_time - safety_margin)
     per_step = _planner_weight(state, "late_shelter_urgency", 8.0)
     urgency = 0.0
@@ -793,8 +836,10 @@ def _shelter_return_context(state: dict[str, Any], start_node_id: str | None = N
             urgency += per_step * 4
     return {
         "route": route,
+        "route_is_safe": bool(safe_route),
         "distance": distance,
         "travel_time": travel_time,
+        "safety_margin": safety_margin,
         "return_start": return_start,
         "urgency": min(240.0, urgency),
         "should_return": bool(route and distance and urgency > 0),

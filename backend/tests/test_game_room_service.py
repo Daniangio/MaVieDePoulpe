@@ -1811,6 +1811,52 @@ def test_safe_shelter_route_avoids_known_compulsory_nodes():
     }
 
 
+def test_late_shelter_return_uses_blocked_route_instead_of_optional_interaction():
+    state = _goldfish_state("room_blocked_shelter_return", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "force"
+    state["map"]["adjacency"] = {
+        "start": ["blocked"],
+        "blocked": ["start", "shelter"],
+        "shelter": ["blocked"],
+    }
+    state["poulpita"]["node_id"] = "start"
+    state["shelters"] = {"shelter": {"count": 1, "seashells": 0, "secure": False}}
+    state["night_time_spent"] = 12
+    state["night_shelter_available_at"] = 16
+    state["capabilities"]["force"]["pa"] = 5
+    state["capabilities"]["force"]["initiates_event_ids"] = ["optional-event"]
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "categories": {
+            "prey": {"id": "prey", "name": "Prey", "compulsory_on_same_node": False},
+            "threat": {"id": "threat", "name": "Threat", "compulsory_on_same_node": True},
+        },
+        "events": {
+            "optional-event": {"id": "optional-event", "name": "Crab", "category_id": "prey"},
+            "blocker-event": {"id": "blocker-event", "name": "Shark", "category_id": "threat"},
+        },
+        "tiles": {
+            "optional-tile": {"id": "optional-tile", "event_id": "optional-event", "interaction_ids": []},
+            "blocker-tile": {"id": "blocker-tile", "event_id": "blocker-event", "interaction_ids": []},
+        },
+    }
+    state["tiles"] = {
+        "start": [{"instance_id": "optional-instance", "tile_id": "optional-tile", "face_up": True}],
+        "blocked": [{"instance_id": "blocker-instance", "tile_id": "blocker-tile", "face_up": True}],
+    }
+
+    context = bot_planner._shelter_return_context(state)
+    candidates = bot_planner._local_orchestrator_night_candidates(state)
+    commands = [bot_planner._orchestrator_command(candidate) for candidate in candidates]
+
+    assert context["route_is_safe"] is False
+    assert context["route"]["path"] == ["start", "blocked", "shelter"]
+    assert commands == [
+        {"type": "move_poulpita", "payload": {"capability_id": "force", "target_node_id": "blocked"}}
+    ]
+
+
 def test_local_orchestrator_returns_toward_safe_shelter_before_end_night_threshold():
     state = _goldfish_state("room_shelter_return_window", level_id="test-level", mode="bots_only")
     state["phase"] = "night_action"
@@ -1831,6 +1877,43 @@ def test_local_orchestrator_returns_toward_safe_shelter_before_end_night_thresho
     assert context["next_node_id"] == "1B"
     assert commands == [
         {"type": "move_poulpita", "payload": {"capability_id": "force", "target_node_id": "1B"}}
+    ]
+
+
+def test_local_orchestrator_does_not_start_optional_interaction_inside_return_margin():
+    state = _goldfish_state("room_optional_at_return_margin", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "force"
+    state["poulpita"]["node_id"] = "1C"
+    state["shelters"] = {"1D": {"count": 1, "seashells": 0, "secure": False}}
+    state["night_time_spent"] = 13
+    state["night_shelter_available_at"] = 16
+    state["capabilities"]["force"]["pa"] = 5
+    state["capabilities"]["force"]["initiates_event_ids"] = ["optional-event"]
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "categories": {"prey": {"id": "prey", "name": "Prey", "compulsory_on_same_node": False}},
+        "events": {"optional-event": {"id": "optional-event", "name": "Crab", "category_id": "prey"}},
+        "tiles": {
+            "optional-tile": {
+                "id": "optional-tile",
+                "event_id": "optional-event",
+                "interaction_ids": [],
+            }
+        },
+    }
+    state["tiles"] = {
+        "1C": [{"instance_id": "optional-instance", "tile_id": "optional-tile", "face_up": True}]
+    }
+
+    context = bot_planner._shelter_return_context(state)
+    candidates = bot_planner._local_orchestrator_night_candidates(state)
+    commands = [bot_planner._orchestrator_command(candidate) for candidate in candidates]
+
+    assert context["return_start"] == 13
+    assert context["safety_margin"] == 2
+    assert commands == [
+        {"type": "move_poulpita", "payload": {"capability_id": "force", "target_node_id": "1D"}}
     ]
 
 
