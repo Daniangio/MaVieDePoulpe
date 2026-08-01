@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .database import get_db
-from .bot_simulation_service import delete_bot_replay, get_bot_replay, list_bot_replays, run_bot_simulation_batch
+from .bot_simulation_service import delete_bot_replay, get_bot_replay, list_bot_replays, start_bot_simulation_batch
 from .db_models import AdminAuditLogRecord, UserProfileRecord
 from .friend_service import list_friends_summary
 from .game_content_service import (
@@ -71,7 +71,7 @@ async def admin_list_bot_simulations(_admin: User = Depends(require_admin)):
     return {"replays": await asyncio.to_thread(list_bot_replays)}
 
 
-@router.post("/admin/bot-simulations")
+@router.post("/admin/bot-simulations", status_code=status.HTTP_202_ACCEPTED)
 async def admin_run_bot_simulations(
     payload: dict = Body(...),
     _admin: User = Depends(require_admin),
@@ -86,14 +86,14 @@ async def admin_run_bot_simulations(
         seed = int(raw_seed) if raw_seed not in {None, ""} else None
         simulation_mode = str(payload.get("simulation_mode") or "fast")
         replays = await asyncio.to_thread(
-            run_bot_simulation_batch,
+            start_bot_simulation_batch,
             level_id=level_id,
             game_count=game_count,
             max_steps=max_steps,
             seed=seed,
             simulation_mode=simulation_mode,
         )
-        return {"status": "completed", "replays": replays}
+        return {"status": "accepted", "replays": replays}
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except (TypeError, ValueError) as exc:
@@ -115,6 +115,8 @@ async def admin_delete_bot_simulation(replay_id: str, _admin: User = Depends(req
         return {"status": "deleted"}
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 def _record_admin_audit(

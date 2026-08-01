@@ -35,6 +35,8 @@ REPLAYS_ROOT = Path(
     )
 )
 _simulation_lock = threading.Lock()
+_background_threads: set[threading.Thread] = set()
+_background_threads_lock = threading.Lock()
 
 
 def _now_iso() -> str:
@@ -48,12 +50,46 @@ def _replay_path(replay_id: str) -> Path:
     return REPLAYS_ROOT / f"{normalized}.json"
 
 
+def _progress_path(replay_id: str) -> Path:
+    return _replay_path(replay_id).with_suffix(".progress")
+
+
 def _write_replay(payload: dict[str, Any]) -> None:
     REPLAYS_ROOT.mkdir(parents=True, exist_ok=True)
     destination = _replay_path(str(payload["id"]))
     temporary = destination.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=True, separators=(",", ":")), encoding="utf-8")
     temporary.replace(destination)
+
+
+def _write_progress(replay_id: str, progress: dict[str, Any]) -> None:
+    REPLAYS_ROOT.mkdir(parents=True, exist_ok=True)
+    destination = _progress_path(replay_id)
+    temporary = destination.with_suffix(".progress.tmp")
+    temporary.write_text(json.dumps(progress, ensure_ascii=True, separators=(",", ":")), encoding="utf-8")
+    temporary.replace(destination)
+
+
+def _read_progress(replay_id: str) -> dict[str, Any] | None:
+    path = _progress_path(replay_id)
+    if not path.exists():
+        return None
+    try:
+        progress = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return progress if isinstance(progress, dict) else None
+
+
+def _payload_with_progress(payload: dict[str, Any]) -> dict[str, Any]:
+    replay_id = str(payload.get("id") or "")
+    progress = _read_progress(replay_id) if replay_id else None
+    if not progress:
+        return payload
+    merged = deepcopy(payload)
+    merged["status"] = str(progress.get("status") or merged.get("status") or "queued")
+    merged["progress"] = progress
+    return merged
 
 
 def _read_replay(replay_id: str) -> dict[str, Any]:
@@ -79,6 +115,8 @@ def _compact_projection(projection: dict[str, Any]) -> dict[str, Any]:
 
 def _replay_summary(payload: dict[str, Any]) -> dict[str, Any]:
     metadata = payload.get("metadata") or {}
+    progress = payload.get("progress") or {}
+    status = str(payload.get("status") or progress.get("status") or "completed")
     return {
         "id": str(payload.get("id") or ""),
         "created_at": str(payload.get("created_at") or ""),
@@ -86,13 +124,15 @@ def _replay_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "level_name": str(payload.get("level_name") or payload.get("level_id") or ""),
         "seed": int(payload.get("seed") or 0),
         "simulation_mode": str(payload.get("simulation_mode") or "fast"),
-        "outcome": str(metadata.get("outcome") or "incomplete"),
+        "status": status,
+        "outcome": str(metadata.get("outcome") or ("pending" if status in {"queued", "running"} else "incomplete")),
         "game_over_reason": str(metadata.get("game_over_reason") or ""),
         "steps": int(metadata.get("steps") or 0),
         "duration_ms": int(metadata.get("duration_ms") or 0),
         "final_day": int(metadata.get("final_day") or 1),
         "final_energy": int(metadata.get("final_energy") or 0),
         "frame_count": len(payload.get("frames") or []),
+        "progress": deepcopy(progress),
     }
 
 
@@ -102,21 +142,101 @@ def list_bot_replays() -> list[dict[str, Any]]:
     summaries = []
     for path in REPLAYS_ROOT.glob("*.json"):
         try:
-            summaries.append(_replay_summary(json.loads(path.read_text(encoding="utf-8"))))
+            summaries.append(_replay_summary(_payload_with_progress(json.loads(path.read_text(encoding="utf-8")))))
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             continue
     return sorted(summaries, key=lambda entry: entry["created_at"], reverse=True)
 
 
 def get_bot_replay(replay_id: str) -> dict[str, Any]:
-    return _read_replay(replay_id)
+    return _payload_with_progress(_read_replay(replay_id))
 
 
 def delete_bot_replay(replay_id: str) -> None:
     path = _replay_path(replay_id)
     if not path.exists():
         raise LookupError("Replay not found.")
+    progress = _read_progress(replay_id) or {}
+    if str(progress.get("status") or "") in {"queued", "running"}:
+        raise RuntimeError("A running simulation cannot be deleted.")
     path.unlink()
+    _progress_path(replay_id).unlink(missing_ok=True)
+
+
+def _simulation_progress(
+    *,
+    state: dict[str, Any],
+    status: str,
+    step: int,
+    max_steps: int,
+    last_action: str = "",
+) -> dict[str, Any]:
+    poulpita = state.get("poulpita") or {}
+    shelters = state.get("shelters") or {}
+    shelter_tokens = sum(
+        max(0, int(entry.get("count") or 0)) if isinstance(entry, dict) else max(0, int(entry or 0))
+        for entry in shelters.values()
+    )
+    secured_shelters = sum(
+        1
+        for entry in shelters.values()
+        if isinstance(entry, dict) and (entry.get("secure") or int(entry.get("seashells") or 0) >= 3)
+    )
+    phase = str(state.get("phase") or "setup")
+    day_index = max(1, int(state.get("day_index") or 1))
+    return {
+        "status": status,
+        "updated_at": _now_iso(),
+        "step": max(0, int(step)),
+        "max_steps": max(1, int(max_steps)),
+        "percent": round(min(100, max(0, int(step)) * 100 / max(1, int(max_steps))), 1),
+        "phase": phase,
+        "phase_label": "Day" if phase == "day" else (f"Night {day_index}" if phase in {PHASE_NIGHT_IDLE, PHASE_NIGHT_ACTION} else phase.replace("_", " ").title()),
+        "day_index": day_index,
+        "night_time_spent": max(0, int(state.get("night_time_spent") or 0)),
+        "night_time_total": max(1, int(state.get("night_time_total") or 24)),
+        "energy": max(0, int(poulpita.get("energy") or 0)),
+        "max_energy": max(1, int(poulpita.get("max_energy") or 32)),
+        "neurons": max(0, int(poulpita.get("neurons") or 0)),
+        "seashells": max(0, int(poulpita.get("seashells") or 0)),
+        "size_index": max(0, int(poulpita.get("size_index") or 0)),
+        "node_id": str(poulpita.get("node_id") or ""),
+        "shelter_tokens": shelter_tokens,
+        "secured_shelters": secured_shelters,
+        "last_action": str(last_action or ""),
+    }
+
+
+def _queued_replay_payload(
+    *,
+    replay_id: str,
+    created_at: str,
+    level: dict[str, Any],
+    seed: int,
+    max_steps: int,
+    simulation_mode: str,
+) -> dict[str, Any]:
+    return {
+        "format_version": REPLAY_FORMAT_VERSION,
+        "id": replay_id,
+        "created_at": created_at,
+        "level_id": str(level["id"]),
+        "level_name": str(level.get("name") or level["id"]),
+        "seed": int(seed),
+        "simulation_mode": simulation_mode,
+        "status": "queued",
+        "metadata": {
+            "outcome": "pending",
+            "game_over_reason": "",
+            "stop_reason": "queued",
+            "steps": 0,
+            "duration_ms": 0,
+            "final_day": 1,
+            "final_energy": max(0, int(level.get("starting_energy") or 3)),
+            "max_steps": int(max_steps),
+        },
+        "frames": [],
+    }
 
 
 def _frame(
@@ -154,9 +274,18 @@ def _fallback_night_command(state: dict[str, Any]) -> dict[str, Any]:
     return {"type": "bot_no_actions_available", "payload": {}}
 
 
-def run_bot_simulation(*, level_id: str, seed: int, max_steps: int = 2000, simulation_mode: str = "fast") -> dict[str, Any]:
+def run_bot_simulation(
+    *,
+    level_id: str,
+    seed: int,
+    max_steps: int = 2000,
+    simulation_mode: str = "fast",
+    replay_id: str | None = None,
+    created_at: str | None = None,
+) -> dict[str, Any]:
     level = get_level_config(level_id)
-    replay_id = f"replay_{uuid.uuid4().hex}"
+    replay_id = replay_id or f"replay_{uuid.uuid4().hex}"
+    created_at = created_at or _now_iso()
     room_id = f"simulation_{uuid.uuid4().hex}"
     bot_config = _bot_room_config(mode="bots_only")
     user = User(id="backend_bot_simulator", username="Backend bot simulator", is_admin=True)
@@ -175,6 +304,12 @@ def run_bot_simulation(*, level_id: str, seed: int, max_steps: int = 2000, simul
     initial_projection = _project_state(state)
     frames = [_frame(index=0, projection=initial_projection, command=None, events=initial_projection.get("events") or [])]
     stop_reason = "game_finished"
+    last_progress_write = 0.0
+    previous_phase = ""
+    _write_progress(
+        replay_id,
+        _simulation_progress(state=state, status="running", step=0, max_steps=max_steps),
+    )
 
     for step in range(1, max_steps + 1):
         if state.get("phase") == PHASE_FINISHED:
@@ -208,6 +343,7 @@ def run_bot_simulation(*, level_id: str, seed: int, max_steps: int = 2000, simul
         if next_state.get("phase") in {PHASE_NIGHT_IDLE, PHASE_NIGHT_ACTION}:
             _mark_game_lost_if_needed(next_state)
         state = next_state
+        command_label = str(command["type"] or "").replace("_", " ")
         frames.append(
             _frame(
                 index=step,
@@ -217,19 +353,44 @@ def run_bot_simulation(*, level_id: str, seed: int, max_steps: int = 2000, simul
                 decision=decision,
             )
         )
+        now = time.perf_counter()
+        phase = str(state.get("phase") or "")
+        if phase != previous_phase or step % 10 == 0 or now - last_progress_write >= 0.2:
+            _write_progress(
+                replay_id,
+                _simulation_progress(
+                    state=state,
+                    status="running",
+                    step=step,
+                    max_steps=max_steps,
+                    last_action=command_label,
+                ),
+            )
+            previous_phase = phase
+            last_progress_write = now
     else:
         stop_reason = "step_limit_reached"
 
     elapsed_ms = max(1, round((time.perf_counter() - started) * 1000))
     poulpita = state.get("poulpita") or {}
+    final_progress = _simulation_progress(
+        state=state,
+        status="completed",
+        step=len(frames) - 1,
+        max_steps=max_steps,
+        last_action=str(((frames[-1].get("command") or {}).get("type") or "")).replace("_", " "),
+    )
+    final_progress["percent"] = 100
     payload = {
         "format_version": REPLAY_FORMAT_VERSION,
         "id": replay_id,
-        "created_at": _now_iso(),
+        "created_at": created_at,
         "level_id": level["id"],
         "level_name": level.get("name") or level["id"],
         "seed": seed,
         "simulation_mode": simulation_mode,
+        "status": "completed",
+        "progress": final_progress,
         "map": deepcopy(initial_projection.get("map") or {}),
         "tile_catalog": deepcopy(initial_projection.get("tile_catalog") or {}),
         "metadata": {
@@ -244,6 +405,7 @@ def run_bot_simulation(*, level_id: str, seed: int, max_steps: int = 2000, simul
         "frames": frames,
     }
     _write_replay(payload)
+    _progress_path(replay_id).unlink(missing_ok=True)
     return _replay_summary(payload)
 
 
@@ -273,3 +435,117 @@ def run_bot_simulation_batch(
             ]
         finally:
             random.setstate(previous_random_state)
+
+
+def _mark_simulation_failed(replay_id: str, message: str) -> None:
+    try:
+        payload = _read_replay(replay_id)
+    except LookupError:
+        return
+    payload["status"] = "failed"
+    metadata = payload.setdefault("metadata", {})
+    metadata["outcome"] = "incomplete"
+    metadata["stop_reason"] = "simulation_failed"
+    metadata["game_over_reason"] = str(message or "Simulation failed.")
+    _write_replay(payload)
+    progress = _read_progress(replay_id) or {}
+    progress.update(
+        {
+            "status": "failed",
+            "updated_at": _now_iso(),
+            "phase": "failed",
+            "phase_label": "Failed",
+            "error": str(message or "Simulation failed."),
+        }
+    )
+    _write_progress(replay_id, progress)
+
+
+def _run_background_batch(instances: list[dict[str, Any]]) -> None:
+    with _simulation_lock:
+        previous_random_state = random.getstate()
+        try:
+            for instance in instances:
+                try:
+                    run_bot_simulation(
+                        level_id=instance["level_id"],
+                        seed=instance["seed"],
+                        max_steps=instance["max_steps"],
+                        simulation_mode=instance["simulation_mode"],
+                        replay_id=instance["id"],
+                        created_at=instance["created_at"],
+                    )
+                except Exception as exc:  # Persist worker failures so polling never remains stuck on running.
+                    _mark_simulation_failed(instance["id"], f"{type(exc).__name__}: {exc}")
+        finally:
+            random.setstate(previous_random_state)
+
+
+def start_bot_simulation_batch(
+    *,
+    level_id: str,
+    game_count: int,
+    max_steps: int = 2000,
+    seed: int | None = None,
+    simulation_mode: str = "fast",
+) -> list[dict[str, Any]]:
+    level = get_level_config(level_id)
+    normalized_count = max(1, min(100, int(game_count)))
+    normalized_steps = max(10, min(10000, int(max_steps)))
+    normalized_mode = "full" if str(simulation_mode or "fast").lower() == "full" else "fast"
+    base_seed = int(seed) if seed is not None else random.SystemRandom().randrange(1, 2**31)
+    instances = []
+    for index in range(normalized_count):
+        replay_id = f"replay_{uuid.uuid4().hex}"
+        created_at = _now_iso()
+        instance = {
+            "id": replay_id,
+            "created_at": created_at,
+            "level_id": str(level["id"]),
+            "seed": base_seed + index,
+            "max_steps": normalized_steps,
+            "simulation_mode": normalized_mode,
+        }
+        payload = _queued_replay_payload(
+            replay_id=replay_id,
+            created_at=created_at,
+            level=level,
+            seed=instance["seed"],
+            max_steps=normalized_steps,
+            simulation_mode=normalized_mode,
+        )
+        _write_replay(payload)
+        _write_progress(
+            replay_id,
+            {
+                "status": "queued",
+                "updated_at": created_at,
+                "step": 0,
+                "max_steps": normalized_steps,
+                "percent": 0,
+                "phase": "queued",
+                "phase_label": "Queued",
+            },
+        )
+        instances.append(instance)
+
+    thread = threading.Thread(
+        target=_run_background_batch,
+        args=(instances,),
+        name=f"bot-simulation-{instances[0]['id']}",
+        daemon=True,
+    )
+    with _background_threads_lock:
+        _background_threads.add(thread)
+
+    def release_thread() -> None:
+        try:
+            thread.join()
+        finally:
+            with _background_threads_lock:
+                _background_threads.discard(thread)
+
+    thread.start()
+    cleanup = threading.Thread(target=release_thread, name=f"cleanup-{thread.name}", daemon=True)
+    cleanup.start()
+    return [_replay_summary(_payload_with_progress(_read_replay(instance["id"]))) for instance in instances]

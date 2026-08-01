@@ -353,15 +353,50 @@ def test_backend_only_bot_simulation_persists_compact_replay(tmp_path, monkeypat
 
     assert len(summaries) == 1
     replay = bot_simulation_service.get_bot_replay(summaries[0]["id"])
+    assert summaries[0]["status"] == "completed"
     assert replay["seed"] == 123
     assert replay["frames"][0]["command"] is None
     assert replay["map"]["id"] == "test-map"
     assert "map" not in replay["frames"][0]["projection"]
     assert "tile_catalog" not in replay["frames"][0]["projection"]
     assert replay["metadata"]["steps"] == len(replay["frames"]) - 1
+    assert replay["progress"]["status"] == "completed"
+    assert replay["progress"]["percent"] == 100
+    assert replay["progress"]["phase_label"]
+    assert "neurons" in replay["progress"]
+    assert "seashells" in replay["progress"]
 
     bot_simulation_service.delete_bot_replay(replay["id"])
     assert bot_simulation_service.list_bot_replays() == []
+
+
+def test_background_bot_simulations_are_listed_immediately_as_queued(tmp_path, monkeypatch):
+    monkeypatch.setattr(bot_simulation_service, "REPLAYS_ROOT", tmp_path)
+    monkeypatch.setattr(bot_simulation_service, "get_level_config", lambda level_id: TEST_LEVEL)
+    worker_started = bot_simulation_service.threading.Event()
+    release_worker = bot_simulation_service.threading.Event()
+
+    def paused_worker(_instances):
+        worker_started.set()
+        release_worker.wait(timeout=2)
+
+    monkeypatch.setattr(bot_simulation_service, "_run_background_batch", paused_worker)
+
+    summaries = bot_simulation_service.start_bot_simulation_batch(
+        level_id="test-level",
+        game_count=2,
+        max_steps=50,
+        seed=500,
+    )
+    assert worker_started.wait(timeout=1)
+    listed = bot_simulation_service.list_bot_replays()
+
+    assert len(summaries) == 2
+    assert {summary["status"] for summary in summaries} == {"queued"}
+    assert {summary["status"] for summary in listed} == {"queued"}
+    assert {summary["seed"] for summary in listed} == {500, 501}
+    assert all(summary["progress"]["phase_label"] == "Queued" for summary in listed)
+    release_worker.set()
 
 
 def test_bots_only_orchestrator_marks_an_early_shelter_dead_end_as_lost():

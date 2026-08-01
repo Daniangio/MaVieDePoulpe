@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
+import { BatteryMedium, Brain, CircleCheck, CircleX, Home, LoaderCircle, MapPin, Moon, Shell, Sun } from "lucide-react";
 import AdminLevelEditor from "../components/AdminLevelEditor.jsx";
 import AdminMapEditor from "../components/AdminMapEditor.jsx";
 import HexTilePreview from "../components/HexTilePreview.jsx";
@@ -2209,6 +2210,14 @@ const BotSimulationsAdmin = ({ levels, request }) => {
     void loadReplays();
   }, []);
 
+  const hasActiveSimulations = replays.some((replay) => ["queued", "running"].includes(replay.status));
+
+  useEffect(() => {
+    if (!hasActiveSimulations) return undefined;
+    const timer = window.setInterval(() => void loadReplays(), 1000);
+    return () => window.clearInterval(timer);
+  }, [hasActiveSimulations]);
+
   const runBatch = async () => {
     if (!draft.level_id) return;
     setRunning(true);
@@ -2225,8 +2234,12 @@ const BotSimulationsAdmin = ({ levels, request }) => {
           seed: draft.seed === "" ? null : Number(draft.seed),
         }),
       });
-      setNotice(`${(payload.replays || []).length} simulation${(payload.replays || []).length === 1 ? "" : "s"} completed.`);
-      await loadReplays();
+      const started = payload.replays || [];
+      setReplays((current) => {
+        const startedIds = new Set(started.map((entry) => entry.id));
+        return [...started, ...current.filter((entry) => !startedIds.has(entry.id))];
+      });
+      setNotice(`${started.length} simulation${started.length === 1 ? "" : "s"} started.`);
     } catch (runError) {
       setError(runError.message || "Bot simulation failed.");
     } finally {
@@ -2288,22 +2301,61 @@ const BotSimulationsAdmin = ({ levels, request }) => {
           <button className={subtleButton} disabled={running} onClick={() => void loadReplays()} type="button">Refresh</button>
         </div>
         <div className="mt-4 overflow-x-auto">
-          <table className="w-full min-w-[48rem] text-left text-sm">
+          <table className="w-full min-w-[58rem] text-left text-sm">
             <thead className="border-b border-cyan-200 text-xs uppercase text-slate-500">
-              <tr><th className="p-2">Created</th><th className="p-2">Level</th><th className="p-2">Result</th><th className="p-2">Steps</th><th className="p-2">Runtime</th><th className="p-2">Seed</th><th className="p-2" /></tr>
+              <tr><th className="p-2">Created</th><th className="p-2">Level</th><th className="p-2">Status</th><th className="p-2">Progress</th><th className="p-2">State</th><th className="p-2">Seed</th><th className="p-2" /></tr>
             </thead>
             <tbody>
-              {replays.map((replay) => (
-                <tr className="border-b border-cyan-100" key={replay.id}>
-                  <td className="p-2 text-slate-600">{new Date(replay.created_at).toLocaleString()}</td>
-                  <td className="p-2 font-medium text-teal-950">{replay.level_name}</td>
-                  <td className="p-2"><span className={`rounded-full px-2 py-1 text-xs font-semibold ${replay.outcome === "won" ? "bg-emerald-100 text-emerald-800" : replay.outcome === "lost" ? "bg-rose-100 text-rose-800" : "bg-amber-100 text-amber-800"}`}>{replay.outcome}</span></td>
-                  <td className="p-2 text-slate-600">{replay.steps}</td>
-                  <td className="p-2 text-slate-600">{replay.duration_ms} ms</td>
-                  <td className="p-2 text-slate-600">{replay.seed}</td>
-                  <td className="p-2"><div className="flex justify-end gap-2"><Link className={primaryButton} to={`/admin/replays/${replay.id}`}>Replay</Link><button className={dangerButton} onClick={() => void deleteReplay(replay)} type="button">Delete</button></div></td>
-                </tr>
-              ))}
+              {replays.map((replay) => {
+                const progress = replay.progress || {};
+                const active = ["queued", "running"].includes(replay.status);
+                const statusClasses = replay.status === "completed"
+                  ? (replay.outcome === "won" ? "bg-emerald-100 text-emerald-800" : replay.outcome === "lost" ? "bg-rose-100 text-rose-800" : "bg-amber-100 text-amber-800")
+                  : replay.status === "failed" ? "bg-rose-100 text-rose-800" : "bg-cyan-100 text-cyan-800";
+                const StatusIcon = replay.status === "completed" ? CircleCheck : replay.status === "failed" ? CircleX : LoaderCircle;
+                const PhaseIcon = progress.phase === "day" ? Sun : Moon;
+                return (
+                  <tr className="border-b border-cyan-100 align-middle" key={replay.id}>
+                    <td className="p-2 text-xs text-slate-500">{new Date(replay.created_at).toLocaleString()}</td>
+                    <td className="p-2 font-medium text-teal-950">{replay.level_name}</td>
+                    <td className="p-2">
+                      <span className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs font-semibold ${statusClasses}`}>
+                        <StatusIcon className={active ? "animate-spin" : ""} size={13} />
+                        {replay.status === "completed" ? replay.outcome : replay.status}
+                      </span>
+                    </td>
+                    <td className="p-2">
+                      <div className="min-w-40">
+                        <div className="flex items-center justify-between gap-2 text-xs text-slate-600">
+                          <span className="inline-flex items-center gap-1"><PhaseIcon size={13} />{progress.phase_label || "Waiting"}</span>
+                          <span>{Number(progress.step ?? replay.steps ?? 0)} / {Number(progress.max_steps || replay.steps || 0)}</span>
+                        </div>
+                        <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-cyan-100">
+                          <div className={`h-full rounded-full ${replay.status === "failed" ? "bg-rose-400" : "bg-teal-500"}`} style={{ width: `${Number(progress.percent ?? (replay.status === "completed" ? 100 : 0))}%` }} />
+                        </div>
+                        {progress.phase?.startsWith("night") ? <p className="mt-1 text-[11px] text-slate-500">Clock {Number(progress.night_time_spent || 0)} / {Number(progress.night_time_total || 24)}</p> : null}
+                        {progress.last_action ? <p className="mt-1 max-w-52 truncate text-[11px] capitalize text-slate-500" title={progress.last_action}>{progress.last_action}</p> : null}
+                      </div>
+                    </td>
+                    <td className="p-2">
+                      <div className="flex max-w-64 flex-wrap gap-1 text-xs text-slate-700">
+                        <span className="inline-flex items-center gap-1 rounded bg-rose-50 px-1.5 py-1" title="Energy"><BatteryMedium size={13} />{Number(progress.energy ?? replay.final_energy ?? 0)}</span>
+                        <span className="inline-flex items-center gap-1 rounded bg-violet-50 px-1.5 py-1" title="Neurons"><Brain size={13} />{Number(progress.neurons || 0)}</span>
+                        <span className="inline-flex items-center gap-1 rounded bg-amber-50 px-1.5 py-1" title="Seashells"><Shell size={13} />{Number(progress.seashells || 0)}</span>
+                        <span className="inline-flex items-center gap-1 rounded bg-emerald-50 px-1.5 py-1" title="Secured shelters / shelters"><Home size={13} />{Number(progress.secured_shelters || 0)}/{Number(progress.shelter_tokens || 0)}</span>
+                        <span className="inline-flex items-center gap-1 rounded bg-cyan-50 px-1.5 py-1" title="Current node"><MapPin size={13} />{progress.node_id || "-"}</span>
+                      </div>
+                    </td>
+                    <td className="p-2 text-xs text-slate-600">{replay.seed}</td>
+                    <td className="p-2">
+                      <div className="flex justify-end gap-2">
+                        {replay.status === "completed" ? <Link className={primaryButton} to={`/admin/replays/${replay.id}`}>Replay</Link> : null}
+                        <button className={dangerButton} disabled={active} onClick={() => void deleteReplay(replay)} type="button">Delete</button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
           {!replays.length ? <p className="py-8 text-center text-sm text-slate-500">No simulations saved.</p> : null}
