@@ -91,6 +91,7 @@ const contentTabs = [
   ["cards", "Cards"],
   ["action_costs", "Action Costs"],
   ["bot_settings", "Bot"],
+  ["bot_simulations", "Bot Simulations"],
   ["surprise_cards", "Surprise Cards"],
   ["surprise_decks", "Surprise Decks"],
   ["courtship_cards", "Courtship Cards"],
@@ -923,6 +924,10 @@ const AdminContentPage = () => {
           surpriseCards={content.surprise_cards || []}
           surpriseDecks={content.surprise_decks || []}
         />
+      ) : null}
+
+      {activeTab === "bot_simulations" ? (
+        <BotSimulationsAdmin levels={content.levels || []} request={request} />
       ) : null}
 
       {activeTab === "courtship_cards" ? (
@@ -2167,6 +2172,143 @@ const PoulpitaPanelEditor = ({ draft, setDraft, imageRef, previewUrl, setPreview
         </div>
         <button className={`${primaryButton} mt-4 w-full`} disabled={busy || !sizePreviewUrl(0)} onClick={save} type="button">Save panel layout</button>
       </aside>
+    </section>
+  );
+};
+
+const BotSimulationsAdmin = ({ levels, request }) => {
+  const [replays, setReplays] = useState([]);
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [draft, setDraft] = useState({
+    level_id: "",
+    game_count: 1,
+    max_steps: 2000,
+    seed: "",
+    simulation_mode: "fast",
+  });
+
+  useEffect(() => {
+    if (!draft.level_id && levels.length) {
+      setDraft((current) => ({ ...current, level_id: levels[0].id }));
+    }
+  }, [draft.level_id, levels]);
+
+  const loadReplays = async () => {
+    try {
+      const payload = await request("/api/admin/bot-simulations");
+      setReplays(payload.replays || []);
+      setError("");
+    } catch (loadError) {
+      setError(loadError.message || "Failed to load bot simulations.");
+    }
+  };
+
+  useEffect(() => {
+    void loadReplays();
+  }, []);
+
+  const runBatch = async () => {
+    if (!draft.level_id) return;
+    setRunning(true);
+    setError("");
+    setNotice("");
+    try {
+      const payload = await request("/api/admin/bot-simulations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...draft,
+          game_count: Number(draft.game_count || 1),
+          max_steps: Number(draft.max_steps || 2000),
+          seed: draft.seed === "" ? null : Number(draft.seed),
+        }),
+      });
+      setNotice(`${(payload.replays || []).length} simulation${(payload.replays || []).length === 1 ? "" : "s"} completed.`);
+      await loadReplays();
+    } catch (runError) {
+      setError(runError.message || "Bot simulation failed.");
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const deleteReplay = async (replay) => {
+    if (!window.confirm(`Delete replay ${replay.id}?`)) return;
+    try {
+      await request(`/api/admin/bot-simulations/${replay.id}`, { method: "DELETE" });
+      setReplays((current) => current.filter((entry) => entry.id !== replay.id));
+    } catch (deleteError) {
+      setError(deleteError.message || "Failed to delete replay.");
+    }
+  };
+
+  return (
+    <section className="grid gap-4 xl:grid-cols-[22rem_1fr]">
+      <aside className={panel}>
+        <h2 className="font-semibold text-teal-950">Run backend simulations</h2>
+        <div className="mt-4 space-y-3">
+          <label className="block text-sm text-slate-600">
+            Level
+            <select className={`${input} mt-1`} disabled={running} value={draft.level_id} onChange={(event) => setDraft((current) => ({ ...current, level_id: event.target.value }))}>
+              {levels.map((level) => <option key={level.id} value={level.id}>{level.name}</option>)}
+            </select>
+          </label>
+          <label className="block text-sm text-slate-600">
+            Number of games
+            <input className={`${input} mt-1`} disabled={running} max="100" min="1" type="number" value={draft.game_count} onChange={(event) => setDraft((current) => ({ ...current, game_count: Math.max(1, Math.min(100, Number(event.target.value || 1))) }))} />
+          </label>
+          <label className="block text-sm text-slate-600">
+            Maximum steps per game
+            <input className={`${input} mt-1`} disabled={running} max="10000" min="10" type="number" value={draft.max_steps} onChange={(event) => setDraft((current) => ({ ...current, max_steps: Math.max(10, Math.min(10000, Number(event.target.value || 2000))) }))} />
+          </label>
+          <label className="block text-sm text-slate-600">
+            Decision mode
+            <select className={`${input} mt-1`} disabled={running} value={draft.simulation_mode} onChange={(event) => setDraft((current) => ({ ...current, simulation_mode: event.target.value }))}>
+              <option value="fast">Fast immediate heuristic</option>
+              <option value="full">Full orchestrator rollouts</option>
+            </select>
+          </label>
+          <label className="block text-sm text-slate-600">
+            Base seed (optional)
+            <input className={`${input} mt-1`} disabled={running} min="0" type="number" value={draft.seed} onChange={(event) => setDraft((current) => ({ ...current, seed: event.target.value }))} />
+          </label>
+        </div>
+        <button className={`${primaryButton} mt-4 w-full`} disabled={running || !draft.level_id} onClick={() => void runBatch()} type="button">
+          {running ? "Simulating..." : "Run simulations"}
+        </button>
+        {notice ? <p className="mt-3 rounded border border-teal-200 bg-teal-50 p-2 text-sm text-teal-800">{notice}</p> : null}
+        {error ? <p className="mt-3 rounded border border-rose-200 bg-rose-50 p-2 text-sm text-rose-700">{error}</p> : null}
+      </aside>
+
+      <div className={panel}>
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="font-semibold text-teal-950">Saved replays</h2>
+          <button className={subtleButton} disabled={running} onClick={() => void loadReplays()} type="button">Refresh</button>
+        </div>
+        <div className="mt-4 overflow-x-auto">
+          <table className="w-full min-w-[48rem] text-left text-sm">
+            <thead className="border-b border-cyan-200 text-xs uppercase text-slate-500">
+              <tr><th className="p-2">Created</th><th className="p-2">Level</th><th className="p-2">Result</th><th className="p-2">Steps</th><th className="p-2">Runtime</th><th className="p-2">Seed</th><th className="p-2" /></tr>
+            </thead>
+            <tbody>
+              {replays.map((replay) => (
+                <tr className="border-b border-cyan-100" key={replay.id}>
+                  <td className="p-2 text-slate-600">{new Date(replay.created_at).toLocaleString()}</td>
+                  <td className="p-2 font-medium text-teal-950">{replay.level_name}</td>
+                  <td className="p-2"><span className={`rounded-full px-2 py-1 text-xs font-semibold ${replay.outcome === "won" ? "bg-emerald-100 text-emerald-800" : replay.outcome === "lost" ? "bg-rose-100 text-rose-800" : "bg-amber-100 text-amber-800"}`}>{replay.outcome}</span></td>
+                  <td className="p-2 text-slate-600">{replay.steps}</td>
+                  <td className="p-2 text-slate-600">{replay.duration_ms} ms</td>
+                  <td className="p-2 text-slate-600">{replay.seed}</td>
+                  <td className="p-2"><div className="flex justify-end gap-2"><Link className={primaryButton} to={`/admin/replays/${replay.id}`}>Replay</Link><button className={dangerButton} onClick={() => void deleteReplay(replay)} type="button">Delete</button></div></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {!replays.length ? <p className="py-8 text-center text-sm text-slate-500">No simulations saved.</p> : null}
+        </div>
+      </div>
     </section>
   );
 };

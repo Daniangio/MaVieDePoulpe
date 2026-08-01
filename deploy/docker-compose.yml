@@ -61,6 +61,7 @@ services:
     volumes:
       - /opt/maviedepoulpe/secrets:/opt/maviedepoulpe/secrets:ro
       - /opt/maviedepoulpe/data/maps:/app/backend/data/maps
+      - /opt/maviedepoulpe/data/replays:/app/backend/data/replays
     expose:
       - "8000"
     restart: unless-stopped

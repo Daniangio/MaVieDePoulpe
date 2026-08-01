@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Check, CirclePlus, Hand, Moon, MoveRight, RefreshCw, Sparkles, Swords, X } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, CirclePlus, Hand, LogOut, Moon, MoveRight, Pause, Play, RefreshCw, Sparkles, Swords, X } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
 import BoardView from "../components/BoardView.js";
 import CardPreview from "../components/CardPreview.jsx";
@@ -11,6 +11,24 @@ import { buildApiUrl, buildWsUrl } from "../utils/connection.js";
 
 const makeCommandId = () =>
   globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : `cmd_${Date.now()}_${Math.random()}`;
+
+type ReplayFrame = {
+  index: number;
+  command?: { type: string; payload?: Record<string, unknown> } | null;
+  events?: Array<any>;
+  decision?: { plan_id?: string; plan_title?: string; score?: number } | null;
+  projection: Partial<GameProjection>;
+};
+
+type BotReplay = {
+  id: string;
+  level_name: string;
+  seed: number;
+  map: GameProjection["map"];
+  tile_catalog: GameProjection["tile_catalog"];
+  metadata: Record<string, any>;
+  frames: ReplayFrame[];
+};
 
 const phaseLabel = (projection: GameProjection | null) => {
   if (!projection) return "Loading";
@@ -1285,6 +1303,7 @@ type BotLogEntry = {
   text: string;
   createdAt: number;
   status?: string;
+  replayIndex?: number;
 };
 
 type PlanTreeOption = {
@@ -1721,7 +1740,7 @@ const BotActionLog = ({
         {entries.length ? (
           entries.map((entry) => (
             <p className="border-b border-slate-800 py-1.5 last:border-b-0" key={entry.id}>
-              {new Date(entry.createdAt).toLocaleTimeString()} - {entry.text}
+              {entry.replayIndex !== undefined ? `Step ${entry.replayIndex}` : new Date(entry.createdAt).toLocaleTimeString()} - {entry.text}
             </p>
           ))
         ) : (
@@ -1732,8 +1751,8 @@ const BotActionLog = ({
   </div>
 );
 
-const GameRoomPage = () => {
-  const { roomId } = useParams();
+const GameRoomPage = ({ replayMode = false }: { replayMode?: boolean }) => {
+  const { roomId, replayId } = useParams();
   const { token, user } = useStore();
   const navigate = useNavigate();
   const socketRef = useRef<WebSocket | null>(null);
@@ -1767,6 +1786,10 @@ const GameRoomPage = () => {
   const [botsOnlyPaused, setBotsOnlyPaused] = useState(false);
   const [orchestratorRunning, setOrchestratorRunning] = useState(false);
   const [orchestratorElapsedSeconds, setOrchestratorElapsedSeconds] = useState(0);
+  const [replay, setReplay] = useState<BotReplay | null>(null);
+  const [replayFrameIndex, setReplayFrameIndex] = useState(0);
+  const [replayPlaying, setReplayPlaying] = useState(false);
+  const [replaySpeed, setReplaySpeed] = useState(4);
 
   const capabilityMap = projection?.capabilities || {};
   const capabilities = useMemo(() => {
@@ -1779,16 +1802,30 @@ const GameRoomPage = () => {
   const selectedCapabilityId = focusedCapabilityId || projection?.focused_capability_id || capabilities[0]?.id || "";
   const selectedCapability = selectedCapabilityId ? capabilityMap[selectedCapabilityId] : null;
   const otherCapabilities = capabilities.filter((capability) => capability.id !== selectedCapabilityId);
-  const botsOnlyMode = projection?.mode === "bots_only" && Boolean(projection?.bot_config);
-  const botModeEnabled = projection?.mode === "solo_with_bots" && Boolean(projection?.bot_config);
-  const botLogEnabled = botModeEnabled || botsOnlyMode;
-  const gameplayPending = pending || botsOnlyMode;
+  const botsOnlyMode = !replayMode && projection?.mode === "bots_only" && Boolean(projection?.bot_config);
+  const botModeEnabled = !replayMode && projection?.mode === "solo_with_bots" && Boolean(projection?.bot_config);
+  const botLogEnabled = replayMode || botModeEnabled || botsOnlyMode;
+  const inspectionPending = pending || botsOnlyMode;
+  const gameplayPending = inspectionPending || replayMode;
   const activePlanTreePlans = useMemo(() => {
     const proposals = botPlanStatus?.proposals || [];
     if (!activePlanIds.length) return [];
     const activeIds = new Set(activePlanIds);
     return proposals.filter((plan) => activeIds.has(plan.plan_id));
   }, [activePlanIds, botPlanStatus?.proposals]);
+  const replayLogEntries = useMemo<BotLogEntry[]>(() => {
+    if (!replayMode || !replay?.frames?.length) return [];
+    return replay.frames
+      .slice(1, replayFrameIndex + 1)
+      .map((frame) => ({
+        id: `replay-log-${frame.index}`,
+        text: frame.decision?.plan_title || String(frame.command?.type || "action").replaceAll("_", " "),
+        createdAt: frame.index,
+        replayIndex: frame.index,
+        status: "ok",
+      }))
+      .reverse();
+  }, [replay, replayFrameIndex, replayMode]);
 
   const pushBotLog = useCallback((text: string, status: string = "ok") => {
     const entry = { id: makeCommandId(), text, createdAt: Date.now(), status };
@@ -1818,6 +1855,12 @@ const GameRoomPage = () => {
   }, [botsOnlyMode, botsOnlyPaused, focusedCapabilityId, projection?.active_capability_id]);
 
   useEffect(() => {
+    if (!replayMode || !replayPlaying || !projection?.active_capability_id) return;
+    setFocusedCapabilityId(projection.active_capability_id);
+    setMoveMode(false);
+  }, [projection?.active_capability_id, replayMode, replayPlaying]);
+
+  useEffect(() => {
     if (!feedback && !error) {
       setAlertsVisible(false);
       return undefined;
@@ -1835,10 +1878,10 @@ const GameRoomPage = () => {
   }, [feedback, error]);
 
   useEffect(() => {
-    if (projection?.phase !== "game_over" || !roomId) return undefined;
+    if (replayMode || projection?.phase !== "game_over" || !roomId) return undefined;
     const timer = window.setTimeout(() => navigate(`/games/${roomId}/post-game`), 3500);
     return () => window.clearTimeout(timer);
-  }, [navigate, projection?.phase, roomId]);
+  }, [navigate, projection?.phase, replayMode, roomId]);
 
   useEffect(() => {
     if (!selectedCapability) {
@@ -1886,7 +1929,7 @@ const GameRoomPage = () => {
       || "The game is lost";
 
   const loadProjection = useCallback(async () => {
-    if (!token || !roomId) return;
+    if (replayMode || !token || !roomId) return;
     try {
       const response = await fetch(buildApiUrl(`/api/game/rooms/${roomId}/state?t=${Date.now()}`), {
         cache: "no-store",
@@ -1945,7 +1988,58 @@ const GameRoomPage = () => {
     } finally {
       setBotPlansLoading(false);
     }
-  }, [roomId, token]);
+  }, [replayMode, roomId, token]);
+
+  useEffect(() => {
+    if (!replayMode || !token || !replayId) return;
+    let cancelled = false;
+    const loadReplay = async () => {
+      try {
+        const response = await fetch(buildApiUrl(`/api/admin/bot-simulations/${replayId}`), {
+          cache: "no-store",
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.detail || "Failed to load replay.");
+        if (cancelled) return;
+        setReplay(payload);
+        setReplayFrameIndex(0);
+        setError("");
+      } catch (loadError: any) {
+        if (!cancelled) setError(loadError.message || "Failed to load replay.");
+      }
+    };
+    void loadReplay();
+    return () => {
+      cancelled = true;
+    };
+  }, [replayId, replayMode, token]);
+
+  useEffect(() => {
+    if (!replayMode || !replay?.frames?.length) return;
+    const frame = replay.frames[Math.min(replayFrameIndex, replay.frames.length - 1)];
+    if (!frame) return;
+    setProjection({
+      ...frame.projection,
+      map: replay.map,
+      tile_catalog: replay.tile_catalog,
+    } as GameProjection);
+  }, [replay, replayFrameIndex, replayMode]);
+
+  useEffect(() => {
+    if (!replayMode || !replayPlaying || !replay?.frames?.length) return undefined;
+    const timer = window.setInterval(() => {
+      setReplayFrameIndex((current) => {
+        const lastIndex = replay.frames.length - 1;
+        if (current >= lastIndex) {
+          setReplayPlaying(false);
+          return current;
+        }
+        return current + 1;
+      });
+    }, Math.max(40, 1000 / replaySpeed));
+    return () => window.clearInterval(timer);
+  }, [replay, replayMode, replayPlaying, replaySpeed]);
 
   const runOrchestratorStep = useCallback(async () => {
     if (!token || !roomId || orchestratorPendingRef.current) return;
@@ -2045,7 +2139,7 @@ const GameRoomPage = () => {
 
   useEffect(() => {
     const loadLevels = async () => {
-      if (!token) return;
+      if (replayMode || !token) return;
       try {
         const response = await fetch(buildApiUrl("/api/game/levels"), {
           headers: { Authorization: `Bearer ${token}` },
@@ -2058,10 +2152,10 @@ const GameRoomPage = () => {
       }
     };
     void loadLevels();
-  }, [token]);
+  }, [replayMode, token]);
 
   useEffect(() => {
-    if (!token || !roomId) return undefined;
+    if (replayMode || !token || !roomId) return undefined;
     const socket = new WebSocket(buildWsUrl(`/api/game/rooms/${roomId}/ws`, { token }));
     let disposed = false;
     socketRef.current = socket;
@@ -2100,10 +2194,10 @@ const GameRoomPage = () => {
         socket.close(1000, "leaving room");
       }
     };
-  }, [loadProjection, roomId, token]);
+  }, [loadProjection, replayMode, roomId, token]);
 
   useEffect(() => {
-    if (!token || !roomId) return undefined;
+    if (replayMode || !token || !roomId) return undefined;
     const refreshProjection = () => {
       if (document.visibilityState === "hidden") return;
       void loadProjection();
@@ -2121,7 +2215,7 @@ const GameRoomPage = () => {
       window.removeEventListener("online", refreshProjection);
       document.removeEventListener("visibilitychange", refreshProjection);
     };
-  }, [loadProjection, roomId, token]);
+  }, [loadProjection, replayMode, roomId, token]);
 
   const plannedCommandMatches = (step: PlanChainStep | undefined, type: string, payload: Record<string, unknown>) => {
     const planned = step?.public_command;
@@ -2151,6 +2245,10 @@ const GameRoomPage = () => {
   };
 
   const submitCommand = async (type: string, payload: Record<string, unknown> = {}, source: "manual" | "plan" = "manual") => {
+    if (replayMode) {
+      setFeedback("Replay is read-only. Use the timeline controls to advance the simulation.");
+      return null;
+    }
     if (!token || !roomId || pending) return null;
     setPending(true);
     setFeedback("");
@@ -2455,6 +2553,8 @@ const GameRoomPage = () => {
   };
 
   const hasAvailableBotPlans = Boolean(botModeEnabled && !botPlansOpen && (botPlanStatus?.proposals || []).length);
+  const currentReplayFrame = replay?.frames?.[replayFrameIndex] || null;
+  const replayLastFrameIndex = Math.max(0, Number(replay?.frames?.length || 1) - 1);
 
   return (
     <main className="h-screen overflow-hidden bg-slate-950 text-slate-100">
@@ -2464,7 +2564,23 @@ const GameRoomPage = () => {
           <span className="ml-3 text-slate-400">v{projection?.version ?? "-"} - {phaseLabel(projection)}</span>
         </div>
         <div className="flex items-center gap-2">
-          {botsOnlyMode && projection?.phase !== "setup" && projection?.phase !== "game_over" ? (
+          {replayMode ? (
+            <>
+              <span className="hidden max-w-56 truncate text-xs text-cyan-200 xl:block" title={currentReplayFrame?.decision?.plan_title || currentReplayFrame?.command?.type || "Initial state"}>
+                {currentReplayFrame?.decision?.plan_title || currentReplayFrame?.command?.type?.replaceAll("_", " ") || "Initial state"}
+              </span>
+              <button aria-label="Previous replay step" className="flex h-8 w-8 items-center justify-center rounded border border-slate-600 hover:bg-slate-800 disabled:opacity-40" disabled={replayFrameIndex <= 0} onClick={() => { setReplayPlaying(false); setReplayFrameIndex((current) => Math.max(0, current - 1)); }} title="Previous step" type="button"><ChevronLeft size={16} /></button>
+              <button aria-label={replayPlaying ? "Pause replay" : "Play replay"} className="flex h-8 w-8 items-center justify-center rounded bg-teal-400 text-slate-950 hover:bg-teal-300" onClick={() => setReplayPlaying((playing) => !playing)} title={replayPlaying ? "Pause" : "Play"} type="button">{replayPlaying ? <Pause size={16} /> : <Play size={16} />}</button>
+              <button aria-label="Next replay step" className="flex h-8 w-8 items-center justify-center rounded border border-slate-600 hover:bg-slate-800 disabled:opacity-40" disabled={replayFrameIndex >= replayLastFrameIndex} onClick={() => { setReplayPlaying(false); setReplayFrameIndex((current) => Math.min(replayLastFrameIndex, current + 1)); }} title="Next step" type="button"><ChevronRight size={16} /></button>
+              <span className="min-w-20 text-center text-xs text-slate-300">{replayFrameIndex} / {replayLastFrameIndex}</span>
+              <input aria-label="Replay position" className="w-28 accent-teal-400" max={replayLastFrameIndex} min="0" onChange={(event) => { setReplayPlaying(false); setReplayFrameIndex(Number(event.target.value)); }} type="range" value={replayFrameIndex} />
+              <select aria-label="Replay speed" className="h-8 rounded border border-slate-700 bg-slate-950 px-2 text-xs text-white" onChange={(event) => setReplaySpeed(Number(event.target.value))} value={replaySpeed}>
+                {[0.5, 1, 2, 4, 8, 16].map((speed) => <option key={speed} value={speed}>{speed}x</option>)}
+              </select>
+              <button aria-label="Exit replay" className="flex h-8 w-8 items-center justify-center rounded border border-slate-600 hover:bg-slate-800" onClick={() => navigate("/admin/content")} title="Exit replay" type="button"><LogOut size={16} /></button>
+            </>
+          ) : null}
+          {!replayMode && botsOnlyMode && projection?.phase !== "setup" && projection?.phase !== "game_over" ? (
             <>
               <span className="text-xs text-cyan-200">
                 {orchestratorRunning
@@ -2482,7 +2598,7 @@ const GameRoomPage = () => {
               </button>
             </>
           ) : null}
-          {projection?.phase === "setup" ? (
+          {!replayMode && projection?.phase === "setup" ? (
             <>
               <select
                 className="h-8 rounded border border-slate-700 bg-slate-950 px-2 text-xs text-white"
@@ -2501,9 +2617,7 @@ const GameRoomPage = () => {
               </button>
             </>
           ) : null}
-          <button className="rounded border border-slate-700 px-3 py-1.5 text-xs hover:bg-slate-800 disabled:opacity-50" disabled={pending} onClick={endGame} type="button">
-            End game
-          </button>
+          {!replayMode ? <button className="rounded border border-slate-700 px-3 py-1.5 text-xs hover:bg-slate-800 disabled:opacity-50" disabled={pending} onClick={endGame} type="button">End game</button> : null}
         </div>
       </header>
 
@@ -2520,7 +2634,7 @@ const GameRoomPage = () => {
             <h2 className="mt-1 text-2xl font-semibold text-white">
               {gameOverTitle}
             </h2>
-            <p className={["mt-2 text-sm", gameWon ? "text-teal-100" : "text-rose-100"].join(" ")}>Post-game opens in a few seconds.</p>
+            <p className={["mt-2 text-sm", gameWon ? "text-teal-100" : "text-rose-100"].join(" ")}>{replayMode ? "End of recorded simulation." : "Post-game opens in a few seconds."}</p>
           </div>
         </div>
       ) : null}
@@ -2540,7 +2654,7 @@ const GameRoomPage = () => {
                     setFocusedCapabilityId(capability.id);
                     setMoveMode(false);
                   }}
-                  pending={gameplayPending}
+                  pending={inspectionPending}
                   projection={projection}
                 />
               </div>
@@ -2558,7 +2672,7 @@ const GameRoomPage = () => {
                   setFocusedCapabilityId(selectedCapability.id);
                   setMoveMode(false);
                 }}
-                pending={gameplayPending}
+                pending={inspectionPending}
                 projection={projection}
               />
             ) : null}
@@ -2567,7 +2681,7 @@ const GameRoomPage = () => {
         <div className="relative min-w-0 overflow-hidden border-r border-slate-800">
           {projection ? (
             <>
-              <BoardView focusedCapabilityId={selectedCapabilityId} moveMode={moveMode} onInspectTile={inspectTile} onMove={movePoulpita} onMoveShellFromShelter={moveShellFromShelter} onSpecialNode={selectSpecialNode} onSpecialTile={selectSpecialTile} pending={gameplayPending} projection={projection} specialTargetMode={specialTargetMode} />
+              <BoardView focusedCapabilityId={selectedCapabilityId} moveMode={moveMode} onInspectTile={inspectTile} onMove={movePoulpita} onMoveShellFromShelter={moveShellFromShelter} onSpecialNode={selectSpecialNode} onSpecialTile={selectSpecialTile} pending={inspectionPending} projection={projection} specialTargetMode={specialTargetMode} />
               {botModeEnabled ? (
                 <BotPlanTree
                   onExecuteOption={executePlanTreeOption}
@@ -2599,10 +2713,10 @@ const GameRoomPage = () => {
               ) : null}
               {botLogEnabled ? (
                 <BotActionLog
-                  entries={botLogEntries}
+                  entries={replayMode ? replayLogEntries : botLogEntries}
                   logOpen={botLogOpen}
                   onToggle={() => setBotLogOpen((open) => !open)}
-                  popups={botLogPopups}
+                  popups={replayMode ? [] : botLogPopups}
                 />
               ) : null}
               {botModeEnabled ? (

@@ -2,6 +2,7 @@ node_modules/
 secrets/
 backend/data/maps/
 backend/data/content/
+backend/data/replays/
 *.pdf
 
 # Byte-compiled / optimized / DLL files

@@ -100,7 +100,7 @@ jobs:
           script: |
             cd /opt/maviedepoulpe
             test -f .env
-            mkdir -p /opt/maviedepoulpe/secrets /opt/maviedepoulpe/data/maps
+            mkdir -p /opt/maviedepoulpe/secrets /opt/maviedepoulpe/data/maps /opt/maviedepoulpe/data/replays
             echo "${{ secrets.PROD_GHCR_TOKEN || secrets.GHCR_TOKEN }}" | docker login ghcr.io -u "${{ secrets.PROD_GHCR_USERNAME || secrets.GHCR_USERNAME }}" --password-stdin
             docker compose --env-file .env pull backend frontend caddy redis postgres
             docker compose --env-file .env up -d --remove-orphans

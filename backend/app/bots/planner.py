@@ -4360,6 +4360,45 @@ def _simulate_orchestrator_rollout(
     }
 
 
+def choose_fast_bot_orchestrator_action(state: dict[str, Any]) -> dict[str, Any]:
+    """Select the best immediate legal bot action without nested rollout simulation."""
+    if state.get("mode") != "bots_only":
+        return {
+            "status": "disabled",
+            "message": "The bot orchestrator is enabled only in bots-only rooms.",
+            "command": None,
+        }
+    proposals = _local_orchestrator_candidates(state)
+    if not proposals:
+        return {
+            "status": "idle",
+            "message": "No executable local bot actions are available.",
+            "command": None,
+            "planner_debug": {"processor": "local_fast", "root_candidate_count": 0},
+        }
+    proposal = max(
+        proposals,
+        key=lambda candidate: (_orchestrator_plan_score(candidate), str(candidate.get("plan_id") or "")),
+    )
+    score = round(_orchestrator_plan_score(proposal), 2)
+    return {
+        "status": "selected",
+        "message": f"Selected {proposal.get('title') or proposal.get('plan_id')}.",
+        "plan_id": proposal.get("plan_id"),
+        "plan_title": proposal.get("title"),
+        "command": _orchestrator_command(proposal),
+        "score": score,
+        "expected_return": score,
+        "settings": {"mode": "fast_immediate"},
+        "evaluated_plans": [],
+        "planner_debug": {
+            "processor": "local_fast",
+            "root_candidate_count": len(proposals),
+            "rollout_count": 0,
+        },
+    }
+
+
 def choose_bot_orchestrator_action(state: dict[str, Any]) -> dict[str, Any]:
     """Evaluate bounded, local bot rollouts and return one authoritative command."""
     if state.get("mode") != "bots_only":

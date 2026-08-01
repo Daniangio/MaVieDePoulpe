@@ -3,6 +3,7 @@ from copy import deepcopy
 import pytest
 
 import backend.app.bots.planner as bot_planner
+import backend.app.bot_simulation_service as bot_simulation_service
 from backend.app.bots.planner import choose_bot_orchestrator_action
 from backend.app.game_room_service import (
     DEFAULT_ACTIVE_CAPABILITY_ID,
@@ -337,6 +338,30 @@ def test_bots_only_orchestrator_simulates_and_executes_one_real_action():
         assert len(result["decision"]["evaluated_plans"]) >= 1
 
     run(scenario())
+
+
+def test_backend_only_bot_simulation_persists_compact_replay(tmp_path, monkeypatch):
+    monkeypatch.setattr(bot_simulation_service, "REPLAYS_ROOT", tmp_path)
+    monkeypatch.setattr(bot_simulation_service, "get_level_config", lambda level_id: TEST_LEVEL)
+
+    summaries = bot_simulation_service.run_bot_simulation_batch(
+        level_id="test-level",
+        game_count=1,
+        max_steps=10,
+        seed=123,
+    )
+
+    assert len(summaries) == 1
+    replay = bot_simulation_service.get_bot_replay(summaries[0]["id"])
+    assert replay["seed"] == 123
+    assert replay["frames"][0]["command"] is None
+    assert replay["map"]["id"] == "test-map"
+    assert "map" not in replay["frames"][0]["projection"]
+    assert "tile_catalog" not in replay["frames"][0]["projection"]
+    assert replay["metadata"]["steps"] == len(replay["frames"]) - 1
+
+    bot_simulation_service.delete_bot_replay(replay["id"])
+    assert bot_simulation_service.list_bot_replays() == []
 
 
 def test_bots_only_orchestrator_marks_an_early_shelter_dead_end_as_lost():
