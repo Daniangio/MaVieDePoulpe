@@ -362,6 +362,7 @@ def test_tokens_and_poulpita_panel_are_configurable(tmp_path, monkeypatch):
 
     assert [token["id"] for token in state["tokens"]] == ["neuron", "seashell", "shelter", "octopus", "courtship"]
     assert set(state["poulpita_panel"]["zones"]) == {"neurons", "seashells"}
+    assert state["poulpita_panel"]["ap_die_sides"] == [1, 2, 3, 4, 5, 6]
 
     saved = run(
         service.update_poulpita_panel(
@@ -369,6 +370,7 @@ def test_tokens_and_poulpita_panel_are_configurable(tmp_path, monkeypatch):
                 "neurons": {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4},
                 "seashells": {"x": 0.5, "y": 0.2, "width": 0.3, "height": 0.4},
             },
+            ap_die_sides=[0, 2, 2, 8],
             image=None,
             image_width=800,
             image_height=600,
@@ -377,6 +379,7 @@ def test_tokens_and_poulpita_panel_are_configurable(tmp_path, monkeypatch):
 
     assert saved["image_width"] == 800
     assert saved["image_height"] == 600
+    assert saved["ap_die_sides"] == [0, 2, 2, 8]
     assert saved["zones"]["neurons"] == {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4}
     resized = run(
         service.update_poulpita_panel(

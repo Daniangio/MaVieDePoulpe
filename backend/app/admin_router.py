@@ -951,6 +951,7 @@ async def admin_update_token(
 @router.put("/admin/content/poulpita-panel")
 async def admin_update_poulpita_panel(
     zones_json: str = Form(...),
+    ap_die_sides_json: str = Form(default="[1,2,3,4,5,6]"),
     sizes_json: str = Form(default="[]"),
     size_image_indices_json: str = Form(default="[]"),
     image_width: int | None = Form(default=None),
@@ -966,6 +967,7 @@ async def admin_update_poulpita_panel(
             raise ValueError("Each Poulpita size image requires a matching size index.")
         return await update_poulpita_panel(
             zones=_json_form_object(zones_json, "zones_json"),
+            ap_die_sides=_json_form_list(ap_die_sides_json, "ap_die_sides_json"),
             sizes=_json_form_list(sizes_json, "sizes_json"),
             size_images=dict(zip(size_image_indices, uploaded_size_images)),
             image=image,

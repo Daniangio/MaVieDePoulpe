@@ -836,6 +836,14 @@ def _configured_action_cost(state: dict[str, Any], action_id: str) -> dict[str, 
     }
 
 
+def _configured_ap_die_sides(state: dict[str, Any]) -> list[int]:
+    raw_sides = ((state.get("tile_catalog") or {}).get("poulpita_panel") or {}).get("ap_die_sides")
+    if not isinstance(raw_sides, list):
+        return [1, 2, 3, 4, 5, 6]
+    sides = [max(0, min(99, int(value))) for value in raw_sides[:32]]
+    return sides or [1, 2, 3, 4, 5, 6]
+
+
 def _require_active_action(service: "GameRoomService", state: dict[str, Any], command_id: str, capability_id: str, *, ap_cost: int = 0, neuron_cost: int = 0) -> dict[str, Any]:
     capability = _require_active_control(service, state, command_id, capability_id)
     if int(capability.get("pa") or 0) < ap_cost:
@@ -2590,7 +2598,8 @@ class GameRoomService:
             capability_id = str(payload.get("capability_id") or "")
             action_cost = _configured_action_cost(state, "gain_ap")
             _require_active_action(self, state, command_id, capability_id, ap_cost=action_cost["ap_cost"], neuron_cost=action_cost["neuron_cost"])
-            amount = random.randint(1, 6)
+            die_sides = _configured_ap_die_sides(state)
+            amount = random.choice(die_sides)
             next_state = deepcopy(state)
             next_state["version"] = int(state["version"]) + 1
             next_capability = next_state["capabilities"][capability_id]
@@ -2603,6 +2612,7 @@ class GameRoomService:
                 "command_id": command_id,
                 "capability_id": capability_id,
                 "amount": amount,
+                "die_sides": die_sides,
                 "version": int(next_state["version"]),
                 "created_at": _now_iso(),
             }

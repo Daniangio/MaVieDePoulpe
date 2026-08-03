@@ -111,6 +111,42 @@ const shelterData = (entry: any) => {
   };
 };
 
+type ApRollAnimation = {
+  capabilityId: string;
+  displayedValue: number;
+  finalValue: number;
+  awarded: number;
+  sides: number[];
+  phase: "rolling" | "landed" | "awarding";
+};
+
+const ApRollOverlay = ({ animation, projection }: { animation: ApRollAnimation | null; projection: GameProjection | null }) => {
+  if (!animation) return null;
+  const abilityName = projection?.capabilities?.[animation.capabilityId]?.name || animation.capabilityId;
+  return (
+    <div className="pointer-events-none absolute inset-0 z-[64] flex items-center justify-center bg-cyan-950/10 backdrop-blur-[1px]">
+      <div className="flex flex-col items-center rounded-md border border-cyan-200/80 bg-white/90 px-8 py-5 shadow-2xl shadow-cyan-950/25">
+        <div className={["ap-die", animation.phase === "rolling" ? "ap-die-rolling" : "ap-die-landed"].join(" ")}>
+          <div className="ap-die-facet ap-die-facet-left" />
+          <div className="ap-die-facet ap-die-facet-right" />
+          <strong>{animation.displayedValue}</strong>
+        </div>
+        <p className="mt-3 text-xs font-semibold uppercase text-teal-900">{animation.phase === "rolling" ? "Collecting action points" : abilityName}</p>
+        {animation.phase === "rolling" ? (
+          <div className="mt-2 flex max-w-64 flex-wrap justify-center gap-1">
+            {animation.sides.slice(0, 16).map((side, index) => <span className="rounded bg-cyan-50 px-1.5 py-0.5 text-[0.6rem] text-slate-500" key={`${index}-${side}`}>{side}</span>)}
+          </div>
+        ) : (
+          <div className="mt-2 flex h-10 items-center gap-2">
+            <span className="text-sm font-semibold text-slate-500">AP</span>
+            <span className="ap-award-count text-3xl font-black text-teal-600" key={animation.awarded}>+{animation.awarded}</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
 const hasNightEndBlocker = (projection: GameProjection | null, nodeId: string) =>
   (projection?.tiles?.[nodeId] || []).some((instance: any) => {
     const tile = projection?.tile_catalog?.tiles?.[instance.tile_id];
@@ -180,6 +216,7 @@ const CapabilityBoard = ({
   onEndDay,
   onBuyUpgrade,
   showActions = true,
+  apPulseTick = 0,
 }: {
   capability: CapabilityProjection;
   active: boolean;
@@ -198,6 +235,7 @@ const CapabilityBoard = ({
   onEndDay?: () => void;
   onBuyUpgrade?: (upgradeIndex: number) => void;
   showActions?: boolean;
+  apPulseTick?: number;
 }) => {
   const initiableEvents = (capability.initiates_event_ids || [])
     .map((eventId) => projection?.tile_catalog?.events?.[eventId])
@@ -234,7 +272,7 @@ const CapabilityBoard = ({
     className={[
       "group/board relative min-w-0 overflow-auto rounded-md border-2 bg-slate-900 text-left text-slate-100 shadow-xl transition",
       compact ? "cursor-pointer hover:z-50 hover:bg-slate-800 hover:shadow-cyan-500/20 focus:outline-none focus:ring-2 focus:ring-cyan-300" : "",
-      active ? "ring-2 ring-teal-200" : focused ? "ring-2 ring-amber-200" : "",
+      focused ? "z-10 bg-white opacity-100 ring-4 ring-amber-300 shadow-amber-200/60" : active ? "opacity-80 grayscale-[20%] ring-2 ring-teal-200" : "opacity-65 grayscale-[45%] hover:opacity-90",
       compact ? "h-full p-1" : "h-full p-2",
     ].join(" ")}
     onClick={compact ? onFocus : undefined}
@@ -265,7 +303,7 @@ const CapabilityBoard = ({
         </div>
         <p className="text-xs text-slate-400">{active ? "Controls Poulpita" : focused ? "In focus" : "Waiting"}</p>
       </div>
-      <div className="rounded bg-slate-800 px-2 py-1 text-xs font-semibold text-slate-100">
+      <div className={["rounded bg-slate-800 px-2 py-1 text-xs font-semibold text-slate-100", apPulseTick > 0 ? "ap-counter-pulse" : ""].join(" ")} key={`${capability.id}-ap-${apPulseTick}`}>
         <DotTrack current={actionPoints} label="AP" mode="available" total={actionPoints} />
       </div>
     </div>
@@ -1796,6 +1834,9 @@ const GameRoomPage = ({ replayMode = false }: { replayMode?: boolean }) => {
   const [replayFrameIndex, setReplayFrameIndex] = useState(0);
   const [replayPlaying, setReplayPlaying] = useState(false);
   const [replaySpeed, setReplaySpeed] = useState(4);
+  const [apRollAnimation, setApRollAnimation] = useState<ApRollAnimation | null>(null);
+  const handledApRollEventsRef = useRef<Set<string>>(new Set());
+  const apRollRunRef = useRef(0);
 
   const capabilityMap = projection?.capabilities || {};
   const capabilities = useMemo(() => {
@@ -1807,7 +1848,6 @@ const GameRoomPage = ({ replayMode = false }: { replayMode?: boolean }) => {
   }, [capabilityMap, projection]);
   const selectedCapabilityId = focusedCapabilityId || projection?.focused_capability_id || capabilities[0]?.id || "";
   const selectedCapability = selectedCapabilityId ? capabilityMap[selectedCapabilityId] : null;
-  const otherCapabilities = capabilities.filter((capability) => capability.id !== selectedCapabilityId);
   const botsOnlyMode = !replayMode && projection?.mode === "bots_only" && Boolean(projection?.bot_config);
   const botModeEnabled = !replayMode && projection?.mode === "solo_with_bots" && Boolean(projection?.bot_config);
   const botLogEnabled = replayMode || botModeEnabled || botsOnlyMode;
@@ -1931,6 +1971,47 @@ const GameRoomPage = ({ replayMode = false }: { replayMode?: boolean }) => {
     const events = projection?.events || [];
     return events.length ? events[events.length - 1] : null;
   }, [projection?.events]);
+
+  useEffect(() => {
+    const event = latestEvent as any;
+    if (event?.type !== "action_points_collected") return;
+    const eventId = String(event.event_id || `${event.command_id || "collect"}-${event.version || 0}`);
+    if (handledApRollEventsRef.current.has(eventId)) return;
+    if (!replayMode && event.created_at && Date.now() - new Date(event.created_at).getTime() > 10000) {
+      handledApRollEventsRef.current.add(eventId);
+      return;
+    }
+    handledApRollEventsRef.current.add(eventId);
+    const configuredSides = Array.isArray(event.die_sides)
+      ? event.die_sides
+      : projection?.tile_catalog?.poulpita_panel?.ap_die_sides;
+    const sides = (Array.isArray(configuredSides) && configuredSides.length ? configuredSides : [1, 2, 3, 4, 5, 6])
+      .map((value: unknown) => Math.max(0, Number(value || 0)));
+    const finalValue = Math.max(0, Number(event.amount || 0));
+    const capabilityId = String(event.capability_id || "");
+    const runId = apRollRunRef.current + 1;
+    apRollRunRef.current = runId;
+    const wait = (milliseconds: number) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+    const animate = async () => {
+      setApRollAnimation({ capabilityId, displayedValue: sides[0], finalValue, awarded: 0, sides, phase: "rolling" });
+      for (let index = 0; index < 11; index += 1) {
+        await wait(65);
+        if (apRollRunRef.current !== runId) return;
+        setApRollAnimation((current) => current ? { ...current, displayedValue: sides[(index * 3 + 1) % sides.length] } : current);
+      }
+      setApRollAnimation((current) => current ? { ...current, displayedValue: finalValue, phase: "landed" } : current);
+      await wait(240);
+      for (let awarded = 1; awarded <= finalValue; awarded += 1) {
+        if (apRollRunRef.current !== runId) return;
+        setApRollAnimation((current) => current ? { ...current, awarded, phase: "awarding" } : current);
+        await wait(75);
+      }
+      await wait(420);
+      if (apRollRunRef.current === runId) setApRollAnimation(null);
+    };
+    void animate();
+  }, [latestEvent, projection?.tile_catalog?.poulpita_panel?.ap_die_sides, replayMode]);
+
   const gameWon = projection?.phase === "game_over" && (latestEvent?.type === "game_won" || Boolean(projection?.objectives?.length && projection.objectives.every((objective: any) => objective.completed)));
   const gameOverTitle = gameWon
     ? "All objectives completed"
@@ -2656,13 +2737,14 @@ const GameRoomPage = ({ replayMode = false }: { replayMode?: boolean }) => {
       <section className="grid h-[95vh] grid-cols-[17rem_minmax(0,1fr)_minmax(14rem,25%)] grid-rows-[minmax(0,1fr)_minmax(11rem,24vh)] overflow-hidden">
         <aside className="row-span-2 flex min-h-0 flex-col gap-2 overflow-hidden border-r border-slate-800 bg-slate-950 p-2">
           <div className="flex min-h-0 flex-1 flex-col gap-2">
-            {otherCapabilities.map((capability) => (
+            {capabilities.map((capability) => (
               <div className="min-h-0 flex-1" key={capability.id}>
                 <CapabilityBoard
                   active={projection?.active_capability_id === capability.id}
+                  apPulseTick={apRollAnimation?.capabilityId === capability.id && apRollAnimation.phase === "awarding" ? apRollAnimation.awarded : 0}
                   capability={capability}
                   compact
-                  focused={false}
+                  focused={selectedCapabilityId === capability.id}
                   moveMode={moveMode}
                   onFocus={() => {
                     setFocusedCapabilityId(capability.id);
@@ -2674,28 +2756,12 @@ const GameRoomPage = ({ replayMode = false }: { replayMode?: boolean }) => {
               </div>
             ))}
           </div>
-          <div className="min-h-0 h-[24vh] max-h-[24vh]">
-            {selectedCapability ? (
-              <CapabilityBoard
-                active={projection?.active_capability_id === selectedCapability.id}
-                capability={selectedCapability}
-                compact
-                focused
-                moveMode={moveMode}
-                onFocus={() => {
-                  setFocusedCapabilityId(selectedCapability.id);
-                  setMoveMode(false);
-                }}
-                pending={inspectionPending}
-                projection={projection}
-              />
-            ) : null}
-          </div>
         </aside>
         <div className="relative min-w-0 overflow-hidden border-r border-slate-800">
           {projection ? (
             <>
               <BoardView focusedCapabilityId={selectedCapabilityId} moveMode={moveMode} onInspectTile={inspectTile} onMove={movePoulpita} onMoveShellFromShelter={moveShellFromShelter} onSpecialNode={selectSpecialNode} onSpecialTile={selectSpecialTile} pending={inspectionPending} projection={projection} specialTargetMode={specialTargetMode} />
+              <ApRollOverlay animation={apRollAnimation} projection={projection} />
               {botModeEnabled ? (
                 <BotPlanTree
                   onExecuteOption={executePlanTreeOption}

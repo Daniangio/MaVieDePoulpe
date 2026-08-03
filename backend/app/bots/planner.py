@@ -206,7 +206,11 @@ def _bot_settings(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def _expected_ap_roll(state: dict[str, Any]) -> int:
-    return max(1, min(6, int(_bot_settings(state).get("expected_ap_roll") or 3)))
+    raw_sides = ((state.get("tile_catalog") or {}).get("poulpita_panel") or {}).get("ap_die_sides")
+    if isinstance(raw_sides, list) and raw_sides:
+        sides = [max(0, min(99, int(value))) for value in raw_sides]
+        return max(0, min(99, int(sum(sides) / len(sides))))
+    return max(0, min(99, int(_bot_settings(state).get("expected_ap_roll") if _bot_settings(state).get("expected_ap_roll") is not None else 3)))
 
 
 def _planning_depth_take_controls(state: dict[str, Any]) -> int:

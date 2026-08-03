@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { BatteryMedium, Brain, CircleCheck, CircleX, Home, LoaderCircle, MapPin, Moon, Shell, Sun } from "lucide-react";
+import { BatteryMedium, Brain, CircleCheck, CircleX, Home, LoaderCircle, MapPin, Moon, Plus, Shell, Sun, Trash2 } from "lucide-react";
 import AdminLevelEditor from "../components/AdminLevelEditor.jsx";
 import AdminMapEditor from "../components/AdminMapEditor.jsx";
 import HexTilePreview from "../components/HexTilePreview.jsx";
@@ -621,6 +621,7 @@ const AdminContentPage = () => {
     try {
       const form = new FormData();
       form.set("zones_json", JSON.stringify(poulpitaPanelDraft.zones || {}));
+      form.set("ap_die_sides_json", JSON.stringify(poulpitaPanelDraft.ap_die_sides?.length ? poulpitaPanelDraft.ap_die_sides : [1, 2, 3, 4, 5, 6]));
       const sizeImageIndices = [];
       const serializedSizes = (poulpitaPanelDraft.sizes || []).map((size, index) => {
         const { _image_file, _preview_url, image_url, uses_previous_image, ...persistedSize } = size;
@@ -1213,24 +1214,11 @@ const BotSettingsEditor = ({ botSettings, onSave, busy }) => {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="font-semibold text-teal-950">Bot Planning</h2>
-          <p className="mt-1 text-xs text-slate-500">These values affect bot plan evaluation only. They do not change the real dice roll.</p>
+          <p className="mt-1 text-xs text-slate-500">These values affect bot plan evaluation. Expected AP is derived from the die configured in Poulpita Panel.</p>
         </div>
         <button className={primaryButton} disabled={busy} onClick={() => onSave(draft)} type="button">Save bot settings</button>
       </div>
       <div className="mt-4 grid gap-3 lg:grid-cols-3">
-        <label className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3 text-sm">
-          <span className="font-semibold text-teal-950">Expected AP roll</span>
-          <span className="mt-1 block text-xs text-slate-500">Used by optimistic plans after Collect AP. Default is 3.</span>
-          <input
-            className={`${input} mt-3`}
-            max="6"
-            min="1"
-            step="1"
-            type="number"
-            value={Number(draft.expected_ap_roll || 3)}
-            onChange={(event) => setDraft((current) => ({ ...current, expected_ap_roll: Math.max(1, Math.min(6, Number(event.target.value || 3))) }))}
-          />
-        </label>
         <label className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3 text-sm">
           <span className="font-semibold text-teal-950">Planning depth</span>
           <span className="mt-1 block text-xs text-slate-500">How many take-control windows bots estimate. Default is 3.</span>
@@ -2042,6 +2030,24 @@ const PoulpitaPanelEditor = ({ draft, setDraft, imageRef, previewUrl, setPreview
   };
 
   const sampleCounts = { neurons: 6, seashells: 4 };
+  const dieSides = draft.ap_die_sides?.length ? draft.ap_die_sides : [1, 2, 3, 4, 5, 6];
+  const updateDieSide = (index, value) => {
+    setDraft((current) => ({
+      ...current,
+      ap_die_sides: (current.ap_die_sides?.length ? current.ap_die_sides : [1, 2, 3, 4, 5, 6])
+        .map((side, sideIndex) => sideIndex === index ? Math.max(0, Math.min(99, Number(value || 0))) : side),
+    }));
+  };
+  const addDieSide = () => {
+    setDraft((current) => ({
+      ...current,
+      ap_die_sides: [...(current.ap_die_sides?.length ? current.ap_die_sides : [1, 2, 3, 4, 5, 6]), 1].slice(0, 32),
+    }));
+  };
+  const removeDieSide = (index) => {
+    if (dieSides.length <= 1) return;
+    setDraft((current) => ({ ...current, ap_die_sides: (current.ap_die_sides || []).filter((_side, sideIndex) => sideIndex !== index) }));
+  };
   const sizes = draft.sizes?.length ? draft.sizes : [{ amount: 1, unit: "kg", energy_cost: 0 }];
   const updateSize = (index, patch) => {
     setDraft((current) => ({
@@ -2125,6 +2131,28 @@ const PoulpitaPanelEditor = ({ draft, setDraft, imageRef, previewUrl, setPreview
       <aside className={panel}>
         <h2 className="font-semibold text-teal-950">Container Image</h2>
         <input ref={imageRef} className={`${input} mt-3 text-sm`} type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => onImageChange(event.target.files?.[0] || null)} />
+        <div className="mt-5 border-t border-cyan-100 pt-4">
+          <div className="flex items-center justify-between gap-2">
+            <div>
+              <h3 className="text-sm font-semibold text-teal-950">AP die sides</h3>
+              <p className="mt-0.5 text-[0.65rem] text-slate-500">Each entry is one equally likely side. Repeat a value to make it more likely.</p>
+            </div>
+            <button aria-label="Add die side" className={subtleButton} disabled={dieSides.length >= 32} onClick={addDieSide} title="Add die side" type="button">
+              <Plus size={15} />
+            </button>
+          </div>
+          <div className="mt-2 grid grid-cols-2 gap-2">
+            {dieSides.map((side, index) => (
+              <div className="flex items-center gap-1 rounded border border-cyan-100 bg-cyan-50 p-1.5" key={index}>
+                <span className="w-10 text-[0.65rem] font-semibold text-slate-500">Side {index + 1}</span>
+                <input aria-label={`Die side ${index + 1} value`} className={`${input} min-w-0 py-1 text-xs`} max="99" min="0" onChange={(event) => updateDieSide(index, event.target.value)} step="1" type="number" value={side} />
+                <button aria-label={`Remove die side ${index + 1}`} className="rounded p-1 text-rose-600 hover:bg-rose-50 disabled:opacity-30" disabled={dieSides.length <= 1} onClick={() => removeDieSide(index)} title="Remove die side" type="button">
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
         <div className="mt-5">
           <div className="flex items-center justify-between gap-2">
             <h3 className="text-sm font-semibold text-teal-950">Size ladder</h3>

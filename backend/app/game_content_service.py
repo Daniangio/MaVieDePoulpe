@@ -304,6 +304,7 @@ def _default_poulpita_panel() -> dict[str, Any]:
         "image_filename": None,
         "image_width": None,
         "image_height": None,
+        "ap_die_sides": [1, 2, 3, 4, 5, 6],
         "sizes": [{"amount": 1.0, "unit": "kg", "energy_cost": 0, "image_filename": None}],
         "zones": {
             "neurons": {"x": 0.08, "y": 0.12, "width": 0.38, "height": 0.76},
@@ -348,10 +349,18 @@ def _normalize_poulpita_panel(raw_panel: dict[str, Any]) -> dict[str, Any]:
     if not sizes:
         sizes = deepcopy(default["sizes"])
     sizes[0]["energy_cost"] = 0
+    raw_die_sides = raw_panel.get("ap_die_sides") if isinstance(raw_panel, dict) else None
+    ap_die_sides = [
+        max(0, min(99, int(value)))
+        for value in (raw_die_sides if isinstance(raw_die_sides, list) else default["ap_die_sides"])
+    ][:32]
+    if not ap_die_sides:
+        ap_die_sides = deepcopy(default["ap_die_sides"])
     return {
         "image_filename": raw_panel.get("image_filename") if isinstance(raw_panel, dict) else None,
         "image_width": int(raw_panel.get("image_width")) if isinstance(raw_panel, dict) and raw_panel.get("image_width") else None,
         "image_height": int(raw_panel.get("image_height")) if isinstance(raw_panel, dict) and raw_panel.get("image_height") else None,
+        "ap_die_sides": ap_die_sides,
         "sizes": sizes,
         "zones": {
             zone_id: _normalize_zone((zones or {}).get(zone_id), default["zones"][zone_id])
@@ -858,6 +867,7 @@ async def update_token(
 async def update_poulpita_panel(
     *,
     zones: dict[str, Any],
+    ap_die_sides: list[Any] | None = None,
     sizes: list[dict[str, Any]] | None = None,
     size_images: dict[int, UploadFile] | None = None,
     image: UploadFile | None,
@@ -891,6 +901,7 @@ async def update_poulpita_panel(
             "image_filename": image_filename,
             "image_width": image_width or current.get("image_width"),
             "image_height": image_height or current.get("image_height"),
+            "ap_die_sides": ap_die_sides if ap_die_sides is not None else current.get("ap_die_sides"),
             "sizes": requested_sizes,
             "zones": zones,
         }

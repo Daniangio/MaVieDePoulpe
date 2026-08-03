@@ -133,7 +133,7 @@ def explicit_test_map(monkeypatch):
         "backend.app.game_room_service.get_game_content_catalog",
         lambda: {"tiles": {}, "events": {}, "interactions": {}},
     )
-    monkeypatch.setattr("backend.app.game_room_service.random.randint", lambda _min, _max: 1)
+    monkeypatch.setattr("backend.app.game_room_service.random.choice", lambda values: values[0])
 
 
 def run(coro):
@@ -196,6 +196,41 @@ async def prepare_active_capability_with_ap(service, user, room):
         payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID},
     )
     return control, collect
+
+
+def test_collect_ap_uses_configured_die_sides(monkeypatch):
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state.setdefault("tile_catalog", {}).setdefault("poulpita_panel", {})["ap_die_sides"] = [0, 2, 2, 8]
+        monkeypatch.setattr("backend.app.game_room_service.random.choice", lambda sides: sides[-1])
+
+        control = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_custom_die_control",
+            expected_version=1,
+            command_type="take_control",
+            payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID},
+        )
+        initial_ap = int(control["projection"]["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["pa"])
+        collected = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_custom_die_collect",
+            expected_version=2,
+            command_type="collect_action_points",
+            payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID},
+        )
+
+        assert collected["ok"] is True
+        assert collected["events"][0]["amount"] == 8
+        assert collected["events"][0]["die_sides"] == [0, 2, 2, 8]
+        assert collected["projection"]["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["pa"] == initial_ap + 8
+
+    run(scenario())
 
 
 def test_room_creation_returns_setup_state():
