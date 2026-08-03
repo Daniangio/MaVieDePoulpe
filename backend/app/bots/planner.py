@@ -84,6 +84,7 @@ def _safe_public_command(command: dict[str, Any]) -> dict[str, Any] | None:
         "start_interaction": {"capability_id", "tile_instance_id", "auto_select_cards"},
         "resolve_interaction": {"capability_id", "auto_select_cards", "confirm_only"},
         "fail_interaction": {"target_node_id"},
+        "fail_unavailable_compulsory_tile": {"tile_instance_id", "target_node_id"},
         "end_day": set(),
         "end_night": {"capability_id"},
         "move_seashell_to_shelter": set(),
@@ -199,6 +200,17 @@ def _has_control_take_left(capability: dict[str, Any]) -> bool:
 
 def _action_slots_left(capability: dict[str, Any]) -> int:
     return int(capability.get("max_actions_per_control") or 0) - int(capability.get("actions_taken_this_control") or 0)
+
+
+def _has_initiative_available(state: dict[str, Any], ability_id: str) -> bool:
+    capability = _capability(state, ability_id)
+    if (
+        str(state.get("phase") or "") == "night_action"
+        and ability_id == str(state.get("active_capability_id") or "")
+        and _action_slots_left(capability) > 0
+    ):
+        return True
+    return _has_control_take_left(capability)
 
 
 def _bot_settings(state: dict[str, Any]) -> dict[str, Any]:
@@ -423,6 +435,8 @@ def _visible_tiles_on_node(state: dict[str, Any], node_id: str) -> list[dict[str
     for instance in (state.get("tiles") or {}).get(node_id, []) or []:
         if not instance.get("face_up"):
             continue
+        if int(instance.get("auto_failed_day_index") or 0) == int(state.get("day_index") or 1):
+            continue
         tile = catalog_tiles.get(instance.get("tile_id")) or {}
         if tile:
             visible.append({"instance": instance, "tile": tile, "node_id": node_id})
@@ -456,6 +470,19 @@ def _can_initiate(state: dict[str, Any], ability_id: str, tile: dict[str, Any]) 
             allowed_initiators = list((state.get("capabilities") or {}).keys())
         return ability_id in allowed_initiators
     return str(tile.get("event_id") or "") in (_capability(state, ability_id).get("initiates_event_ids") or [])
+
+
+def _available_initiators_for_entry(state: dict[str, Any], entry: dict[str, Any]) -> list[str]:
+    tile = entry.get("tile") or {}
+    return [
+        ability_id
+        for ability_id in _all_capability_ids(state)
+        if _can_initiate(state, ability_id, tile) and _has_initiative_available(state, ability_id)
+    ]
+
+
+def _unavailable_compulsory_entries(state: dict[str, Any], entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [entry for entry in entries if not _available_initiators_for_entry(state, entry)]
 
 
 def _interaction_requirements(tile: dict[str, Any]) -> int:
@@ -618,7 +645,7 @@ def _actor_candidates_for_entry(state: dict[str, Any], entry: dict[str, Any], pr
                 "can_initiate": True,
                 "covers_required_cards_from_hand": selected is not None,
                 "missing_card_count_after_hand": 0 if selected is not None else max(0, len(required) - _matched_requirement_count(capability.get("hand") or [], required)),
-                "has_control_available": ability_id == state.get("active_capability_id") or _has_control_take_left(capability),
+                "has_control_available": _has_initiative_available(state, ability_id),
             }
         )
     return candidates
@@ -1102,8 +1129,14 @@ def _node_followup_score(state: dict[str, Any], node_id: str, ability_id: str) -
     score = 0.0
     for summary in summaries:
         actor_candidates = summary.get("actor_candidates") or []
-        preferred_can_act = any(candidate.get("ability_id") == ability_id for candidate in actor_candidates)
-        any_actor = bool(actor_candidates)
+        available_actors = [candidate for candidate in actor_candidates if candidate.get("has_control_available")]
+        preferred_can_act = any(candidate.get("ability_id") == ability_id for candidate in available_actors)
+        any_actor = bool(available_actors)
+        if not any_actor:
+            # Entering this node deterministically fails the compulsory tile.
+            # Keep this below any ordinary resource heuristic so routes avoid it.
+            score -= 500
+            continue
         score += float(summary.get("success_probability") or 0) * 30
         score += _weighted_expected_gain(state, summary.get("expected_delta") or {})
         if summary.get("compulsory"):
@@ -1830,6 +1863,22 @@ def _simulate_public_command(state: dict[str, Any], command: dict[str, Any]) -> 
         if paid:
             _simulate_apply_surprise_effects(state, card.get("effects") or [])
         state["pending_surprise"] = None
+    elif command_type == "fail_unavailable_compulsory_tile":
+        entry = _simulated_tile_entry(state, str(payload.get("tile_instance_id") or ""))
+        if entry:
+            (entry.get("instance") or {})["auto_failed_day_index"] = int(state.get("day_index") or 1)
+            state["interaction"] = {
+                "tile_instance_id": (entry.get("instance") or {}).get("instance_id"),
+                "tile_id": (entry.get("instance") or {}).get("tile_id"),
+                "node_id": entry.get("node_id"),
+                "initiator_capability_id": None,
+                "initiator_confirmed": True,
+                "played_cards": [],
+            }
+            _simulate_public_command(
+                state,
+                {"type": "fail_interaction", "payload": {"target_node_id": payload.get("target_node_id")}},
+            )
     elif command_type == "start_interaction" and ability_id:
         cost = _action_cost(state, "interact")
         _simulate_spend_action(state, capability, cost)
@@ -2435,6 +2484,50 @@ def _forced_interaction_plan(
         warnings=[] if has_ap else ["This bot needs AP before starting the forced interaction."],
         commands=commands,
         plan_chain=_plan_chain(chain_labels, commands),
+        statistics=statistics,
+    )
+
+
+def _unavailable_compulsory_failure_command(state: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "tile_instance_id": str((entry.get("instance") or {}).get("instance_id") or ""),
+    }
+    tile = entry.get("tile") or {}
+    if any(str(effect.get("type") or "") == "pulpita_move_free" for effect in tile.get("failure_effects") or []):
+        current_node_id = str((state.get("poulpita") or {}).get("node_id") or "")
+        adjacent = sorted(
+            str(node_id)
+            for node_id in ((state.get("map") or {}).get("adjacency") or {}).get(current_node_id, []) or []
+        )
+        if adjacent:
+            payload["target_node_id"] = adjacent[0]
+    return {"type": "fail_unavailable_compulsory_tile", "payload": payload}
+
+
+def _unavailable_compulsory_failure_plan(state: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any]:
+    tile = entry.get("tile") or {}
+    name = _tile_display_name(state, tile)
+    command = _unavailable_compulsory_failure_command(state, entry)
+    effects = tile.get("failure_effects") or []
+    statistics = _plan_statistics(
+        state,
+        commands=[command],
+        interactions=[entry],
+        assumptions=["Every ability that can initiate this compulsory tile has exhausted its initiatives."],
+    )
+    statistics["expected_resource_delta"] = _effect_delta(effects)
+    return _public_plan(
+        plan_id=f"fail_exhausted_compulsory_{(entry.get('instance') or {}).get('instance_id')}",
+        proposer_ability_id=None,
+        title=f"Fail {name}",
+        rationale="No configured initiator can take or continue initiative this night, so this compulsory tile fails immediately.",
+        risk_label="forced",
+        step_preview=[f"Apply {name} failure"],
+        expected_resources=_resource_estimate(),
+        score=500 + _delta_score(_effect_delta(effects)),
+        warnings=["Avoid routes to this tile until its initiating ability has initiative available."],
+        commands=[command],
+        plan_chain=_plan_chain([f"Fail {name}"], [command]),
         statistics=statistics,
     )
 
@@ -3394,13 +3487,17 @@ def _night_idle_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
     proposals = []
     current_node_id = str((state.get("poulpita") or {}).get("node_id") or "")
     compulsory = _compulsory_choices_on_node(state, current_node_id)
+    unavailable_compulsory = _unavailable_compulsory_entries(state, compulsory)
+    if unavailable_compulsory:
+        return [_unavailable_compulsory_failure_plan(state, unavailable_compulsory[0])]
     shelter_return = _shelter_return_context(state, current_node_id)
     courtship_pursuit = _courtship_pursuit_context(state, current_node_id)
     visible_entries = _visible_current_tiles(state)
     visible_initiators = {
         ability_id
         for ability_id in _playable_ability_ids(state)
-        if any(_can_initiate(state, ability_id, entry.get("tile") or {}) for entry in visible_entries)
+        if _has_initiative_available(state, ability_id)
+        and any(_can_initiate(state, ability_id, entry.get("tile") or {}) for entry in visible_entries)
     }
     move_cost = _action_cost(state, "move")
     adjacent = list(((state.get("map") or {}).get("adjacency") or {}).get(current_node_id) or [])
@@ -3523,6 +3620,9 @@ def _active_night_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
     proposals = []
     current_node_id = str((state.get("poulpita") or {}).get("node_id") or "")
     current_compulsory = _compulsory_choices_on_node(state, current_node_id)
+    unavailable_compulsory = _unavailable_compulsory_entries(state, current_compulsory)
+    if unavailable_compulsory and not state.get("interaction"):
+        return [_unavailable_compulsory_failure_plan(state, unavailable_compulsory[0])]
     visible_entries = _visible_current_tiles(state)
     interact_cost = _action_cost(state, "interact")
     end_night = _end_night_plan(state)
@@ -3756,6 +3856,7 @@ def _active_night_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
     visible_interaction_path = any(
         _can_initiate(state, ability_id, entry.get("tile") or {})
         for ability_id in _playable_ability_ids(state)
+        if _has_initiative_available(state, ability_id)
         for entry in visible_entries
     )
     active_visible_interactions = [
@@ -4437,6 +4538,21 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
     pursuing_courtship = bool(courtship_pursuit["should_seek"] and not compulsory and not returning_to_shelter)
     if phase == "night_idle":
         active_id = ""
+    unavailable_compulsory = _unavailable_compulsory_entries(state, compulsory)
+    if unavailable_compulsory and not state.get("interaction"):
+        entry = unavailable_compulsory[0]
+        tile = entry.get("tile") or {}
+        return [
+            _local_orchestrator_candidate(
+                state,
+                plan_id=f"local_fail_exhausted_compulsory_{(entry.get('instance') or {}).get('instance_id')}",
+                title=f"Fail {_tile_display_name(state, tile)}",
+                command=_unavailable_compulsory_failure_command(state, entry),
+                base_score=500,
+                confidence=1.0,
+                expected_gain=_weighted_expected_gain(state, _effect_delta(tile.get("failure_effects") or [])),
+            )
+        ]
     if not active_id:
         visible = _visible_current_tiles(state)
         visible_initiators = {
@@ -4538,7 +4654,8 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
         ability_id
         for entry in visible
         for ability_id in _all_capability_ids(state)
-        if _can_initiate(state, ability_id, entry.get("tile") or {})
+        if _has_initiative_available(state, ability_id)
+        and _can_initiate(state, ability_id, entry.get("tile") or {})
     }
     highest_compulsory_priority = max((int(entry.get("priority") or 0) for entry in compulsory), default=None)
     active_can_initiate_compulsory = any(

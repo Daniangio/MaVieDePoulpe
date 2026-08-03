@@ -1461,7 +1461,9 @@ const actionVisual = (step: PlanChainStep, projection: GameProjection) => {
   const payload = command?.payload || {};
   const actorId = typeof payload.capability_id === "string" ? payload.capability_id : "";
   const type = command?.type || step.command_type || "";
-  const tile = type === "start_interaction" ? tileForInstance(projection, payload.tile_instance_id) : null;
+  const tile = ["start_interaction", "fail_unavailable_compulsory_tile"].includes(type)
+    ? tileForInstance(projection, payload.tile_instance_id)
+    : null;
   const tileImage = tile?.event?.image_url || tile?.image_url;
   if (type === "start_interaction" && tileImage) {
     return { actorId, imageUrl: buildApiUrl(tileImage), text: "", Icon: Swords, title: `Interact ${tileNameForInstance(projection, payload.tile_instance_id)}` };
@@ -1473,6 +1475,7 @@ const actionVisual = (step: PlanChainStep, projection: GameProjection) => {
   if (type === "start_interaction") return { actorId, text: "Fight", Icon: Swords, title: `Interact ${tileNameForInstance(projection, payload.tile_instance_id)}` };
   if (type === "resolve_interaction") return { actorId, text: "OK", Icon: Check, title: "Commit cards" };
   if (type === "fail_interaction") return { actorId, text: "Fail", Icon: X, title: "Fail interaction" };
+  if (type === "fail_unavailable_compulsory_tile") return { actorId, text: "Fail", Icon: X, title: `Fail ${tileNameForInstance(projection, payload.tile_instance_id)}` };
   if (type === "resolve_surprise_card") return { actorId, text: payload.accept === false ? "Skip" : "Surp", Icon: Sparkles, title: payload.accept === false ? "Skip surprise" : "Resolve surprise" };
   if (type === "end_night") return { actorId, text: "Night", Icon: Moon, title: "End night" };
   if (type === "end_day") return { actorId, text: "Day", Icon: Moon, title: "End day" };
@@ -1501,6 +1504,8 @@ const compactPlanStepLabel = (step: PlanChainStep, projection: GameProjection) =
       return `${actor} Commit cards`;
     case "fail_interaction":
       return "Fail interaction";
+    case "fail_unavailable_compulsory_tile":
+      return `Fail ${tileNameForInstance(projection, payload.tile_instance_id)}`;
     case "resolve_surprise_card":
       return payload.accept === false ? "Skip surprise" : payload.capability_id ? `${actor} Resolve surprise` : "Resolve surprise";
     case "end_day":

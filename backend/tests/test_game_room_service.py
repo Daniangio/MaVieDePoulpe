@@ -1098,7 +1098,7 @@ def test_local_orchestrator_uses_active_fallback_before_switching_control():
     ]
 
 
-def test_local_orchestrator_does_not_lose_when_unassigned_compulsory_tile_blocks_scoring():
+def test_local_orchestrator_fails_unassigned_compulsory_tile_instead_of_switching_controls():
     state = _goldfish_state("room_unassigned_compulsory", level_id="test-level", mode="bots_only")
     state["phase"] = "night_action"
     state["active_capability_id"] = "intelligence"
@@ -1120,9 +1120,123 @@ def test_local_orchestrator_does_not_lose_when_unassigned_compulsory_tile_blocks
     candidates = bot_planner._local_orchestrator_night_candidates(state)
     commands = [candidate["commands"][0] for candidate in candidates]
 
-    assert commands
-    assert all(command["type"] == "take_control" for command in commands)
-    assert all(command["type"] != "bot_no_actions_available" for command in commands)
+    assert commands == [
+        {
+            "type": "fail_unavailable_compulsory_tile",
+            "payload": {"tile_instance_id": "moray-instance"},
+        }
+    ]
+
+
+def test_exhausted_compulsory_initiator_applies_failure_once_per_night():
+    state = _goldfish_state("room_exhausted_compulsory", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "intelligence"
+    current_node_id = state["poulpita"]["node_id"]
+    for ability_id, capability in state["capabilities"].items():
+        capability["initiates_event_ids"] = ["moray"] if ability_id == "force" else []
+    force = state["capabilities"]["force"]
+    force["control_takes_this_night"] = force["max_control_takes_per_night"]
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "categories": {"threat": {"id": "threat", "compulsory_on_same_node": True}},
+        "events": {"moray": {"id": "moray", "category_id": "threat"}},
+        "tiles": {
+            "moray-tile": {
+                "id": "moray-tile",
+                "event_id": "moray",
+                "priority": 6,
+                "interaction_ids": ["hide"],
+                "failure_effects": [
+                    {"type": "lose_energy", "amount": 2},
+                    {"type": "keep_tile"},
+                ],
+            }
+        },
+    }
+    state["tiles"] = {
+        current_node_id: [{"instance_id": "moray-instance", "tile_id": "moray-tile", "face_up": True}]
+    }
+    starting_energy = state["poulpita"]["energy"]
+    service = GameRoomService()
+    user = User(id="bot_orchestrator", username="Bots")
+
+    next_state, events = service._reduce(
+        state,
+        {
+            "command_id": "cmd_fail_exhausted",
+            "expected_version": state["version"],
+            "type": "fail_unavailable_compulsory_tile",
+            "payload": {"tile_instance_id": "moray-instance"},
+        },
+        user=user,
+        room_id=state["room_id"],
+        room={"id": state["room_id"], "mode": "bots_only"},
+    )
+
+    assert next_state["poulpita"]["energy"] == starting_energy - 2
+    assert next_state["tiles"][current_node_id][0]["auto_failed_day_index"] == next_state["day_index"]
+    assert bot_planner._compulsory_choices_on_node(next_state, current_node_id) == []
+    assert all(
+        candidate["commands"][0]["type"] != "fail_unavailable_compulsory_tile"
+        for candidate in bot_planner._local_orchestrator_night_candidates(next_state)
+    )
+    next_state["day_index"] += 1
+    assert [
+        entry["instance"]["instance_id"]
+        for entry in bot_planner._compulsory_choices_on_node(next_state, current_node_id)
+    ] == ["moray-instance"]
+    assert events[0]["type"] == "interaction_failed"
+    assert events[0]["reason"] == "initiator_initiatives_exhausted"
+
+
+def test_optional_tile_is_excluded_when_its_only_initiator_has_no_initiative():
+    state = _goldfish_state("room_exhausted_optional", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "intelligence"
+    current_node_id = state["poulpita"]["node_id"]
+    for ability_id, capability in state["capabilities"].items():
+        capability["initiates_event_ids"] = ["crab"] if ability_id == "force" else []
+    force = state["capabilities"]["force"]
+    force["control_takes_this_night"] = force["max_control_takes_per_night"]
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "categories": {"prey": {"id": "prey", "compulsory_on_same_node": False}},
+        "events": {"crab": {"id": "crab", "category_id": "prey"}},
+        "tiles": {"crab-tile": {"id": "crab-tile", "event_id": "crab", "interaction_ids": []}},
+    }
+    state["tiles"] = {
+        current_node_id: [{"instance_id": "crab-instance", "tile_id": "crab-tile", "face_up": True}]
+    }
+
+    candidates = bot_planner._local_orchestrator_night_candidates(state)
+    commands = [candidate["commands"][0] for candidate in candidates]
+
+    assert any(command["type"] == "move_poulpita" for command in commands)
+    assert all(command["type"] != "start_interaction" for command in commands)
+    assert {command.get("payload", {}).get("capability_id") for command in commands} <= {"intelligence"}
+
+
+def test_destination_with_unavailable_compulsory_initiator_has_extreme_route_penalty():
+    state = _goldfish_state("room_exhausted_route", level_id="test-level", mode="bots_only")
+    for ability_id, capability in state["capabilities"].items():
+        capability["initiates_event_ids"] = ["moray"] if ability_id == "force" else []
+    force = state["capabilities"]["force"]
+    force["control_takes_this_night"] = force["max_control_takes_per_night"]
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "categories": {"threat": {"id": "threat", "compulsory_on_same_node": True}},
+        "events": {"moray": {"id": "moray", "category_id": "threat"}},
+        "tiles": {"moray-tile": {"id": "moray-tile", "event_id": "moray", "interaction_ids": []}},
+    }
+    state["tiles"] = {
+        "1B": [{"instance_id": "moray-instance", "tile_id": "moray-tile", "face_up": True}]
+    }
+
+    blocked_score, _entries, _distance = bot_planner._node_followup_score(state, "1B", "intelligence")
+    safe_score, _entries, _distance = bot_planner._node_followup_score(state, "1C", "intelligence")
+
+    assert blocked_score < safe_score - 400
 
 
 def test_local_orchestrator_ignores_gain_only_control_when_productive_control_exists():
@@ -1554,7 +1668,7 @@ def test_interaction_requiring_three_abilities_receives_configured_penalty():
     assert penalty == 60
 
 
-def test_forced_current_tile_reports_manual_blocker_instead_of_empty_plans():
+def test_forced_current_tile_reports_failure_when_no_initiator_has_initiative():
     async def scenario():
         service = GameRoomService()
         user = User(id="user_1", username="Player One")
@@ -1590,8 +1704,9 @@ def test_forced_current_tile_reports_manual_blocker_instead_of_empty_plans():
         plans = await service.get_bot_plans(room_id=room["id"], user=user)
 
         assert plans["status"] == "awaiting_selection"
-        assert plans["proposals"][0]["plan_id"] == "forced_tile_needs_manual_resolution"
+        assert plans["proposals"][0]["plan_id"] == "fail_exhausted_compulsory_tile_moray"
         assert plans["proposals"][0]["risk_label"] == "forced"
+        assert plans["proposals"][0]["plan_chain"][0]["command_type"] == "fail_unavailable_compulsory_tile"
 
     run(scenario())
 

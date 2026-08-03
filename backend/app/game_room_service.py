@@ -1126,6 +1126,8 @@ def _compulsory_tile_choices(state: dict[str, Any], node_id: str) -> list[dict[s
     for tile_instance in (state.get("tiles") or {}).get(node_id, []) or []:
         if not tile_instance.get("face_up"):
             continue
+        if int(tile_instance.get("auto_failed_day_index") or 0) == int(state.get("day_index") or 1):
+            continue
         tile = catalog_tiles.get(tile_instance.get("tile_id")) or {}
         category = _tile_category(state, tile)
         if not category.get("compulsory_on_same_node"):
@@ -1149,10 +1151,33 @@ def _tile_category(state: dict[str, Any], tile: dict[str, Any]) -> dict[str, Any
     return (catalog.get("categories") or {}).get(event.get("category_id")) or {}
 
 
+def _capability_can_initiate_tile(state: dict[str, Any], capability_id: str, tile: dict[str, Any]) -> bool:
+    capability = (state.get("capabilities") or {}).get(capability_id) or {}
+    if tile.get("token_type") == OCTOPUS_TOKEN_ID:
+        allowed_initiators = tile.get("initiator_capability_ids")
+        if allowed_initiators is None:
+            allowed_initiators = list((state.get("capabilities") or {}).keys())
+        return capability_id in allowed_initiators
+    return str(tile.get("event_id") or "") in (capability.get("initiates_event_ids") or [])
+
+
+def _capability_has_initiative_available(state: dict[str, Any], capability_id: str) -> bool:
+    capability = (state.get("capabilities") or {}).get(capability_id) or {}
+    if (
+        state.get("phase") == PHASE_NIGHT_ACTION
+        and capability_id == str(state.get("active_capability_id") or "")
+        and int(capability.get("actions_taken_this_control") or 0) < int(capability.get("max_actions_per_control") or 0)
+    ):
+        return True
+    return int(capability.get("control_takes_this_night") or 0) < int(capability.get("max_control_takes_per_night") or 3)
+
+
 def _night_end_blockers(state: dict[str, Any], node_id: str) -> list[dict[str, Any]]:
     catalog_tiles = ((state.get("tile_catalog") or {}).get("tiles") or {})
     blockers = []
     for instance in (state.get("tiles") or {}).get(node_id, []) or []:
+        if int(instance.get("auto_failed_day_index") or 0) == int(state.get("day_index") or 1):
+            continue
         tile = catalog_tiles.get(instance.get("tile_id")) or {}
         if _is_octopus_tile_instance(instance) or tile.get("token_type") == OCTOPUS_TOKEN_ID:
             blockers.append(instance)
@@ -2672,6 +2697,91 @@ class GameRoomService:
             next_state.setdefault("event_log", []).append(event)
             return next_state, [event]
 
+        if command_type == "fail_unavailable_compulsory_tile":
+            payload = command.get("payload") or {}
+            if not isinstance(payload, dict):
+                self._reject(state, command_id, "invalid_payload", "Command payload must be an object.")
+            if state.get("phase") not in {PHASE_NIGHT_IDLE, PHASE_NIGHT_ACTION}:
+                self._reject(state, command_id, "phase_not_night", "Unavailable compulsory tiles can fail only during the night.")
+            if state.get("interaction"):
+                self._reject(state, command_id, "interaction_already_active", "Resolve or fail the current interaction first.")
+            tile_instance_id = str(payload.get("tile_instance_id") or "")
+            node_id, tile_instance = _find_tile_instance(state, tile_instance_id)
+            current_node_id = str((state.get("poulpita") or {}).get("node_id") or "")
+            if not tile_instance or str(node_id or "") != current_node_id:
+                self._reject(state, command_id, "unknown_compulsory_tile", "The compulsory tile is not on Poulpita's node.")
+            if not tile_instance.get("face_up"):
+                self._reject(state, command_id, "tile_face_down", "This tile is not revealed yet.")
+            if int(tile_instance.get("auto_failed_day_index") or 0) == int(state.get("day_index") or 1):
+                self._reject(state, command_id, "tile_already_failed", "This tile has already failed during the current night.")
+            tile = ((state.get("tile_catalog") or {}).get("tiles") or {}).get(tile_instance.get("tile_id")) or {}
+            if not tile or not _tile_category(state, tile).get("compulsory_on_same_node"):
+                self._reject(state, command_id, "tile_not_compulsory", "Only a compulsory tile can fail through this rule.")
+            legal_choice_ids = {str(choice.get("instance_id") or "") for choice in _compulsory_tile_choices(state, current_node_id)}
+            if tile_instance_id not in legal_choice_ids:
+                self._reject(state, command_id, "higher_priority_compulsory_tile", "A higher-priority compulsory tile must be handled first.")
+            available_initiators = [
+                capability_id
+                for capability_id in (state.get("capabilities") or {})
+                if _capability_can_initiate_tile(state, str(capability_id), tile)
+                and _capability_has_initiative_available(state, str(capability_id))
+            ]
+            if available_initiators:
+                self._reject(
+                    state,
+                    command_id,
+                    "compulsory_initiator_available",
+                    "An ability that can initiate this compulsory interaction still has initiative available.",
+                )
+            failure_effects = tile.get("failure_effects") or []
+            free_move_target_node_id = str(payload.get("target_node_id") or "")
+            if any(effect.get("type") == "pulpita_move_free" for effect in failure_effects):
+                adjacency = (state.get("map") or {}).get("adjacency") or {}
+                if not free_move_target_node_id:
+                    self._reject(state, command_id, "free_move_target_required", "Choose where Poulpita moves after this failed interaction.")
+                if free_move_target_node_id not in (state.get("map", {}).get("nodes") or {}):
+                    self._reject(state, command_id, "unknown_target_node", "Target node does not exist.")
+                if free_move_target_node_id not in adjacency.get(current_node_id, []):
+                    self._reject(state, command_id, "non_adjacent_node", "Poulpita can move only to an adjacent node.")
+            next_state = deepcopy(state)
+            next_node_id, next_tile_instance = _find_tile_instance(next_state, tile_instance_id)
+            if next_tile_instance:
+                next_tile_instance["auto_failed_day_index"] = int(next_state.get("day_index") or 1)
+            failed_interaction = {
+                "tile_instance_id": tile_instance_id,
+                "tile_id": tile_instance.get("tile_id"),
+                "node_id": next_node_id,
+                "played_cards": [],
+            }
+            _apply_failure_effects(
+                next_state,
+                failure_effects,
+                failed_interaction,
+                free_move_target_node_id=free_move_target_node_id or None,
+            )
+            _apply_tile_visibility(next_state)
+            if int((next_state.get("poulpita") or {}).get("energy") or 0) <= 0 and any(
+                effect.get("type") == "lose_energy" for effect in failure_effects
+            ):
+                _mark_game_lost_if_needed(next_state, reason="poulpita_no_energy")
+            if next_state.get("phase") != PHASE_FINISHED:
+                _mark_game_won_if_needed(next_state)
+                _maybe_start_courtship_interaction(next_state)
+            next_state["version"] = int(state["version"]) + 1
+            event = {
+                "event_id": f"evt_{uuid.uuid4().hex}",
+                "type": "interaction_failed",
+                "reason": "initiator_initiatives_exhausted",
+                "command_id": command_id,
+                "tile_instance_id": tile_instance_id,
+                "success": False,
+                "counter_success": False,
+                "version": int(next_state["version"]),
+                "created_at": _now_iso(),
+            }
+            next_state.setdefault("event_log", []).append(event)
+            return next_state, [event]
+
         if command_type == "start_interaction":
             payload = command.get("payload") or {}
             if not isinstance(payload, dict):
@@ -2689,6 +2799,8 @@ class GameRoomService:
                 self._reject(state, command_id, "tile_not_on_poulpita_node", "Poulpita must be on the tile node.")
             if not tile_instance.get("face_up"):
                 self._reject(state, command_id, "tile_face_down", "This tile is not revealed yet.")
+            if int(tile_instance.get("auto_failed_day_index") or 0) == int(state.get("day_index") or 1):
+                self._reject(state, command_id, "tile_already_failed", "This tile has already failed during the current night.")
             tile_catalog = state.get("tile_catalog") if isinstance(state.get("tile_catalog"), dict) else {}
             is_octopus_instance = _is_octopus_tile_instance(tile_instance)
             if is_octopus_instance:
