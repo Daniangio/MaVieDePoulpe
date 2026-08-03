@@ -526,7 +526,15 @@ def _level_tiles(
             for _index in range(max(0, int(count or 0))):
                 tile = catalog["tiles"].get(tile_id)
                 if tile:
-                    expanded.append({"instance_id": f"tile_{uuid.uuid4().hex}", "tile_id": tile_id, "face_up": False})
+                    is_courtship = str(tile_id) == COURTSHIP_TILE_ID
+                    expanded.append(
+                        {
+                            "instance_id": f"courtship_{uuid.uuid4().hex}" if is_courtship else f"tile_{uuid.uuid4().hex}",
+                            "tile_id": tile_id,
+                            "face_up": is_courtship,
+                            **({"token_type": COURTSHIP_TOKEN_ID} if is_courtship else {}),
+                        }
+                    )
         random.shuffle(expanded)
         group_node_ids = [node_id for node_id, group_id in (level_config.get("node_group_ids") or {}).items() if group_id == group["id"]]
         for node_id in group_node_ids:
@@ -635,6 +643,7 @@ def _goldfish_state(room_id: str, *, level_id: str | None = None, mode: str = "g
         "night_time_spent": 0,
         "night_time_total": max(1, int(level_config.get("night_duration_steps") or NIGHT_OVERRUN_CHUNKS)),
         "max_nights": max(1, int(level_config.get("max_nights") or 5)),
+        "counter_attack_min_size_index": max(1, int(level_config.get("counter_attack_min_size_index") or 1)),
         "courtship_min_size_index": max(0, int(level_config.get("courtship_min_size_index") if level_config.get("courtship_min_size_index") is not None else 3)),
         "courtship_min_energy": max(1, int(level_config.get("courtship_min_energy") or 8)),
         "win_min_energy": max(1, int(level_config.get("win_min_energy") or 5)),
@@ -677,6 +686,9 @@ def _goldfish_state(room_id: str, *, level_id: str | None = None, mode: str = "g
             str(token.get("type") if isinstance(token, dict) else token) == COURTSHIP_TOKEN_ID
             for tokens in (level_config.get("node_tokens") or {}).values()
             for token in tokens or []
+        ) or any(
+            int((group.get("tile_counts") or {}).get(COURTSHIP_TILE_ID) or 0) > 0
+            for group in (level_config.get("groups") or [])
         ),
         "objectives": deepcopy(level_config.get("objectives") or []),
         "objective_progress": {"size_increases": 0, "found_shelter": False, "secured_shelter": False},
@@ -796,6 +808,9 @@ def _project_state(state: dict[str, Any]) -> dict[str, Any]:
         "pending_surprise": deepcopy(state.get("pending_surprise")),
         "courtship_completed": bool(state.get("courtship_completed")),
         "courtship_blocked_node_id": state.get("courtship_blocked_node_id"),
+        "courtship_min_size_index": int(state.get("courtship_min_size_index") or 0),
+        "counter_attack_min_size_index": int(state.get("counter_attack_min_size_index") or 1),
+        "counter_attack_unlocked": _counter_attack_unlocked(state),
         "objectives": _objective_status(state),
         "objective_progress": deepcopy(state.get("objective_progress") or {}),
         "tile_catalog": tile_catalog,
@@ -971,6 +986,18 @@ def _projected_shelters(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _counter_attack_unlocked(state: dict[str, Any]) -> bool:
+    current_size = max(0, int((state.get("poulpita") or {}).get("size_index") or 0))
+    required_size = max(1, int(state.get("counter_attack_min_size_index") or 1))
+    return current_size >= required_size
+
+
+def _counter_attack_requirements(state: dict[str, Any], tile: dict[str, Any]) -> list[str]:
+    if not _counter_attack_unlocked(state):
+        return []
+    return [str(interaction_id) for interaction_id in (tile.get("counter_attack_interaction_ids") or []) if interaction_id]
+
+
 def _objective_status(state: dict[str, Any]) -> list[dict[str, Any]]:
     progress = state.get("objective_progress") or {}
     statuses = []
@@ -990,7 +1017,20 @@ def _objective_status(state: dict[str, Any]) -> list[dict[str, Any]]:
         elif objective_type == "secure_shelter":
             completed = bool(progress.get("secured_shelter"))
             label = "Secure a shelter"
-        statuses.append({**objective, "label": label, "current": current, "target": target if objective_type == "increase_size" else None, "completed": completed})
+        elif objective_type == "resolve_courtship":
+            completed = bool(state.get("courtship_completed"))
+            label = "Resolve courtship"
+        elif objective_type == "return_secured_shelter_after_courtship":
+            current = max(0, int(progress.get("secured_shelter_return_energy_after_courtship") or 0))
+            completed = current >= target
+            label = f"Return to a secured shelter with {target} energy after courtship"
+        statuses.append({
+            **objective,
+            "label": label,
+            "current": current,
+            "target": target if objective_type in {"increase_size", "return_secured_shelter_after_courtship"} else None,
+            "completed": completed,
+        })
     return statuses
 
 
@@ -1000,15 +1040,7 @@ def _mark_game_won_if_needed(next_state: dict[str, Any]) -> bool:
         return False
     if objectives and not all(objective.get("completed") for objective in _objective_status(next_state)):
         return False
-    if next_state.get("courtship_required"):
-        current_node_id = str((next_state.get("poulpita") or {}).get("node_id") or "")
-        if not next_state.get("courtship_completed"):
-            return False
-        if not _shelter_entry(next_state, current_node_id).get("secure"):
-            return False
-        if int((next_state.get("poulpita") or {}).get("energy") or 0) < int(next_state.get("win_min_energy") or 5):
-            return False
-    elif not objectives:
+    if not objectives:
         return False
     next_state["phase"] = PHASE_FINISHED
     next_state["game_outcome"] = "won"
@@ -1144,7 +1176,7 @@ def _choose_card_interaction(next_state: dict[str, Any], played_cards: list[dict
     interaction = next_state.get("interaction") or {}
     tile = (next_state.get("tile_catalog") or {}).get("tiles", {}).get(interaction.get("tile_id")) or {}
     played = [str(played_card.get("interaction_id") or "") for played_card in played_cards]
-    for required_ids in [tile.get("interaction_ids") or [], tile.get("counter_attack_interaction_ids") or []]:
+    for required_ids in [tile.get("interaction_ids") or [], _counter_attack_requirements(next_state, tile)]:
         remaining = list(required_ids)
         for played_interaction_id in played:
             if played_interaction_id in remaining:
@@ -1180,7 +1212,7 @@ def _sync_interaction_cards(next_state: dict[str, Any], capability_id: str, sele
         ((interaction.get("courtship_card") or {}).get("interaction_ids"))
         or interaction_tile.get("interaction_ids")
         or []
-    ) + list(interaction_tile.get("counter_attack_interaction_ids") or [])
+    ) + _counter_attack_requirements(next_state, interaction_tile)
     hand = []
     for card in capability.get("hand") or []:
         if str(card.get("card_id")) in selected:
@@ -1228,7 +1260,11 @@ def _auto_selected_interaction_card_ids(next_state: dict[str, Any], capability_i
 def _auto_discard_card_id_for_draw(state: dict[str, Any], capability: dict[str, Any]) -> str:
     interaction = state.get("interaction") or {}
     tile = (state.get("tile_catalog") or {}).get("tiles", {}).get(interaction.get("tile_id")) or {}
-    required = [str(interaction_id) for interaction_id in (tile.get("interaction_ids") or []) + (tile.get("counter_attack_interaction_ids") or []) if interaction_id]
+    required = [
+        str(interaction_id)
+        for interaction_id in list(tile.get("interaction_ids") or []) + _counter_attack_requirements(state, tile)
+        if interaction_id
+    ]
     hand = capability.get("hand") or []
     if required:
         for card in hand:
@@ -1319,8 +1355,20 @@ def _move_poulpita_without_ap(next_state: dict[str, Any], target_node_id: str) -
     current_node_id = str(next_state.get("poulpita", {}).get("node_id") or "")
     next_state["poulpita"]["previous_node_id"] = current_node_id or None
     next_state["poulpita"]["node_id"] = target_node_id
-    if _has_shelter(next_state, target_node_id):
-        next_state.setdefault("objective_progress", {})["found_shelter"] = True
+    _record_shelter_arrival(next_state, target_node_id)
+
+
+def _record_shelter_arrival(next_state: dict[str, Any], node_id: str) -> None:
+    if not _has_shelter(next_state, node_id):
+        return
+    progress = next_state.setdefault("objective_progress", {})
+    progress["found_shelter"] = True
+    if next_state.get("courtship_completed") and _shelter_entry(next_state, node_id).get("secure"):
+        energy = max(0, int((next_state.get("poulpita") or {}).get("energy") or 0))
+        progress["secured_shelter_return_energy_after_courtship"] = max(
+            energy,
+            int(progress.get("secured_shelter_return_energy_after_courtship") or 0),
+        )
 
 
 def _move_interaction_tile(next_state: dict[str, Any], interaction: dict[str, Any], target_node_id: str) -> None:
@@ -2103,7 +2151,7 @@ class GameRoomService:
             _apply_tile_visibility(next_state)
             _maybe_start_courtship_interaction(next_state)
             if _has_shelter(next_state, target_node_id):
-                next_state.setdefault("objective_progress", {})["found_shelter"] = True
+                _record_shelter_arrival(next_state, target_node_id)
                 _mark_game_won_if_needed(next_state)
             _mark_game_lost_if_needed(next_state)
             event = {
@@ -2158,7 +2206,10 @@ class GameRoomService:
                 "created_at": _now_iso(),
             }
             next_state.setdefault("event_log", []).append(event)
-            return next_state, [event]
+            events = [event]
+            if _maybe_start_courtship_interaction(next_state):
+                events.append(next_state["event_log"][-1])
+            return next_state, events
 
         if command_type == "end_night":
             if state["phase"] != PHASE_NIGHT_ACTION:
@@ -2508,7 +2559,7 @@ class GameRoomService:
             _maybe_start_courtship_interaction(next_state)
             destination_node_id = str((next_state.get("poulpita") or {}).get("node_id") or "")
             if _has_shelter(next_state, destination_node_id):
-                next_state.setdefault("objective_progress", {})["found_shelter"] = True
+                _record_shelter_arrival(next_state, destination_node_id)
                 _mark_game_won_if_needed(next_state)
             _mark_game_lost_if_needed(next_state)
             event = {
@@ -2750,8 +2801,20 @@ class GameRoomService:
                 card = next((entry for entry in capability.get("hand") or [] if entry.get("card_id") == card_id), None)
                 if card is None:
                     self._reject(state, command_id, "unknown_card", "Card is not in this ability hand.")
-                capability["hand"] = [entry for entry in capability.get("hand") or [] if entry.get("card_id") != card_id]
                 chosen_interaction_id = _choose_card_interaction(next_state, next_interaction.get("played_cards") or [], card)
+                interaction_tile = (next_state.get("tile_catalog") or {}).get("tiles", {}).get(next_interaction.get("tile_id")) or {}
+                remaining = list(
+                    ((next_interaction.get("courtship_card") or {}).get("interaction_ids"))
+                    or interaction_tile.get("interaction_ids")
+                    or []
+                ) + _counter_attack_requirements(next_state, interaction_tile)
+                for played_card in next_interaction.get("played_cards") or []:
+                    played_interaction_id = str(played_card.get("interaction_id") or "")
+                    if played_interaction_id in remaining:
+                        remaining.remove(played_interaction_id)
+                if chosen_interaction_id not in remaining:
+                    self._reject(state, command_id, "card_not_required", "Cards can only be played for requirements that are still missing.")
+                capability["hand"] = [entry for entry in capability.get("hand") or [] if entry.get("card_id") != card_id]
                 next_interaction.setdefault("played_cards", []).append({**card, "interaction_id": chosen_interaction_id, "interaction_ids": _card_interaction_options(card), "capability_id": capability_id})
                 event_type = "interaction_card_played"
             else:
@@ -2829,7 +2892,7 @@ class GameRoomService:
                         selected_card_ids = _auto_selected_interaction_card_ids(
                             next_state,
                             capability_id,
-                            required_interaction_ids + list(tile.get("counter_attack_interaction_ids") or []),
+                            required_interaction_ids + _counter_attack_requirements(next_state, tile),
                         )
                     try:
                         _sync_interaction_cards(next_state, capability_id, selected_card_ids)
@@ -2843,7 +2906,7 @@ class GameRoomService:
                     played,
                     int(interaction.get("requirement_reduction") or 0),
                 ) and _shell_requirement_met(next_state, tile)
-                counter_required = tile.get("counter_attack_interaction_ids") or []
+                counter_required = _counter_attack_requirements(next_state, tile)
                 counter_success = success and bool(counter_required) and _criteria_met(counter_required, played)
                 if bool((payload or {}).get("confirm_only")):
                     next_state["version"] = int(state["version"]) + 1

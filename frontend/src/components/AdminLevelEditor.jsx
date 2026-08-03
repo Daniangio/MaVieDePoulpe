@@ -2,6 +2,9 @@ import { useEffect, useMemo, useState } from "react";
 import HexTilePreview from "./HexTilePreview.jsx";
 import { buildApiUrl } from "../utils/connection.js";
 
+const COURTSHIP_TILE_ID = "__courtship_token__";
+const COURTSHIP_EVENT_ID = "__courtship_token_event__";
+
 const emptyLevelDraft = () => ({
   id: "",
   name: "Untitled level",
@@ -15,6 +18,7 @@ const emptyLevelDraft = () => ({
   starting_neurons: 0,
   night_duration_steps: 24,
   max_nights: 5,
+  counter_attack_min_size_index: 1,
   courtship_min_size_index: 3,
   courtship_min_energy: 8,
   win_min_energy: 5,
@@ -32,9 +36,29 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
   const [draft, setDraft] = useState(emptyLevelDraft());
   const [selectedNodeId, setSelectedNodeId] = useState("");
 
-  const tilesById = useMemo(() => Object.fromEntries((content.tiles || []).map((tile) => [tile.id, tile])), [content.tiles]);
-  const eventsById = useMemo(() => Object.fromEntries((content.events || []).map((event) => [event.id, event])), [content.events]);
+  const courtshipToken = useMemo(() => (content.tokens || []).find((token) => token.id === "courtship") || {}, [content.tokens]);
+  const levelTiles = useMemo(() => [
+    ...(content.tiles || []),
+    {
+      id: COURTSHIP_TILE_ID,
+      name: courtshipToken.name || "Courtship token",
+      event_id: COURTSHIP_EVENT_ID,
+      image_url: courtshipToken.image_url || null,
+      interaction_ids: [],
+      counter_attack_interaction_ids: [],
+      token_type: "courtship",
+    },
+  ], [content.tiles, courtshipToken]);
+  const eventsById = useMemo(() => ({
+    ...Object.fromEntries((content.events || []).map((event) => [event.id, event])),
+    [COURTSHIP_EVENT_ID]: {
+      id: COURTSHIP_EVENT_ID,
+      name: courtshipToken.name || "Courtship token",
+      image_url: courtshipToken.image_url || null,
+    },
+  }), [content.events, courtshipToken]);
   const interactionsById = useMemo(() => Object.fromEntries((content.interactions || []).map((interaction) => [interaction.id, interaction])), [content.interactions]);
+  const sizes = content.poulpita_panel?.sizes?.length ? content.poulpita_panel.sizes : [{ amount: 1, unit: "kg" }, { amount: 2, unit: "kg" }];
   const selectedMap = useMemo(() => maps.find((map) => map.id === draft.map_id) || null, [draft.map_id, maps]);
   const nodes = useMemo(() => Object.values(selectedMap?.nodes || {}).sort((a, b) => a.id.localeCompare(b.id)), [selectedMap]);
   const groupsById = useMemo(() => Object.fromEntries((draft.groups || []).map((group, index) => [group.id, { ...group, color: groupColors[index % groupColors.length] }])), [draft.groups]);
@@ -220,6 +244,7 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
       form.set("starting_neurons", String(Math.max(0, Number(draft.starting_neurons ?? 0))));
       form.set("night_duration_steps", String(Math.max(1, Number(draft.night_duration_steps ?? 24))));
       form.set("max_nights", String(Math.max(1, Number(draft.max_nights ?? 5))));
+      form.set("counter_attack_min_size_index", String(Math.max(1, Number(draft.counter_attack_min_size_index ?? 1))));
       form.set("courtship_min_size_index", String(Math.max(0, Number(draft.courtship_min_size_index ?? 3))));
       form.set("courtship_min_energy", String(Math.max(1, Number(draft.courtship_min_energy ?? 8))));
       form.set("win_min_energy", String(Math.max(1, Number(draft.win_min_energy ?? 5))));
@@ -246,7 +271,7 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
         {
           id: `objective-${Date.now()}-${Math.random().toString(16).slice(2)}`,
           type,
-          target: type === "increase_size" ? 1 : undefined,
+          target: type === "increase_size" || type === "return_secured_shelter_after_courtship" ? 1 : undefined,
         },
       ],
     }));
@@ -380,9 +405,19 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
           </div>
 
           <div className="grid gap-3 rounded-md border border-cyan-100 bg-cyan-50/70 p-3 md:grid-cols-2 xl:grid-cols-4">
-            <label className="text-sm text-slate-600">Courtship size step<input className="mt-1 w-full rounded-md border border-cyan-200 bg-white px-3 py-2 text-slate-800" min="0" type="number" value={Number(draft.courtship_min_size_index ?? 3)} onChange={(event) => setDraft((current) => ({ ...current, courtship_min_size_index: Math.max(0, Number(event.target.value || 0)) }))} /></label>
+            <label className="text-sm text-slate-600">
+              Counter-attack unlock size
+              <select className="mt-1 w-full rounded-md border border-cyan-200 bg-white px-3 py-2 text-slate-800" value={Number(draft.counter_attack_min_size_index ?? 1)} onChange={(event) => setDraft((current) => ({ ...current, counter_attack_min_size_index: Math.max(1, Number(event.target.value || 1)) }))}>
+                {(sizes.length > 1 ? sizes.slice(1) : [{ amount: 0, unit: "kg" }]).map((size, offset) => <option key={offset + 1} value={offset + 1}>Size {offset + 2}: {size.amount ?? size.kg ?? 0} {size.unit || "kg"}</option>)}
+              </select>
+            </label>
+            <label className="text-sm text-slate-600">
+              Courtship unlock size
+              <select className="mt-1 w-full rounded-md border border-cyan-200 bg-white px-3 py-2 text-slate-800" value={Number(draft.courtship_min_size_index ?? 3)} onChange={(event) => setDraft((current) => ({ ...current, courtship_min_size_index: Math.max(0, Number(event.target.value || 0)) }))}>
+                {sizes.map((size, index) => <option key={index} value={index}>Size {index + 1}: {size.amount ?? size.kg ?? 0} {size.unit || "kg"}</option>)}
+              </select>
+            </label>
             <label className="text-sm text-slate-600">Courtship minimum energy<input className="mt-1 w-full rounded-md border border-cyan-200 bg-white px-3 py-2 text-slate-800" min="1" type="number" value={Number(draft.courtship_min_energy ?? 8)} onChange={(event) => setDraft((current) => ({ ...current, courtship_min_energy: Math.max(1, Number(event.target.value || 1)) }))} /></label>
-            <label className="text-sm text-slate-600">Winning energy<input className="mt-1 w-full rounded-md border border-cyan-200 bg-white px-3 py-2 text-slate-800" min="1" type="number" value={Number(draft.win_min_energy ?? 5)} onChange={(event) => setDraft((current) => ({ ...current, win_min_energy: Math.max(1, Number(event.target.value || 1)) }))} /></label>
             <label className="text-sm text-slate-600">Size deadline night<input className="mt-1 w-full rounded-md border border-cyan-200 bg-white px-3 py-2 text-slate-800" min="1" type="number" value={Number(draft.size_deadline_night ?? 4)} onChange={(event) => setDraft((current) => ({ ...current, size_deadline_night: Math.max(1, Number(event.target.value || 1)) }))} /></label>
           </div>
 
@@ -416,7 +451,7 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
               {(draft.tile_sets || []).map((tileSet) => (
                 <article className="rounded-md border border-cyan-200 bg-white p-3" key={tileSet.id}>
                   <div className="flex flex-wrap items-end justify-between gap-3">
-                    <label className="text-xs text-slate-600">Activate at size step<input className="mt-1 w-28 rounded-md border border-cyan-200 bg-white px-3 py-2 text-slate-800" min="1" type="number" value={Number(tileSet.size_index || 1)} onChange={(event) => updateTileSet(tileSet.id, { size_index: Math.max(1, Number(event.target.value || 1)) })} /></label>
+                    <label className="text-xs text-slate-600">Activate at size<select className="mt-1 w-44 rounded-md border border-cyan-200 bg-white px-3 py-2 text-slate-800" value={Number(tileSet.size_index || 1)} onChange={(event) => updateTileSet(tileSet.id, { size_index: Math.max(1, Number(event.target.value || 1)) })}>{(sizes.length > 1 ? sizes.slice(1) : [{ amount: 0, unit: "kg" }]).map((size, offset) => <option key={offset + 1} value={offset + 1}>Size {offset + 2}: {size.amount ?? size.kg ?? 0} {size.unit || "kg"}</option>)}</select></label>
                     <button className="rounded border border-rose-300 px-2 py-1 text-xs text-rose-700" onClick={() => setDraft((current) => ({ ...current, tile_sets: (current.tile_sets || []).filter((entry) => entry.id !== tileSet.id) }))} type="button">Remove set</button>
                   </div>
                   <div className="mt-3 grid gap-3 lg:grid-cols-2">
@@ -427,7 +462,7 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
                         <div className="rounded border border-cyan-100 p-2" key={group.id}>
                           <div className="flex justify-between text-xs"><strong>{group.name}</strong><span className={capacity === assigned ? "text-emerald-700" : "text-rose-700"}>{assigned}/{capacity}</span></div>
                           <div className="mt-2 grid gap-2 sm:grid-cols-2">
-                            {(content.tiles || []).map((tile) => (
+                            {levelTiles.map((tile) => (
                               <label className="flex items-center justify-between gap-2 text-xs text-slate-600" key={tile.id}><span className="truncate">{tile.name}</span><input className="w-16 rounded border border-cyan-200 px-2 py-1" min="0" type="number" value={Number(group.tile_counts?.[tile.id] || 0)} onChange={(event) => setReplacementTileCount(tileSet.id, group.id, tile.id, event.target.value)} /></label>
                             ))}
                           </div>
@@ -457,7 +492,7 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
                   onSetTileCount={setGroupTileCount}
                   onUpdateGroup={updateGroup}
                   stats={groupStats[group.id] || { capacity: 0, assigned: 0, valid: false }}
-                  tiles={content.tiles || []}
+                  tiles={levelTiles}
                 />
               ))}
             </div>
@@ -473,6 +508,8 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
                 <button className="rounded-md border border-cyan-300 bg-white px-3 py-2 text-xs text-teal-900 hover:bg-cyan-50" onClick={() => addObjective("increase_size")} type="button">Increase size</button>
                 <button className="rounded-md border border-cyan-300 bg-white px-3 py-2 text-xs text-teal-900 hover:bg-cyan-50" onClick={() => addObjective("find_shelter")} type="button">Find shelter</button>
                 <button className="rounded-md border border-cyan-300 bg-white px-3 py-2 text-xs text-teal-900 hover:bg-cyan-50" onClick={() => addObjective("secure_shelter")} type="button">Secure shelter</button>
+                <button className="rounded-md border border-cyan-300 bg-white px-3 py-2 text-xs text-teal-900 hover:bg-cyan-50" onClick={() => addObjective("resolve_courtship")} type="button">Resolve courtship</button>
+                <button className="rounded-md border border-cyan-300 bg-white px-3 py-2 text-xs text-teal-900 hover:bg-cyan-50" onClick={() => addObjective("return_secured_shelter_after_courtship")} type="button">Depose eggs</button>
               </div>
             </div>
             <div className="grid gap-2">
@@ -480,16 +517,22 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
                 <div className="grid gap-2 rounded-md border border-cyan-100 bg-white p-2 text-sm md:grid-cols-[1fr_9rem_auto]" key={objective.id}>
                   <select
                     className="rounded border border-cyan-200 bg-white px-2 py-1 text-slate-800"
-                    onChange={(event) => updateObjective(objective.id, { type: event.target.value, target: event.target.value === "increase_size" ? Number(objective.target || 1) : undefined })}
+                    onChange={(event) => {
+                      const nextType = event.target.value;
+                      const needsTarget = nextType === "increase_size" || nextType === "return_secured_shelter_after_courtship";
+                      updateObjective(objective.id, { type: nextType, target: needsTarget ? Number(objective.target || 1) : undefined });
+                    }}
                     value={objective.type}
                   >
                     <option value="increase_size">Increase size</option>
                     <option value="find_shelter">Find a shelter</option>
                     <option value="secure_shelter">Secure a shelter</option>
+                    <option value="resolve_courtship">Resolve courtship</option>
+                    <option value="return_secured_shelter_after_courtship">Return to secured shelter after courtship</option>
                   </select>
-                  {objective.type === "increase_size" ? (
+                  {objective.type === "increase_size" || objective.type === "return_secured_shelter_after_courtship" ? (
                     <label className="flex items-center gap-2 text-xs text-slate-600">
-                      Times
+                      {objective.type === "increase_size" ? "Times" : "Energy"}
                       <input className="w-full rounded border border-cyan-200 bg-white px-2 py-1 text-sm text-slate-800" min="1" type="number" value={Number(objective.target || 1)} onChange={(event) => updateObjective(objective.id, { target: Number(event.target.value) })} />
                     </label>
                   ) : (
@@ -573,7 +616,11 @@ const LevelMap = ({ map, groups, groupsById, nodeGroupIds, nodeTileCounts, nodeT
             {startingNodeId === selectedNode.id ? "Poulpita starts here" : "Set Poulpita start"}
           </button>
           <div className="mb-2 grid grid-cols-2 gap-1">
-            {["shelter", "octopus", "courtship"].map((tokenType) => {
+            {[
+              "shelter",
+              "octopus",
+              ...((nodeTokens?.[selectedNode.id] || []).some((token) => (typeof token === "string" ? token : token.type) === "courtship") ? ["courtship"] : []),
+            ].map((tokenType) => {
               const checked = (nodeTokens?.[selectedNode.id] || []).some((token) => (typeof token === "string" ? token : token.type) === tokenType);
               return (
                 <button
@@ -582,7 +629,7 @@ const LevelMap = ({ map, groups, groupsById, nodeGroupIds, nodeTileCounts, nodeT
                   onClick={() => onToggleNodeToken(selectedNode.id, tokenType)}
                   type="button"
                 >
-                  {checked ? "Remove" : "Add"} {tokenType === "shelter" ? "Shelter" : tokenType === "octopus" ? "Octopus" : "Courtship"}
+                  {checked ? "Remove" : "Add"} {tokenType === "shelter" ? "Shelter" : tokenType === "octopus" ? "Octopus" : "legacy Courtship"}
                 </button>
               );
             })}
@@ -626,7 +673,11 @@ const GroupEditor = ({ group, stats, tiles, eventById, interactionsById, onUpdat
         const count = Number((group.tile_counts || {})[tile.id] || 0);
         return (
           <div className="rounded-md border border-cyan-100 bg-cyan-50/70 p-2" key={tile.id}>
-            <HexTilePreview className="max-w-[8rem]" event={eventById[tile.event_id]} interactionsById={interactionsById} tile={tile} />
+            {tile.token_type === "courtship" ? (
+              <div className="mx-auto flex aspect-square w-24 items-center justify-center overflow-hidden rounded-full border-4 border-fuchsia-300 bg-white shadow-sm">
+                {tile.image_url ? <img alt={tile.name} className="h-full w-full object-cover" src={buildApiUrl(tile.image_url)} /> : <span className="text-xs font-semibold text-fuchsia-800">Courtship</span>}
+              </div>
+            ) : <HexTilePreview className="max-w-[8rem]" event={eventById[tile.event_id]} interactionsById={interactionsById} tile={tile} />}
             <div className="mt-2 flex items-center gap-2">
               <span className="min-w-0 flex-1 truncate text-xs font-semibold text-teal-950">{tile.name}</span>
               <input className="w-16 rounded border border-cyan-200 bg-white px-2 py-1 text-sm" min="0" type="number" value={count} onChange={(event) => onSetTileCount(group.id, tile.id, Number(event.target.value))} />

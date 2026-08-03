@@ -196,6 +196,9 @@ export type GameProjection = {
   shelters?: Record<NodeId, number | { count?: number; seashells?: number; secure?: boolean }>;
   objectives?: Array<Record<string, any>>;
   objective_progress?: Record<string, any>;
+  courtship_min_size_index?: number;
+  counter_attack_min_size_index?: number;
+  counter_attack_unlocked?: boolean;
   tile_catalog?: {
     tiles?: Record<string, any>;
     events?: Record<string, any>;

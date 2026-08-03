@@ -554,10 +554,11 @@ const cardInteractionOptions = (card: any) => {
   return options;
 };
 
-const chooseCardInteractionForTile = (card: any, tile: any, alreadyPlayed: string[]) => {
+const chooseCardInteractionForTile = (card: any, tile: any, alreadyPlayed: string[], counterAttackUnlocked = true) => {
   const options = cardInteractionOptions(card);
   if (!options.length) return card?.interaction_id || "";
-  for (const requiredIds of [tile?.interaction_ids || [], tile?.counter_attack_interaction_ids || []]) {
+  const counterRequirements = counterAttackUnlocked ? tile?.counter_attack_interaction_ids || [] : [];
+  for (const requiredIds of [tile?.interaction_ids || [], counterRequirements]) {
     const remaining = [...requiredIds];
     alreadyPlayed.forEach((interactionId) => {
       const index = remaining.indexOf(interactionId);
@@ -820,7 +821,7 @@ const InteractionPanel = ({
     .map((cardId) => selectableCardMap.get(cardId))
     .filter(Boolean) as CardProjection[];
   const playedInteractions = [...lockedPlayedCards, ...selectedCards].reduce((selected: string[], card: CardProjection) => {
-    selected.push(chooseCardInteractionForTile(card, tile, selected));
+    selected.push(chooseCardInteractionForTile(card, tile, selected, projection.counter_attack_unlocked !== false));
     return selected;
   }, []);
   const requiredInteractionIds = activeInteraction?.courtship_card?.interaction_ids || tile.interaction_ids || [];
@@ -829,7 +830,8 @@ const InteractionPanel = ({
     const index = missingSuccess.indexOf(interactionId);
     if (index >= 0) missingSuccess.splice(index, 1);
   });
-  const missingCounter = [...(tile.counter_attack_interaction_ids || [])];
+  const counterAttackUnlocked = projection.counter_attack_unlocked !== false;
+  const missingCounter = counterAttackUnlocked ? [...(tile.counter_attack_interaction_ids || [])] : [];
   playedInteractions.forEach((interactionId: string) => {
     const index = missingCounter.indexOf(interactionId);
     if (index >= 0) missingCounter.splice(index, 1);
@@ -900,11 +902,15 @@ const InteractionPanel = ({
             <p className="font-semibold text-slate-200">Missing for success</p>
             <MissingIcons ids={missingSuccess} />
             <MissingShellIcons />
-            {(tile.counter_attack_interaction_ids || []).length ? (
+            {(tile.counter_attack_interaction_ids || []).length && counterAttackUnlocked ? (
               <>
                 <p className="mt-3 font-semibold text-slate-200">Missing for counter-attack</p>
                 <MissingIcons ids={missingCounter} />
               </>
+            ) : (tile.counter_attack_interaction_ids || []).length ? (
+              <p className="mt-3 rounded border border-cyan-800 bg-slate-950 px-2 py-1.5 text-xs text-cyan-200">
+                Counter-attack unlocks at size step {projection.counter_attack_min_size_index}.
+              </p>
             ) : null}
           </div>
         </div>

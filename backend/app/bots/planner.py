@@ -582,7 +582,7 @@ def _interaction_resolution_summary(state: dict[str, Any], entry: dict[str, Any]
         "compulsory": bool(_tile_category(state, tile).get("compulsory_on_same_node")),
         "requirements": _requirement_labels(state, tile) or ["automatic success"],
         "success_effects": _effect_labels(state, success_effects) or ["remove tile"],
-        "counter_attack_effects": _effect_labels(state, tile.get("counter_attack_effects") or []),
+        "counter_attack_effects": _effect_labels(state, tile.get("counter_attack_effects") or []) if _counter_attack_unlocked(state) else [],
         "failure_effects": _effect_labels(state, failure_effects) or ["no configured penalty"],
         "expected_delta": _combine_expected_delta(success_probability, success_effects, failure_effects),
         "actor_candidates": _actor_candidates_for_entry(state, entry, preferred_ability_id),
@@ -653,10 +653,20 @@ def _all_cards_in_zones(state: dict[str, Any], zones: list[str]) -> list[dict[st
     return cards
 
 
+def _counter_attack_unlocked(state: dict[str, Any]) -> bool:
+    current_size = max(0, int((state.get("poulpita") or {}).get("size_index") or 0))
+    required_size = max(1, int(state.get("counter_attack_min_size_index") or 1))
+    return current_size >= required_size
+
+
 def _interaction_probability(state: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any]:
     tile = entry.get("tile") or {}
     required = [str(interaction_id) for interaction_id in (tile.get("interaction_ids") or []) if interaction_id]
-    counter_required = [str(interaction_id) for interaction_id in (tile.get("counter_attack_interaction_ids") or []) if interaction_id]
+    counter_required = [
+        str(interaction_id)
+        for interaction_id in (tile.get("counter_attack_interaction_ids") or [])
+        if interaction_id and _counter_attack_unlocked(state)
+    ]
     shell_required = max(0, int(tile.get("shell_requirement_count") or 0))
     carried_shells = max(0, int((state.get("poulpita") or {}).get("seashells") or 0))
     hand_cards = _all_cards_in_zones(state, ["hand"])
@@ -2282,7 +2292,7 @@ def _missing_interaction_ids_for_open_interaction(state: dict[str, Any], *, incl
         )
         if interaction_id
     ]
-    if include_counter_attack:
+    if include_counter_attack and _counter_attack_unlocked(state):
         required_ids.extend(str(interaction_id) for interaction_id in (tile.get("counter_attack_interaction_ids") or []) if interaction_id)
     for required_id in required_ids:
         if required_id in played:
@@ -2507,9 +2517,10 @@ def _proposal_advisor_support_score(state: dict[str, Any], advisor_id: str, prop
     score = 0.0
     for entry in entries:
         tile = entry.get("tile") or {}
+        counter_ids = (tile.get("counter_attack_interaction_ids") or []) if _counter_attack_unlocked(state) else []
         required = [
             str(interaction_id)
-            for interaction_id in (tile.get("interaction_ids") or []) + (tile.get("counter_attack_interaction_ids") or [])
+            for interaction_id in (tile.get("interaction_ids") or []) + counter_ids
             if interaction_id
         ]
         score += _matched_requirement_count(hand, required) * 12.0

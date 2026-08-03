@@ -1721,6 +1721,7 @@ def test_auto_resolve_interaction_selects_counter_attack_cards():
         state["phase"] = "night_action"
         state["active_capability_id"] = "camouflage"
         state["poulpita"]["energy"] = 3
+        state["poulpita"]["size_index"] = 1
         state["tile_catalog"] = {
             "categories": {"threat": {"id": "threat", "name": "Threat", "compulsory_on_same_node": True}},
             "events": {"fish": {"id": "fish", "name": "Big fish", "category_id": "threat"}},
@@ -1768,6 +1769,57 @@ def test_auto_resolve_interaction_selects_counter_attack_cards():
     run(scenario())
 
 
+def test_counter_attack_cards_cannot_be_played_before_size_unlock():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "camouflage"
+        state["counter_attack_min_size_index"] = 2
+        state["poulpita"]["size_index"] = 1
+        state["tile_catalog"] = {
+            "categories": {"threat": {"id": "threat", "compulsory_on_same_node": True}},
+            "events": {"fish": {"id": "fish", "category_id": "threat"}},
+            "tiles": {
+                "fish-tile": {
+                    "id": "fish-tile",
+                    "event_id": "fish",
+                    "interaction_ids": ["charge"],
+                    "counter_attack_interaction_ids": ["hide"],
+                }
+            },
+            "interactions": {"charge": {"id": "charge"}, "hide": {"id": "hide"}},
+        }
+        state["interaction"] = {
+            "tile_instance_id": "tile_fish",
+            "tile_id": "fish-tile",
+            "node_id": "1A",
+            "initiator_capability_id": "force",
+            "initiator_confirmed": True,
+            "played_cards": [{"card_id": "charge", "interaction_id": "charge", "interaction_ids": ["charge"], "capability_id": "force"}],
+        }
+        state["capabilities"]["camouflage"]["hand"] = [
+            {"card_id": "hide", "interaction_id": "hide", "interaction_ids": ["hide"], "owner_capability_id": "camouflage"}
+        ]
+
+        rejected = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_locked_counter",
+            expected_version=1,
+            command_type="resolve_interaction",
+            payload={"capability_id": "camouflage", "card_ids": ["hide"]},
+        )
+
+        assert rejected["ok"] is False
+        assert rejected["reason"] == "invalid_selected_cards"
+        assert rejected["projection"]["counter_attack_unlocked"] is False
+        assert rejected["projection"]["capabilities"]["camouflage"]["hand"][0]["card_id"] == "hide"
+
+    run(scenario())
+
+
 def test_bot_support_plan_draws_with_auto_discard_for_counter_attack_when_hand_is_full():
     async def scenario():
         service = GameRoomService()
@@ -1789,6 +1841,7 @@ def test_bot_support_plan_draws_with_auto_discard_for_counter_attack_when_hand_i
         state = service._memory_states[room["id"]]
         state["phase"] = "night_action"
         state["active_capability_id"] = "force"
+        state["poulpita"]["size_index"] = 1
         state["capabilities"]["force"]["actions_taken_this_control"] = state["capabilities"]["force"]["max_actions_per_control"]
         state["capabilities"]["camouflage"]["pa"] = 1
         state["capabilities"]["camouflage"]["current_max_cards_in_hand"] = 2
@@ -3424,6 +3477,35 @@ def test_goldfish_game_uses_level_starting_node_and_node_tokens(monkeypatch):
     assert state["tile_catalog"]["categories"]["__octopus_token_threat__"]["compulsory_on_same_node"] is True
 
 
+def test_grouped_courtship_tile_is_visible_from_game_setup(monkeypatch):
+    level = {
+        **TEST_LEVEL,
+        "node_tile_counts": {**TEST_LEVEL["node_tile_counts"], "1A": 1},
+        "groups": [{"id": "main", "name": "Main", "tile_counts": {"__courtship_token__": 1}}],
+        "courtship_min_size_index": 2,
+    }
+    monkeypatch.setattr("backend.app.game_room_service.get_level_config", lambda level_id=None: level)
+    monkeypatch.setattr(
+        "backend.app.game_room_service.get_game_content_catalog",
+        lambda: {
+            "tiles": {},
+            "events": {},
+            "categories": {},
+            "interactions": {"dance": {"id": "dance", "name": "Dance"}},
+            "courtship_cards": {"dance-card": {"id": "dance-card", "name": "Dance", "interaction_ids": ["dance"]}},
+            "tokens": {"courtship": {"id": "courtship", "name": "Courtship token", "image_url": "/api/content/images/courtship.png"}},
+        },
+    )
+
+    state = _goldfish_state("room_grouped_courtship", level_id="test-level")
+    instance = state["tiles"]["1A"][0]
+
+    assert instance["tile_id"] == "__courtship_token__"
+    assert instance["token_type"] == "courtship"
+    assert instance["face_up"] is True
+    assert state["tile_catalog"]["tiles"]["__courtship_token__"]["image_url"] == "/api/content/images/courtship.png"
+
+
 def test_day_shell_transfer_secures_shelter_and_completes_objective():
     async def scenario():
         service, user, room, _start = await create_started_room()
@@ -3468,6 +3550,37 @@ def test_day_shell_transfer_secures_shelter_and_completes_objective():
         assert third["projection"]["shelters"]["1A"]["secure"] is True
         assert third["projection"]["objectives"][0]["completed"] is True
         assert third["projection"]["phase"] == "game_over"
+        assert service._memory_results[room["id"]]["outcome"] == "won"
+
+    run(scenario())
+
+
+def test_return_to_secured_shelter_after_courtship_objective_requires_energy():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "force"
+        state["courtship_completed"] = True
+        state["poulpita"]["energy"] = 6
+        state["shelters"] = {"1B": {"count": 1, "seashells": 3, "secure": True}}
+        state["objectives"] = [
+            {"id": "eggs", "type": "return_secured_shelter_after_courtship", "target": 6}
+        ]
+
+        result = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_return_with_eggs",
+            expected_version=1,
+            command_type="move_poulpita",
+            payload={"capability_id": "force", "target_node_id": "1B"},
+        )
+
+        assert result["ok"] is True
+        assert result["projection"]["objectives"][0]["completed"] is True
+        assert result["projection"]["phase"] == "game_over"
         assert service._memory_results[room["id"]]["outcome"] == "won"
 
     run(scenario())
@@ -3814,6 +3927,65 @@ def test_special_power_spends_configured_resources_and_propulsion_cannot_return_
         assert next_state["force_reduces_next_interaction"] is True
         assert rejected["reason"] == "propulsion_starting_node_forbidden"
         assert rejected["projection"]["poulpita"]["neurons"] == 1
+
+    run(scenario())
+
+
+def test_courtship_starts_automatically_after_control_when_size_is_unlocked():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_idle"
+        state["active_capability_id"] = None
+        state["poulpita"]["size_index"] = 2
+        state["poulpita"]["energy"] = 8
+        state["courtship_min_size_index"] = 2
+        state["courtship_min_energy"] = 8
+        state["tile_catalog"] = {
+            **state["tile_catalog"],
+            "categories": {"__courtship_token_category__": {"id": "__courtship_token_category__", "compulsory_on_same_node": False}},
+            "events": {"__courtship_token_event__": {"id": "__courtship_token_event__", "category_id": "__courtship_token_category__"}},
+            "interactions": {"dance": {"id": "dance", "name": "Dance"}},
+            "tiles": {"__courtship_token__": {"id": "__courtship_token__", "event_id": "__courtship_token_event__", "token_type": "courtship", "interaction_ids": []}},
+            "courtship_cards": {"dance-card": {"id": "dance-card", "name": "Dance", "interaction_ids": ["dance"]}},
+        }
+        current_node_id = state["poulpita"]["node_id"]
+        state["tiles"] = {
+            current_node_id: [{"instance_id": "courtship-1", "tile_id": "__courtship_token__", "token_type": "courtship", "face_up": True}],
+        }
+        state["objectives"] = [{"id": "courtship", "type": "resolve_courtship"}]
+        state["capabilities"]["force"]["hand"] = [
+            {"card_id": "dance-in-hand", "interaction_id": "dance", "interaction_ids": ["dance"], "owner_capability_id": "force"}
+        ]
+
+        result = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_take_control_at_courtship",
+            expected_version=1,
+            command_type="take_control",
+            payload={"capability_id": "force"},
+        )
+
+        assert result["ok"] is True
+        assert result["projection"]["interaction"]["courtship_card"]["id"] == "dance-card"
+        assert [event["type"] for event in result["events"]] == ["control_taken", "courtship_started"]
+
+        resolved = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_resolve_courtship_objective",
+            expected_version=2,
+            command_type="resolve_interaction",
+            payload={"capability_id": "force", "card_ids": ["dance-in-hand"]},
+        )
+
+        assert resolved["ok"] is True
+        assert resolved["projection"]["courtship_completed"] is True
+        assert resolved["projection"]["objectives"][0]["completed"] is True
+        assert resolved["projection"]["phase"] == "game_over"
 
     run(scenario())
 

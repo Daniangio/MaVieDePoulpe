@@ -68,6 +68,7 @@ TOKEN_TYPES = [
 ]
 OCTOPUS_TOKEN_ID = "octopus"
 COURTSHIP_TOKEN_ID = "courtship"
+COURTSHIP_LEVEL_TILE_ID = "__courtship_token__"
 PLACEABLE_LEVEL_TOKEN_IDS = {"shelter", OCTOPUS_TOKEN_ID, COURTSHIP_TOKEN_ID}
 POULPITA_PANEL_ZONE_IDS = {"neurons", "seashells"}
 SIZE_UNITS = {"mg", "g", "kg"}
@@ -240,6 +241,7 @@ def _read_content() -> dict[str, Any]:
         level["starting_neurons"] = max(0, int(level.get("starting_neurons") or 0))
         level["night_duration_steps"] = max(1, int(level.get("night_duration_steps") or 24))
         level["max_nights"] = max(1, int(level.get("max_nights") or 5))
+        level["counter_attack_min_size_index"] = max(1, int(level.get("counter_attack_min_size_index") or 1))
         level["courtship_min_size_index"] = max(0, int(level.get("courtship_min_size_index") if level.get("courtship_min_size_index") is not None else 3))
         level["courtship_min_energy"] = max(1, int(level.get("courtship_min_energy") or 8))
         level["win_min_energy"] = max(1, int(level.get("win_min_energy") or 5))
@@ -711,6 +713,7 @@ def _read_content_from_value(content: dict[str, Any]) -> dict[str, Any]:
         level["starting_neurons"] = max(0, int(level.get("starting_neurons") or 0))
         level["night_duration_steps"] = max(1, int(level.get("night_duration_steps") or 24))
         level["max_nights"] = max(1, int(level.get("max_nights") or 5))
+        level["counter_attack_min_size_index"] = max(1, int(level.get("counter_attack_min_size_index") or 1))
         level["courtship_min_size_index"] = max(0, int(level.get("courtship_min_size_index") if level.get("courtship_min_size_index") is not None else 3))
         level["courtship_min_energy"] = max(1, int(level.get("courtship_min_energy") or 8))
         level["win_min_energy"] = max(1, int(level.get("win_min_energy") or 5))
@@ -1358,8 +1361,11 @@ def _normalize_level_objectives(objectives: list[dict[str, Any]]) -> list[dict[s
         if objective_type == "increase_size":
             target = max(1, int(objective.get("target") or objective.get("count") or 1))
             normalized.append({"id": objective_id, "type": objective_type, "target": target})
-        elif objective_type in {"find_shelter", "secure_shelter"}:
+        elif objective_type in {"find_shelter", "secure_shelter", "resolve_courtship"}:
             normalized.append({"id": objective_id, "type": objective_type})
+        elif objective_type == "return_secured_shelter_after_courtship":
+            target = max(1, int(objective.get("target") or objective.get("energy") or 1))
+            normalized.append({"id": objective_id, "type": objective_type, "target": target})
         elif objective_type:
             raise ValueError(f"Unsupported objective type: {objective_type}.")
     return normalized
@@ -1378,6 +1384,7 @@ def save_level(
     starting_neurons: int | None = None,
     night_duration_steps: int | None = None,
     max_nights: int | None = None,
+    counter_attack_min_size_index: int | None = None,
     courtship_min_size_index: int | None = None,
     courtship_min_energy: int | None = None,
     win_min_energy: int | None = None,
@@ -1394,6 +1401,7 @@ def save_level(
     if not node_ids:
         raise ValueError("Level map has no nodes.")
     tile_set = {str(tile.get("id")) for tile in content["tiles"]}
+    tile_set.add(COURTSHIP_LEVEL_TILE_ID)
     normalized_groups = _normalize_level_groups(groups, tile_set)
     normalized_surprise_deck_id = str(surprise_deck_id or "")
     if normalized_surprise_deck_id and not any(deck.get("id") == normalized_surprise_deck_id for deck in content.get("surprise_decks", [])):
@@ -1449,6 +1457,7 @@ def save_level(
         "starting_neurons": max(0, int(starting_neurons if starting_neurons is not None else 0)),
         "night_duration_steps": max(1, int(night_duration_steps if night_duration_steps is not None else 24)),
         "max_nights": max(1, int(max_nights if max_nights is not None else 5)),
+        "counter_attack_min_size_index": max(1, int(counter_attack_min_size_index if counter_attack_min_size_index is not None else 1)),
         "courtship_min_size_index": max(0, int(courtship_min_size_index if courtship_min_size_index is not None else 3)),
         "courtship_min_energy": max(1, int(courtship_min_energy if courtship_min_energy is not None else 8)),
         "win_min_energy": max(1, int(win_min_energy if win_min_energy is not None else 5)),

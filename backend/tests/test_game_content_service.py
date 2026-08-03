@@ -283,6 +283,7 @@ def test_level_save_validates_group_capacity_and_node_assignment(tmp_path, monke
         starting_neurons=4,
         night_duration_steps=18,
         max_nights=6,
+        counter_attack_min_size_index=2,
         courtship_min_size_index=2,
         courtship_min_energy=9,
         win_min_energy=6,
@@ -305,6 +306,7 @@ def test_level_save_validates_group_capacity_and_node_assignment(tmp_path, monke
     assert level["starting_neurons"] == 4
     assert level["night_duration_steps"] == 18
     assert level["max_nights"] == 6
+    assert level["counter_attack_min_size_index"] == 2
     assert level["courtship_min_size_index"] == 2
     assert level["courtship_min_energy"] == 9
     assert level["win_min_energy"] == 6
@@ -315,6 +317,27 @@ def test_level_save_validates_group_capacity_and_node_assignment(tmp_path, monke
         {"id": "objective-2", "type": "find_shelter"},
     ]
     assert len(service.get_content_state()["levels"]) == 1
+
+    courtship_level = service.save_level(
+        name="Courtship",
+        map_id="reef",
+        node_tile_counts={"N1": 1, "N2": 0},
+        node_group_ids={"N1": "shore", "N2": "deep"},
+        groups=[
+            {"id": "shore", "name": "Shore", "tile_counts": {service.COURTSHIP_LEVEL_TILE_ID: 1}},
+            {"id": "deep", "name": "Deep", "tile_counts": {}},
+        ],
+        objectives=[
+            {"type": "resolve_courtship"},
+            {"type": "return_secured_shelter_after_courtship", "target": 6},
+        ],
+    )
+
+    assert courtship_level["groups"][0]["tile_counts"] == {service.COURTSHIP_LEVEL_TILE_ID: 1}
+    assert courtship_level["objectives"] == [
+        {"id": "objective-1", "type": "resolve_courtship"},
+        {"id": "objective-2", "type": "return_secured_shelter_after_courtship", "target": 6},
+    ]
 
     try:
         service.save_level(
