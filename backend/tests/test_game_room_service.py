@@ -1422,7 +1422,7 @@ def test_local_orchestrator_switches_to_bot_with_partial_interaction_support():
     camouflage = next(
         candidate
         for candidate in candidates
-        if candidate["commands"][0] == {"type": "resolve_interaction", "payload": {"capability_id": "camouflage", "card_ids": ["hide-card"], "confirm_only": True}}
+        if candidate["commands"][0] == {"type": "resolve_interaction", "payload": {"capability_id": "camouflage", "auto_select_cards": True, "confirm_only": True}}
     )
     simulated = deepcopy(state)
     bot_planner._simulate_public_command(simulated, camouflage["commands"][0])
@@ -1563,7 +1563,7 @@ def test_local_orchestrator_does_not_draw_for_exhausted_interaction_initiator():
 
     assert {"type": "draw_action_card", "payload": {"capability_id": "force"}} not in commands
     assert {"type": "collect_action_points", "payload": {"capability_id": "force"}} not in commands
-    assert {"type": "resolve_interaction", "payload": {"capability_id": "camouflage", "card_ids": ["camouflage-hide"], "confirm_only": True}} in commands
+    assert {"type": "resolve_interaction", "payload": {"capability_id": "camouflage", "auto_select_cards": True, "confirm_only": True}} in commands
 
 
 def test_local_orchestrator_interacts_instead_of_farming_ap_when_tile_is_available():
@@ -2440,6 +2440,133 @@ def test_auto_selected_dual_symbol_cards_are_assigned_to_distinct_requirements()
         "tighten-card": "tighten",
     }
     assert next_state["capabilities"]["agility"]["hand"] == []
+
+
+def test_bot_support_confirmation_keeps_previously_committed_cards():
+    state = _goldfish_state("room_cumulative_support", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "force"
+    current_node_id = state["poulpita"]["node_id"]
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "categories": {"threat": {"id": "threat", "compulsory_on_same_node": True}},
+        "events": {"fish-event": {"id": "fish-event", "category_id": "threat"}},
+        "tiles": {
+            "fish-tile": {
+                "id": "fish-tile",
+                "event_id": "fish-event",
+                "interaction_ids": ["handle", "tighten"],
+                "counter_attack_interaction_ids": [],
+            }
+        },
+    }
+    state["tiles"] = {
+        current_node_id: [{"instance_id": "fish-instance", "tile_id": "fish-tile", "face_up": True}]
+    }
+    state["capabilities"]["agility"]["hand"] = [
+        {
+            "card_id": "tighten-card",
+            "interaction_id": "tighten",
+            "interaction_ids": ["tighten"],
+            "owner_capability_id": "agility",
+        }
+    ]
+    state["interaction"] = {
+        "tile_instance_id": "fish-instance",
+        "tile_id": "fish-tile",
+        "node_id": current_node_id,
+        "initiator_capability_id": "force",
+        "initiator_confirmed": True,
+        "requirement_reduction": 0,
+        "played_cards": [
+            {
+                "card_id": "handle-card",
+                "interaction_id": "handle",
+                "interaction_ids": ["handle"],
+                "owner_capability_id": "agility",
+                "capability_id": "agility",
+            }
+        ],
+    }
+    service = GameRoomService()
+    user = User(id="backend_bot_simulator", username="Bots", is_admin=True)
+
+    next_state, events = service._reduce(
+        state,
+        {
+            "command_id": "cmd_cumulative_support",
+            "expected_version": state["version"],
+            "type": "resolve_interaction",
+            "payload": {
+                "capability_id": "agility",
+                "auto_select_cards": True,
+                "confirm_only": True,
+            },
+        },
+        user=user,
+        room_id=state["room_id"],
+        room={"id": state["room_id"], "mode": "bots_only"},
+    )
+
+    assert events[0]["type"] == "interaction_cards_confirmed"
+    assert events[0]["success_ready"] is True
+    assert {
+        card["card_id"]: card["interaction_id"]
+        for card in next_state["interaction"]["played_cards"]
+    } == {"handle-card": "handle", "tighten-card": "tighten"}
+
+
+def test_simulation_progress_includes_size_and_remaining_initiatives():
+    state = _goldfish_state("room_progress_resources", level_id="test-level", mode="bots_only")
+    state["poulpita"]["size_index"] = 1
+    state["tile_catalog"]["poulpita_panel"] = {
+        "sizes": [
+            {"amount": 200, "unit": "mg", "energy_cost": 0},
+            {"amount": 1.5, "unit": "kg", "energy_cost": 3},
+        ]
+    }
+    state["capabilities"]["agility"]["control_takes_this_night"] = 2
+    state["capabilities"]["force"]["control_takes_this_night"] = 1
+    state["poulpita"]["seashells"] = 1
+    state["shelters"] = {
+        state["poulpita"]["node_id"]: {"count": 1, "seashells": 3, "secure": True}
+    }
+
+    progress = bot_simulation_service._simulation_progress(
+        state=state,
+        status="running",
+        step=12,
+        max_steps=100,
+    )
+
+    assert progress["size_label"] == "1.5 kg"
+    assert progress["total_initiatives"] == 15
+    assert progress["remaining_initiatives"] == 12
+    assert progress["seashells"] == 1
+    assert progress["shelter_seashells"] == 3
+
+
+def test_replay_summary_backfills_shelter_shells_for_older_replays():
+    summary = bot_simulation_service._replay_summary(
+        {
+            "id": "older-replay",
+            "status": "completed",
+            "progress": {"seashells": 1},
+            "frames": [
+                {
+                    "projection": {
+                        "shelters": {
+                            "1A": {"count": 1, "seashells": 2, "secure": False},
+                            "1B": {"count": 1, "seashells": 3, "secure": True},
+                        }
+                    }
+                }
+            ],
+        }
+    )
+
+    assert summary["progress"]["seashells"] == 1
+    assert summary["progress"]["shelter_seashells"] == 5
 
 
 def test_start_goldfish_game_initializes_16_node_board():
@@ -3432,6 +3559,71 @@ def test_bot_shell_value_diminishes_only_after_the_third_shell():
     fourth_shell_value = bot_planner._weighted_expected_gain(state, {"seashells": 1})
 
     assert third_shell_value > fourth_shell_value > 0
+
+
+def test_bot_prioritizes_shell_node_over_equivalent_empty_node():
+    state = _goldfish_state("room_bot_shell_route", level_id="test-level", mode="bots_only")
+    state["map"] = deepcopy(TEST_MAP)
+    state["poulpita"]["node_id"] = "1A"
+    state["objectives"] = [{"id": "secure", "type": "secure_shelter"}]
+    state["shelters"] = {"1A": {"count": 1, "seashells": 0, "secure": False}}
+    state["capabilities"]["force"]["initiates_event_ids"] = ["mollusc-event"]
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "categories": {"prey": {"id": "prey", "name": "Prey", "compulsory_on_same_node": False}},
+        "events": {"mollusc-event": {"id": "mollusc-event", "name": "Mollusc", "category_id": "prey"}},
+        "tiles": {
+            "mollusc-tile": {
+                "id": "mollusc-tile",
+                "event_id": "mollusc-event",
+                "interaction_ids": [],
+                "success_effects": [{"type": "gain_seashells", "amount": 1}],
+            }
+        },
+    }
+    state["tiles"] = {
+        "1B": [{"instance_id": "mollusc-instance", "tile_id": "mollusc-tile", "face_up": True}],
+        "1C": [],
+    }
+
+    shell_score = bot_planner._node_followup_score(state, "1B", "force")[0]
+    empty_score = bot_planner._node_followup_score(state, "1C", "force")[0]
+
+    assert shell_score > empty_score
+
+
+def test_bot_secures_required_shelter_before_pursuing_courtship():
+    state = _goldfish_state("room_bot_shells_before_courtship", level_id="test-level", mode="bots_only")
+    state["map"] = deepcopy(TEST_MAP)
+    state["poulpita"]["node_id"] = "1A"
+    state["poulpita"]["size_index"] = 2
+    state["courtship_min_size_index"] = 2
+    state["objectives"] = [
+        {"id": "secure", "type": "secure_shelter"},
+        {"id": "courtship", "type": "resolve_courtship"},
+    ]
+    state["shelters"] = {"1A": {"count": 1, "seashells": 0, "secure": False}}
+    state["tiles"] = {node_id: [] for node_id in TEST_MAP["nodes"]}
+    state["tiles"]["1D"] = [
+        {
+            "instance_id": "courtship-visible",
+            "tile_id": "__courtship_token__",
+            "token_type": "courtship",
+            "face_up": True,
+        }
+    ]
+
+    blocked = bot_planner._courtship_pursuit_context(state)
+
+    assert blocked["prerequisites_ready"] is False
+    assert blocked["should_seek"] is False
+    state["shelters"]["1A"] = {"count": 1, "seashells": 3, "secure": True}
+
+    ready = bot_planner._courtship_pursuit_context(state)
+
+    assert ready["prerequisites_ready"] is True
+    assert ready["should_seek"] is True
+    assert ready["next_node_id"] == "1B"
 
 
 def test_bot_pursues_visible_courtship_after_size_unlock():

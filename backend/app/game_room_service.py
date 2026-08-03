@@ -1313,12 +1313,18 @@ def _auto_selected_interaction_card_ids(next_state: dict[str, Any], capability_i
     if capability is None:
         return []
     remaining = [str(interaction_id) for interaction_id in required_interaction_ids if interaction_id]
+    selected = [
+        str(card.get("card_id") or "")
+        for card in interaction.get("played_cards") or []
+        if str(card.get("capability_id") or "") == capability_id and card.get("card_id")
+    ]
     for card in interaction.get("played_cards") or []:
         played_interaction_id = str(card.get("interaction_id") or "")
         if played_interaction_id in remaining:
             remaining.remove(played_interaction_id)
     assignments = _best_card_requirement_assignments(list(capability.get("hand") or []), remaining)
-    return [str(card.get("card_id") or "") for card, _interaction_id in assignments]
+    selected.extend(str(card.get("card_id") or "") for card, _interaction_id in assignments)
+    return selected
 
 
 def _auto_discard_card_id_for_draw(state: dict[str, Any], capability: dict[str, Any]) -> str:

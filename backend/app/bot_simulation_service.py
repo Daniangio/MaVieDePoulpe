@@ -86,6 +86,18 @@ def _payload_with_progress(payload: dict[str, Any]) -> dict[str, Any]:
     progress = _read_progress(replay_id) if replay_id else None
     if not progress:
         return payload
+    if str(progress.get("status") or "") == "running":
+        try:
+            updated_at = datetime.fromisoformat(str(progress.get("updated_at") or ""))
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=timezone.utc)
+            heartbeat_age = (datetime.now(timezone.utc) - updated_at).total_seconds()
+        except ValueError:
+            heartbeat_age = 31
+        if heartbeat_age > 30:
+            _mark_simulation_failed(replay_id, "Simulation worker stopped before completing the replay.")
+            payload = _read_replay(replay_id)
+            progress = _read_progress(replay_id) or {}
     merged = deepcopy(payload)
     merged["status"] = str(progress.get("status") or merged.get("status") or "queued")
     merged["progress"] = progress
@@ -115,7 +127,15 @@ def _compact_projection(projection: dict[str, Any]) -> dict[str, Any]:
 
 def _replay_summary(payload: dict[str, Any]) -> dict[str, Any]:
     metadata = payload.get("metadata") or {}
-    progress = payload.get("progress") or {}
+    progress = deepcopy(payload.get("progress") or {})
+    if "shelter_seashells" not in progress:
+        frames = payload.get("frames") or []
+        final_projection = (frames[-1].get("projection") or {}) if frames else {}
+        progress["shelter_seashells"] = sum(
+            max(0, int(shelter.get("seashells") or 0))
+            for shelter in (final_projection.get("shelters") or {}).values()
+            if isinstance(shelter, dict)
+        )
     status = str(payload.get("status") or progress.get("status") or "completed")
     return {
         "id": str(payload.get("id") or ""),
@@ -182,8 +202,32 @@ def _simulation_progress(
         for entry in shelters.values()
         if isinstance(entry, dict) and (entry.get("secure") or int(entry.get("seashells") or 0) >= 3)
     )
+    shelter_seashells = sum(
+        max(0, int(entry.get("seashells") or 0))
+        for entry in shelters.values()
+        if isinstance(entry, dict)
+    )
     phase = str(state.get("phase") or "setup")
     day_index = max(1, int(state.get("day_index") or 1))
+    capabilities = state.get("capabilities") or {}
+    total_initiatives = sum(
+        max(0, int(capability.get("max_control_takes_per_night") or 0))
+        for capability in capabilities.values()
+    )
+    remaining_initiatives = sum(
+        max(
+            0,
+            int(capability.get("max_control_takes_per_night") or 0)
+            - int(capability.get("control_takes_this_night") or 0),
+        )
+        for capability in capabilities.values()
+    )
+    size_index = max(0, int(poulpita.get("size_index") or 0))
+    sizes = ((state.get("tile_catalog") or {}).get("poulpita_panel") or {}).get("sizes") or []
+    current_size = sizes[size_index] if size_index < len(sizes) else {}
+    size_amount = current_size.get("amount")
+    size_unit = str(current_size.get("unit") or "")
+    size_label = f"{size_amount:g} {size_unit}" if isinstance(size_amount, (int, float)) else f"Size {size_index + 1}"
     return {
         "status": status,
         "updated_at": _now_iso(),
@@ -199,7 +243,11 @@ def _simulation_progress(
         "max_energy": max(1, int(poulpita.get("max_energy") or 32)),
         "neurons": max(0, int(poulpita.get("neurons") or 0)),
         "seashells": max(0, int(poulpita.get("seashells") or 0)),
-        "size_index": max(0, int(poulpita.get("size_index") or 0)),
+        "shelter_seashells": shelter_seashells,
+        "size_index": size_index,
+        "size_label": size_label.strip(),
+        "remaining_initiatives": remaining_initiatives,
+        "total_initiatives": total_initiatives,
         "node_id": str(poulpita.get("node_id") or ""),
         "shelter_tokens": shelter_tokens,
         "secured_shelters": secured_shelters,

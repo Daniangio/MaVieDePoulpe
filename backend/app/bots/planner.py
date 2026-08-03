@@ -299,6 +299,24 @@ def _shell_progress_value(shell_count: float) -> float:
     return min(3.0, shell_count) + max(0.0, shell_count - 3.0) * 0.7
 
 
+def _shell_acquisition_bonus(state: dict[str, Any], expected_delta: dict[str, Any]) -> float:
+    expected_shells = max(0.0, float((expected_delta or {}).get("seashells") or 0))
+    if expected_shells <= 0:
+        return 0.0
+    current_shells = _total_team_shells(state)
+    marginal_progress = _shell_progress_value(current_shells + expected_shells) - _shell_progress_value(current_shells)
+    objective_multiplier = 3.0 if _has_objective(
+        state,
+        {"secure_shelter", "return_secured_shelter_after_courtship"},
+    ) else 1.5
+    return round(
+        marginal_progress
+        * _resource_weight(state, "seashells", 8.0)
+        * objective_multiplier,
+        2,
+    )
+
+
 def _has_objective(state: dict[str, Any], objective_types: set[str]) -> bool:
     return any(str(objective.get("type") or "") in objective_types for objective in state.get("objectives") or [])
 
@@ -879,10 +897,21 @@ def _courtship_pursuit_context(state: dict[str, Any], start_node_id: str | None 
     current_node_id = str(start_node_id or (state.get("poulpita") or {}).get("node_id") or "")
     pending = _courtship_objective_pending(state)
     unlocked = _courtship_unlocked(state)
+    secure_shelter_required = _has_objective(
+        state,
+        {"secure_shelter", "return_secured_shelter_after_courtship"},
+    )
+    secure_shelter_ready = any(
+        isinstance(shelter, dict)
+        and int(shelter.get("count") or 0) > 0
+        and (bool(shelter.get("secure")) or int(shelter.get("seashells") or 0) >= 3)
+        for shelter in (state.get("shelters") or {}).values()
+    )
+    prerequisites_ready = not secure_shelter_required or secure_shelter_ready
     visible_nodes = _courtship_nodes(state, visible_only=True)
     route = None
     route_is_safe = False
-    if pending and unlocked and visible_nodes:
+    if pending and unlocked and prerequisites_ready and visible_nodes:
         route = _route_to_nodes(state, current_node_id, visible_nodes, avoid_compulsory=True)
         route_is_safe = bool(route)
         route = route or _route_to_nodes(state, current_node_id, visible_nodes, avoid_compulsory=False)
@@ -890,13 +919,14 @@ def _courtship_pursuit_context(state: dict[str, Any], start_node_id: str | None 
     return {
         "pending": pending,
         "unlocked": unlocked,
+        "prerequisites_ready": prerequisites_ready,
         "visible": bool(visible_nodes),
         "visible_nodes": sorted(visible_nodes),
         "route": route,
         "route_is_safe": route_is_safe,
         "distance": distance,
-        "should_seek": bool(pending and unlocked and (not route or bool(distance))),
-        "exploring": bool(pending and unlocked and not visible_nodes),
+        "should_seek": bool(pending and unlocked and prerequisites_ready and (not route or bool(distance))),
+        "exploring": bool(pending and unlocked and prerequisites_ready and not visible_nodes),
         "next_node_id": route["path"][1] if route and len(route.get("path") or []) > 1 else None,
     }
 
@@ -1147,6 +1177,30 @@ def _node_followup_score(state: dict[str, Any], node_id: str, ability_id: str) -
             score += 6
         else:
             score -= 30
+    compulsory_instance_ids = {
+        str((entry.get("instance") or {}).get("instance_id") or "")
+        for entry in entries
+    }
+    for entry in _visible_tiles_on_node(state, node_id):
+        instance_id = str((entry.get("instance") or {}).get("instance_id") or "")
+        if instance_id in compulsory_instance_ids:
+            continue
+        summary = _interaction_resolution_summary(state, entry, preferred_ability_id=ability_id)
+        expected_delta = summary.get("expected_delta") or {}
+        if float(expected_delta.get("seashells") or 0) <= 0:
+            continue
+        available_actors = [
+            candidate
+            for candidate in summary.get("actor_candidates") or []
+            if candidate.get("has_control_available")
+        ]
+        if not available_actors:
+            continue
+        score += _weighted_expected_gain(state, expected_delta)
+        score += _shell_acquisition_bonus(state, expected_delta)
+        score += float(summary.get("success_probability") or 0) * _planner_weight(state, "tile_resolution", 14.0)
+        if any(candidate.get("ability_id") == ability_id for candidate in available_actors):
+            score += 12
     shelter_distance = _distance_to_closest_shelter(state, node_id)
     if shelter_distance is not None:
         score += max(0, 10 - shelter_distance * 2)
@@ -2731,10 +2785,10 @@ def _support_candidate_plan(
     draw_cost = _action_cost(state, "draw")
     has_action_slot = include_take_control or _action_slots_left(capability) > 0
     if selected is not None:
-        commands.append({"type": "resolve_interaction", "payload": {"capability_id": ability_id, "card_ids": selected, "confirm_only": True}})
+        commands.append({"type": "resolve_interaction", "payload": {"capability_id": ability_id, "auto_select_cards": True, "confirm_only": True}})
         labels.append(f"{name} plays support cards")
     elif partial_selected:
-        commands.append({"type": "resolve_interaction", "payload": {"capability_id": ability_id, "card_ids": partial_selected, "confirm_only": True}})
+        commands.append({"type": "resolve_interaction", "payload": {"capability_id": ability_id, "auto_select_cards": True, "confirm_only": True}})
         labels.append(f"{name} commits available support cards")
     elif estimate.get("can_improve_by_drawing") and has_action_slot:
         if _can_pay_action_cost(state, capability, draw_cost):
@@ -4383,7 +4437,7 @@ def _local_orchestrator_interaction_candidates(state: dict[str, Any]) -> list[di
                     state,
                     plan_id=f"local_direct_support_{ability_id}",
                     title=f"{capability.get('name') or ability_id} plays support",
-                    command={"type": "resolve_interaction", "payload": {"capability_id": ability_id, "card_ids": selected_cards, "confirm_only": True}},
+                    command={"type": "resolve_interaction", "payload": {"capability_id": ability_id, "auto_select_cards": True, "confirm_only": True}},
                     base_score=145 + len(selected_cards) * 5,
                     confidence=float(estimate.get("probability") or 0.05),
                 )
@@ -4589,6 +4643,10 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
                         if _tile_category(state, entry.get("tile") or {}).get("compulsory_on_same_node")
                         else 0.0
                     )
+                    + _shell_acquisition_bonus(
+                        state,
+                        _interaction_resolution_summary(state, entry, preferred_ability_id=ability_id).get("expected_delta") or {},
+                    )
                     - _interaction_team_penalty(state, entry, ability_id)[1]
                     for entry in initiable_entries
                 ),
@@ -4700,7 +4758,11 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
                 },
                 base_score=(115 if is_compulsory else 55) + priority - team_penalty,
                 confidence=float(summary.get("success_probability") or 0.05),
-                expected_gain=_weighted_expected_gain(state, expected_delta) + tile_progress_gain,
+                expected_gain=(
+                    _weighted_expected_gain(state, expected_delta)
+                    + _shell_acquisition_bonus(state, expected_delta)
+                    + tile_progress_gain
+                ),
             )
             candidate["statistics"]["interaction_team_size"] = team_size
             candidate["statistics"]["initiative_change_penalty"] = team_penalty
@@ -4856,6 +4918,10 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
                         _planner_weight(state, "compulsory_tile_resolution", 35.0)
                         if _tile_category(state, entry.get("tile") or {}).get("compulsory_on_same_node")
                         else 0.0
+                    )
+                    + _shell_acquisition_bonus(
+                        state,
+                        _interaction_resolution_summary(state, entry, preferred_ability_id=ability_id).get("expected_delta") or {},
                     )
                     - _interaction_team_penalty(state, entry, ability_id)[1]
                     for entry in initiable_entries

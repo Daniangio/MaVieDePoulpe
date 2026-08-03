@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { BatteryMedium, Brain, CircleCheck, CircleX, Home, LoaderCircle, MapPin, Moon, Plus, Shell, Sun, Trash2 } from "lucide-react";
+import { BatteryMedium, Brain, CircleCheck, CircleX, Hand, Home, LoaderCircle, MapPin, Moon, Plus, Scale, Shell, Sun, Trash2 } from "lucide-react";
 import AdminLevelEditor from "../components/AdminLevelEditor.jsx";
 import AdminMapEditor from "../components/AdminMapEditor.jsx";
 import HexTilePreview from "../components/HexTilePreview.jsx";
@@ -2372,7 +2372,10 @@ const BotSimulationsAdmin = ({ levels, request }) => {
                       <div className="flex max-w-64 flex-wrap gap-1 text-xs text-slate-700">
                         <span className="inline-flex items-center gap-1 rounded bg-rose-50 px-1.5 py-1" title="Energy"><BatteryMedium size={13} />{Number(progress.energy ?? replay.final_energy ?? 0)}</span>
                         <span className="inline-flex items-center gap-1 rounded bg-violet-50 px-1.5 py-1" title="Neurons"><Brain size={13} />{Number(progress.neurons || 0)}</span>
-                        <span className="inline-flex items-center gap-1 rounded bg-amber-50 px-1.5 py-1" title="Seashells"><Shell size={13} />{Number(progress.seashells || 0)}</span>
+                        <span className="inline-flex items-center gap-1 rounded bg-amber-50 px-1.5 py-1" title="Shells carried by Poulpita"><Shell size={13} />{Number(progress.seashells || 0)}</span>
+                        <span className="inline-flex items-center gap-0.5 rounded bg-emerald-50 px-1.5 py-1" title="Shells stored in shelters"><Home size={13} /><Shell size={10} />{Number(progress.shelter_seashells || 0)}</span>
+                        <span className="inline-flex items-center gap-1 rounded bg-sky-50 px-1.5 py-1" title="Poulpita size"><Scale size={13} />{progress.size_label || `Size ${Number(progress.size_index || 0) + 1}`}</span>
+                        <span className="inline-flex items-center gap-1 rounded bg-fuchsia-50 px-1.5 py-1" title="Remaining initiatives"><Hand size={13} />{Number(progress.remaining_initiatives || 0)}/{Number(progress.total_initiatives || 0)}</span>
                         <span className="inline-flex items-center gap-1 rounded bg-emerald-50 px-1.5 py-1" title="Secured shelters / shelters"><Home size={13} />{Number(progress.secured_shelters || 0)}/{Number(progress.shelter_tokens || 0)}</span>
                         <span className="inline-flex items-center gap-1 rounded bg-cyan-50 px-1.5 py-1" title="Current node"><MapPin size={13} />{progress.node_id || "-"}</span>
                       </div>
