@@ -3173,6 +3173,107 @@ def test_bot_stores_shells_until_shelter_is_secure_but_keeps_one_carried():
     )
 
 
+def test_bot_shell_value_diminishes_only_after_the_third_shell():
+    state = _goldfish_state("room_bot_shell_value", level_id="test-level", mode="bots_only")
+    state["shelters"] = {}
+    state["poulpita"]["seashells"] = 2
+    third_shell_value = bot_planner._weighted_expected_gain(state, {"seashells": 1})
+
+    state["poulpita"]["seashells"] = 3
+    fourth_shell_value = bot_planner._weighted_expected_gain(state, {"seashells": 1})
+
+    assert third_shell_value > fourth_shell_value > 0
+
+
+def test_bot_pursues_visible_courtship_after_size_unlock():
+    state = _goldfish_state("room_bot_courtship_route", level_id="test-level", mode="bots_only")
+    state["map"] = deepcopy(TEST_MAP)
+    state["poulpita"]["node_id"] = "1A"
+    state["poulpita"]["size_index"] = 2
+    state["courtship_min_size_index"] = 2
+    state["objectives"] = [{"id": "courtship", "type": "resolve_courtship"}]
+    state["tiles"] = {
+        node_id: [] for node_id in TEST_MAP["nodes"]
+    }
+    state["tiles"]["1D"] = [
+        {
+            "instance_id": "courtship-visible",
+            "tile_id": "__courtship_token__",
+            "token_type": "courtship",
+            "face_up": True,
+        }
+    ]
+
+    context = bot_planner._courtship_pursuit_context(state)
+
+    assert context["should_seek"] is True
+    assert context["visible"] is True
+    assert context["next_node_id"] == "1B"
+    assert context["route"]["path"] == ["1A", "1B", "1C", "1D"]
+
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "force"
+    state["capabilities"]["force"]["actions_taken_this_control"] = 0
+    state["capabilities"]["force"]["pa"] = 5
+    candidates = bot_planner._local_orchestrator_night_candidates(state)
+    assert any(
+        candidate["commands"][0] == {
+            "type": "move_poulpita",
+            "payload": {"capability_id": "force", "target_node_id": "1B"},
+        }
+        for candidate in candidates
+    )
+
+
+def test_bot_explores_tile_rich_nodes_when_unlocked_courtship_is_not_visible():
+    state = _goldfish_state("room_bot_courtship_explore", level_id="test-level", mode="bots_only")
+    state["map"] = deepcopy(TEST_MAP)
+    state["poulpita"]["node_id"] = "1B"
+    state["poulpita"]["size_index"] = 2
+    state["courtship_min_size_index"] = 2
+    state["objectives"] = [{"id": "courtship", "type": "resolve_courtship"}]
+    state["shelters"] = {}
+    state["tiles"] = {node_id: [] for node_id in TEST_MAP["nodes"]}
+    state["tiles"]["1C"] = [
+        {"instance_id": f"hidden-{index}", "tile_id": f"unknown-{index}", "face_up": False}
+        for index in range(3)
+    ]
+
+    context = bot_planner._courtship_pursuit_context(state)
+    rich_score = bot_planner._node_followup_score(state, "1C", "force")[0]
+    empty_score = bot_planner._node_followup_score(state, "1A", "force")[0]
+
+    assert context["exploring"] is True
+    assert rich_score > empty_score
+
+
+def test_bot_returns_early_to_secured_shelter_after_courtship_when_energy_wins():
+    state = _goldfish_state("room_bot_courtship_return", level_id="test-level", mode="bots_only")
+    state["map"] = deepcopy(TEST_MAP)
+    state["phase"] = "night_action"
+    state["night_time_spent"] = 0
+    state["night_shelter_available_at"] = 16
+    state["poulpita"]["node_id"] = "1A"
+    state["poulpita"]["energy"] = 6
+    state["courtship_completed"] = True
+    state["objectives"] = [
+        {"id": "eggs", "type": "return_secured_shelter_after_courtship", "target": 6}
+    ]
+    state["shelters"] = {"1D": {"count": 1, "seashells": 3, "secure": True}}
+
+    return_context = bot_planner._shelter_return_context(state)
+
+    assert return_context["objective_return"] is True
+    assert return_context["should_return"] is True
+    assert return_context["next_node_id"] == "1B"
+    assert return_context["urgency"] >= 200
+
+    state["poulpita"]["energy"] = 5
+    insufficient_energy_context = bot_planner._shelter_return_context(state)
+    assert insufficient_energy_context["objective_return"] is False
+    assert insufficient_energy_context["should_return"] is False
+
+
 def test_end_night_is_free_and_day_upgrades_stack_before_next_night():
     async def scenario():
         service, user, room, _start = await create_started_room()

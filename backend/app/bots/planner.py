@@ -246,7 +246,7 @@ def _weighted_expected_gain(state: dict[str, Any], delta: dict[str, Any]) -> flo
     defaults = {
         "energy": 8.0,
         "neurons": 5.0,
-        "seashells": 4.0,
+        "seashells": 8.0,
         "ap": 1.0,
         "shelters": 18.0,
         "surprise_cards": 6.0,
@@ -254,7 +254,12 @@ def _weighted_expected_gain(state: dict[str, Any], delta: dict[str, Any]) -> flo
     }
     score = 0.0
     for key, fallback in defaults.items():
-        score += float(delta.get(key) or 0) * _resource_weight(state, key, fallback)
+        if key == "seashells":
+            current_shells = _total_team_shells(state)
+            shell_delta = float(delta.get(key) or 0)
+            score += (_shell_progress_value(current_shells + shell_delta) - _shell_progress_value(current_shells)) * _resource_weight(state, key, fallback)
+        else:
+            score += float(delta.get(key) or 0) * _resource_weight(state, key, fallback)
     return round(score, 2)
 
 
@@ -263,6 +268,42 @@ def _state_has_shelter(state: dict[str, Any], node_id: str) -> bool:
     if isinstance(raw, dict):
         return int(raw.get("count") or 0) > 0
     return int(raw or 0) > 0
+
+
+def _total_team_shells(state: dict[str, Any]) -> float:
+    total = float((state.get("poulpita") or {}).get("seashells") or 0)
+    for shelter in (state.get("shelters") or {}).values():
+        if isinstance(shelter, dict):
+            total += float(shelter.get("seashells") or 0)
+    return max(0.0, total)
+
+
+def _shell_progress_value(shell_count: float) -> float:
+    shell_count = max(0.0, float(shell_count or 0))
+    return min(3.0, shell_count) + max(0.0, shell_count - 3.0) * 0.7
+
+
+def _has_objective(state: dict[str, Any], objective_types: set[str]) -> bool:
+    return any(str(objective.get("type") or "") in objective_types for objective in state.get("objectives") or [])
+
+
+def _objective_completed(state: dict[str, Any], objective_type: str) -> bool:
+    progress = state.get("objective_progress") or {}
+    if objective_type == "find_shelter":
+        return bool(progress.get("found_shelter"))
+    if objective_type == "secure_shelter":
+        return bool(progress.get("secured_shelter"))
+    if objective_type == "resolve_courtship":
+        return bool(state.get("courtship_completed"))
+    if objective_type == "return_secured_shelter_after_courtship":
+        targets = [
+            max(1, int(objective.get("target") or 1))
+            for objective in state.get("objectives") or []
+            if str(objective.get("type") or "") == objective_type
+        ]
+        reached = int(progress.get("secured_shelter_return_energy_after_courtship") or 0)
+        return bool(targets) and reached >= max(targets)
+    return False
 
 
 def _current_size_value(state: dict[str, Any]) -> float:
@@ -301,11 +342,15 @@ def _global_state_score_components(state: dict[str, Any]) -> dict[str, float]:
             shelter_count += int(raw or 0)
     night_time_spent = int(state.get("night_time_spent") or 0)
     night_time_total = max(1, int(state.get("night_time_total") or 24))
+    total_shells = _total_team_shells(state)
+    is_night = state.get("phase") in {"night_idle", "night_action"}
     unsheltered_night_end_penalty = 1.0 if state.get("phase") in {"night_idle", "night_action"} and night_time_spent >= night_time_total and not _state_has_shelter(state, current_node_id) else 0.0
     return {
         "energy": float(poulpita.get("energy") or 0),
         "neurons": float(poulpita.get("neurons") or 0),
-        "seashells": float(poulpita.get("seashells") or 0),
+        "seashells": _shell_progress_value(total_shells),
+        "shell_objective_progress": min(3.0, total_shells) / 3.0,
+        "carried_shell_reserve": 1.0 if is_night and int(poulpita.get("seashells") or 0) > 0 else 0.0,
         "shelter_shells": float(shelter_shells),
         "cards_in_hand": float(hand_cards),
         "hand_capacity": float(hand_capacity),
@@ -314,6 +359,8 @@ def _global_state_score_components(state: dict[str, Any]) -> dict[str, float]:
         "size_value": _current_size_value(state),
         "shelters": float(shelter_count),
         "secure_shelters": float(secure_shelters),
+        "secure_shelter_objective": 1.0 if secure_shelters and _has_objective(state, {"secure_shelter", "return_secured_shelter_after_courtship"}) else 0.0,
+        "courtship_completed": 1.0 if state.get("courtship_completed") else 0.0,
         "ap": float(total_ap),
         "night_time_remaining": float(max(0, night_time_total - night_time_spent)),
         "unsheltered_night_end_penalty": unsheltered_night_end_penalty,
@@ -328,7 +375,9 @@ def _global_state_score(state: dict[str, Any]) -> float:
     defaults = {
         "energy": 10.0,
         "neurons": 5.0,
-        "seashells": 4.0,
+        "seashells": 8.0,
+        "shell_objective_progress": 30.0,
+        "carried_shell_reserve": 12.0,
         "shelter_shells": 3.0,
         "cards_in_hand": 2.0,
         "hand_capacity": 1.0,
@@ -337,6 +386,8 @@ def _global_state_score(state: dict[str, Any]) -> float:
         "size_value": 0.0,
         "shelters": 12.0,
         "secure_shelters": 18.0,
+        "secure_shelter_objective": 45.0,
+        "courtship_completed": 70.0,
         "ap": 0.5,
         "night_time_remaining": 0.15,
         "unsheltered_night_end_penalty": -10.0,
@@ -720,6 +771,119 @@ def _known_shelter_nodes(state: dict[str, Any]) -> set[str]:
     return nodes
 
 
+def _secured_shelter_nodes(state: dict[str, Any]) -> set[str]:
+    return {
+        str(node_id)
+        for node_id, raw in (state.get("shelters") or {}).items()
+        if isinstance(raw, dict) and int(raw.get("count") or 0) > 0 and bool(raw.get("secure"))
+    }
+
+
+def _route_to_nodes(
+    state: dict[str, Any],
+    start_node_id: str,
+    target_node_ids: set[str],
+    *,
+    avoid_compulsory: bool,
+) -> dict[str, Any] | None:
+    start_node_id = str(start_node_id or "")
+    target_node_ids = {str(node_id) for node_id in target_node_ids if node_id}
+    if not start_node_id or not target_node_ids:
+        return None
+    if start_node_id in target_node_ids:
+        return {"target_node_id": start_node_id, "path": [start_node_id], "distance": 0}
+
+    adjacency = (state.get("map") or {}).get("adjacency") or {}
+    frontier = [start_node_id]
+    previous: dict[str, str | None] = {start_node_id: None}
+    while frontier:
+        node_id = frontier.pop(0)
+        for raw_next_node_id in adjacency.get(node_id, []) or []:
+            next_node_id = str(raw_next_node_id)
+            if next_node_id in previous:
+                continue
+            if avoid_compulsory and _node_has_known_compulsory_blocker(state, next_node_id):
+                continue
+            previous[next_node_id] = node_id
+            if next_node_id in target_node_ids:
+                path = [next_node_id]
+                while previous[path[-1]] is not None:
+                    path.append(str(previous[path[-1]]))
+                path.reverse()
+                return {"target_node_id": next_node_id, "path": path, "distance": len(path) - 1}
+            frontier.append(next_node_id)
+    return None
+
+
+def _courtship_nodes(state: dict[str, Any], *, visible_only: bool) -> set[str]:
+    catalog_tiles = ((state.get("tile_catalog") or {}).get("tiles") or {})
+    nodes = set()
+    for node_id, instances in (state.get("tiles") or {}).items():
+        for instance in instances or []:
+            tile = catalog_tiles.get(instance.get("tile_id")) or {}
+            is_courtship = (
+                str(instance.get("token_type") or "") == "courtship"
+                or str(instance.get("tile_id") or "") == "__courtship_token__"
+                or str(tile.get("token_type") or "") == "courtship"
+            )
+            if is_courtship and (not visible_only or bool(instance.get("face_up"))):
+                nodes.add(str(node_id))
+    return nodes
+
+
+def _courtship_objective_pending(state: dict[str, Any]) -> bool:
+    return (
+        _has_objective(state, {"resolve_courtship", "return_secured_shelter_after_courtship"})
+        and not bool(state.get("courtship_completed"))
+    )
+
+
+def _courtship_unlocked(state: dict[str, Any]) -> bool:
+    current_size = max(0, int((state.get("poulpita") or {}).get("size_index") or 0))
+    required_size = max(0, int(state.get("courtship_min_size_index") if state.get("courtship_min_size_index") is not None else 3))
+    return current_size >= required_size
+
+
+def _courtship_pursuit_context(state: dict[str, Any], start_node_id: str | None = None) -> dict[str, Any]:
+    current_node_id = str(start_node_id or (state.get("poulpita") or {}).get("node_id") or "")
+    pending = _courtship_objective_pending(state)
+    unlocked = _courtship_unlocked(state)
+    visible_nodes = _courtship_nodes(state, visible_only=True)
+    route = None
+    route_is_safe = False
+    if pending and unlocked and visible_nodes:
+        route = _route_to_nodes(state, current_node_id, visible_nodes, avoid_compulsory=True)
+        route_is_safe = bool(route)
+        route = route or _route_to_nodes(state, current_node_id, visible_nodes, avoid_compulsory=False)
+    distance = int(route.get("distance") or 0) if route else None
+    return {
+        "pending": pending,
+        "unlocked": unlocked,
+        "visible": bool(visible_nodes),
+        "visible_nodes": sorted(visible_nodes),
+        "route": route,
+        "route_is_safe": route_is_safe,
+        "distance": distance,
+        "should_seek": bool(pending and unlocked and (not route or bool(distance))),
+        "exploring": bool(pending and unlocked and not visible_nodes),
+        "next_node_id": route["path"][1] if route and len(route.get("path") or []) > 1 else None,
+    }
+
+
+def _post_courtship_return_target(state: dict[str, Any]) -> int | None:
+    if not state.get("courtship_completed") or _objective_completed(state, "return_secured_shelter_after_courtship"):
+        return None
+    targets = [
+        max(1, int(objective.get("target") or 1))
+        for objective in state.get("objectives") or []
+        if str(objective.get("type") or "") == "return_secured_shelter_after_courtship"
+    ]
+    if not targets:
+        return None
+    target = max(targets)
+    return target if int((state.get("poulpita") or {}).get("energy") or 0) >= target else None
+
+
 def _node_has_known_compulsory_blocker(state: dict[str, Any], node_id: str) -> bool:
     if _compulsory_choices_on_node(state, str(node_id), highest_only=False):
         return True
@@ -815,6 +979,17 @@ def _shelter_return_context(state: dict[str, Any], start_node_id: str | None = N
     current_node_id = str(start_node_id or (state.get("poulpita") or {}).get("node_id") or "")
     safe_route = _safe_route_to_closest_shelter(state, current_node_id)
     route = safe_route or _route_to_closest_known_shelter(state, current_node_id)
+    objective_energy_target = _post_courtship_return_target(state)
+    objective_route = None
+    objective_route_is_safe = False
+    if objective_energy_target is not None:
+        secured_nodes = _secured_shelter_nodes(state)
+        objective_route = _route_to_nodes(state, current_node_id, secured_nodes, avoid_compulsory=True)
+        objective_route_is_safe = bool(objective_route)
+        objective_route = objective_route or _route_to_nodes(state, current_node_id, secured_nodes, avoid_compulsory=False)
+        if objective_route:
+            route = objective_route
+            safe_route = objective_route if objective_route_is_safe else None
     spent = int(state.get("night_time_spent") or 0)
     total = max(1, int(state.get("night_time_total") or 24))
     shelter_at = min(total, max(0, int(state.get("night_shelter_available_at") or 16)))
@@ -834,7 +1009,10 @@ def _shelter_return_context(state: dict[str, Any], start_node_id: str | None = N
     return_start = max(0, shelter_at - travel_time - safety_margin)
     per_step = _planner_weight(state, "late_shelter_urgency", 8.0)
     urgency = 0.0
-    if route and spent >= return_start:
+    objective_return = bool(objective_route and objective_energy_target is not None)
+    if objective_return and distance:
+        urgency = 220.0
+    elif route and spent >= return_start:
         urgency = (spent - return_start + 1) * per_step
         if spent >= shelter_at:
             urgency += (spent - shelter_at + 1) * per_step
@@ -854,6 +1032,8 @@ def _shelter_return_context(state: dict[str, Any], start_node_id: str | None = N
         "urgency": min(240.0, urgency),
         "should_return": bool(route and distance and urgency > 0),
         "next_node_id": route["path"][1] if route and len(route.get("path") or []) > 1 else None,
+        "objective_return": objective_return,
+        "objective_energy_target": objective_energy_target,
     }
 
 
@@ -921,7 +1101,7 @@ def _node_followup_score(state: dict[str, Any], node_id: str, ability_id: str) -
         preferred_can_act = any(candidate.get("ability_id") == ability_id for candidate in actor_candidates)
         any_actor = bool(actor_candidates)
         score += float(summary.get("success_probability") or 0) * 30
-        score += _delta_score(summary.get("expected_delta") or {})
+        score += _weighted_expected_gain(state, summary.get("expected_delta") or {})
         if summary.get("compulsory"):
             score += 15
         if preferred_can_act:
@@ -934,6 +1114,18 @@ def _node_followup_score(state: dict[str, Any], node_id: str, ability_id: str) -
     if shelter_distance is not None:
         score += max(0, 10 - shelter_distance * 2)
         score += _night_lateness_score(state) * max(0.0, (5.0 - min(5, shelter_distance)) / 5.0)
+    courtship = _courtship_pursuit_context(state)
+    if courtship["should_seek"]:
+        if str(node_id) == str(courtship.get("next_node_id") or ""):
+            score += 180
+        if str(node_id) in set(courtship.get("visible_nodes") or []):
+            score += 240
+        if courtship["exploring"]:
+            hidden_count = sum(
+                1 for instance in (state.get("tiles") or {}).get(str(node_id), []) or []
+                if not instance.get("face_up")
+            )
+            score += 28 + hidden_count * 12
     return score, entries, shelter_distance
 
 
@@ -1820,11 +2012,12 @@ def _rollout_next_commands(state: dict[str, Any], ability_id: str) -> tuple[list
         return _next_interaction_support_command(state, ability_id)
     current_compulsory = _compulsory_choices_on_node(state, current_node_id)
     shelter_return = _shelter_return_context(state, current_node_id)
+    courtship_pursuit = _courtship_pursuit_context(state, current_node_id)
     if _can_pay_action_cost(state, capability, interact_cost):
         forced_entry = _best_rollout_interaction(state, ability_id, current_compulsory)
         if forced_entry:
             return _interaction_rollout_commands(state, ability_id, forced_entry), [forced_entry], f"forced {_tile_display_name(state, forced_entry['tile'])}"
-        if not shelter_return["should_return"]:
+        if not shelter_return["should_return"] and not courtship_pursuit["should_seek"]:
             optional_entry = _best_rollout_interaction(state, ability_id, _visible_current_tiles(state))
             if optional_entry:
                 return _interaction_rollout_commands(state, ability_id, optional_entry), [optional_entry], _tile_display_name(state, optional_entry["tile"])
@@ -1847,6 +2040,15 @@ def _rollout_next_commands(state: dict[str, Any], ability_id: str) -> tuple[list
         if positive_move_ap and neurons_ready and _can_pay_action_cost(state, capability, collect_cost):
             return [{"type": "collect_action_points", "payload": {"capability_id": ability_id}}], [], "AP for shelter return"
         return [], [], "safe shelter route currently unaffordable"
+    if not current_compulsory and courtship_pursuit["should_seek"] and courtship_pursuit.get("next_node_id"):
+        if _can_pay_action_cost(state, capability, move_cost):
+            target_node_id = str(courtship_pursuit["next_node_id"])
+            return [
+                {"type": "move_poulpita", "payload": {"capability_id": ability_id, "target_node_id": target_node_id}}
+            ], [], f"courtship route via {target_node_id}"
+        if _can_collect_toward_action_cost(state, capability, move_cost) and _can_pay_action_cost(state, capability, collect_cost):
+            return [{"type": "collect_action_points", "payload": {"capability_id": ability_id}}], [], "AP for courtship route"
+        return [], [], "courtship route currently unaffordable"
     if not current_compulsory and _can_pay_action_cost(state, capability, move_cost):
         adjacent = list(((state.get("map") or {}).get("adjacency") or {}).get(current_node_id) or [])
         if adjacent:
@@ -3189,6 +3391,7 @@ def _night_idle_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
     current_node_id = str((state.get("poulpita") or {}).get("node_id") or "")
     compulsory = _compulsory_choices_on_node(state, current_node_id)
     shelter_return = _shelter_return_context(state, current_node_id)
+    courtship_pursuit = _courtship_pursuit_context(state, current_node_id)
     visible_entries = _visible_current_tiles(state)
     visible_initiators = {
         ability_id
@@ -3222,6 +3425,46 @@ def _night_idle_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
                         include_take_control=True,
                         base_score=75 + float(shelter_return["urgency"]),
                         rationale="Night is approaching its safe return window. This ability needs AP before following the safe shelter route.",
+                    )
+                )
+        if proposals:
+            return proposals
+    if not compulsory and courtship_pursuit["should_seek"]:
+        route_target = courtship_pursuit.get("next_node_id")
+        for ability_id in _playable_ability_ids(state):
+            capability = _capability(state, ability_id)
+            if not _has_control_take_left(capability):
+                continue
+            targets = [str(route_target)] if route_target else list(adjacent)
+            scored_targets = sorted(
+                targets,
+                key=lambda target: _node_followup_score(state, target, ability_id)[0],
+                reverse=True,
+            )
+            if _can_pay_action_cost(state, capability, move_cost):
+                for target_node_id in scored_targets[:2]:
+                    proposals.append(
+                        _move_plan(
+                            state,
+                            ability_id=ability_id,
+                            target_node_id=target_node_id,
+                            include_take_control=True,
+                            base_score=135 if route_target else 80,
+                            rationale=(
+                                "Courtship is unlocked. Follow the known route to its token."
+                                if route_target
+                                else "Courtship is unlocked but not visible. Move to reveal unexplored tiles."
+                            ),
+                        )
+                    )
+            else:
+                proposals.extend(
+                    _collect_plan_variants(
+                        state,
+                        ability_id=ability_id,
+                        include_take_control=True,
+                        base_score=105 if route_target else 60,
+                        rationale="Collect AP to continue pursuing the courtship objective.",
                     )
                 )
         if proposals:
@@ -3362,6 +3605,43 @@ def _active_night_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
                         )
                 if proposals:
                     return proposals
+            courtship_pursuit = _courtship_pursuit_context(state, current_node_id)
+            if courtship_pursuit["should_seek"]:
+                route_target = courtship_pursuit.get("next_node_id")
+                for ability_id in _playable_ability_ids(state):
+                    capability = _capability(state, ability_id)
+                    if ability_id == str(state.get("active_capability_id") or "") or not _has_control_take_left(capability):
+                        continue
+                    targets = [str(route_target)] if route_target else list(adjacent)
+                    targets.sort(key=lambda target: _node_followup_score(state, target, ability_id)[0], reverse=True)
+                    if _can_pay_action_cost(state, capability, move_cost):
+                        for target_node_id in targets[:2]:
+                            proposals.append(
+                                _move_plan(
+                                    state,
+                                    ability_id=ability_id,
+                                    target_node_id=target_node_id,
+                                    include_take_control=True,
+                                    base_score=135 if route_target else 80,
+                                    rationale=(
+                                        "Continue toward the visible courtship token."
+                                        if route_target
+                                        else "Take initiative and explore for the unlocked courtship token."
+                                    ),
+                                )
+                            )
+                    else:
+                        proposals.extend(
+                            _collect_plan_variants(
+                                state,
+                                ability_id=ability_id,
+                                include_take_control=True,
+                                base_score=105 if route_target else 60,
+                                rationale="Collect AP to pursue courtship.",
+                            )
+                        )
+                if proposals:
+                    return proposals
             eligible_visible_initiators = {
                 ability_id
                 for ability_id in _playable_ability_ids(state)
@@ -3446,6 +3726,29 @@ def _active_night_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
         )
         if collect_plans:
             return _advised_active_proposals(state, collect_plans, active_id)
+    courtship_pursuit = _courtship_pursuit_context(state, current_node_id)
+    if not current_compulsory and courtship_pursuit["should_seek"] and courtship_pursuit.get("next_node_id"):
+        move_cost = _action_cost(state, "move")
+        if _can_pay_action_cost(state, capability, move_cost):
+            route_plan = _move_plan(
+                state,
+                ability_id=active_id,
+                target_node_id=str(courtship_pursuit["next_node_id"]),
+                include_take_control=False,
+                base_score=150,
+                rationale="Courtship is unlocked. Follow the known route to its token before spending actions on optional tiles.",
+            )
+            route_plan["statistics"]["courtship_route"] = courtship_pursuit["route"]
+            return _advised_active_proposals(state, [route_plan], active_id)
+        collect_plans = _collect_plan_variants(
+            state,
+            ability_id=active_id,
+            include_take_control=False,
+            base_score=115,
+            rationale="Collect AP to continue along the known route to courtship.",
+        )
+        if collect_plans:
+            return _advised_active_proposals(state, collect_plans, active_id)
     visible_interaction_path = any(
         _can_initiate(state, ability_id, entry.get("tile") or {})
         for ability_id in _playable_ability_ids(state)
@@ -3454,7 +3757,8 @@ def _active_night_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
     active_visible_interactions = [
         entry
         for entry in visible_entries
-        if _can_initiate(state, active_id, entry.get("tile") or {})
+        if not courtship_pursuit["should_seek"]
+        and _can_initiate(state, active_id, entry.get("tile") or {})
         and _can_pay_action_cost(state, capability, interact_cost)
     ]
     if not active_visible_interactions:
@@ -3495,7 +3799,7 @@ def _active_night_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
         )
     move_cost = _action_cost(state, "move")
     adjacent = list(((state.get("map") or {}).get("adjacency") or {}).get(current_node_id) or [])
-    if not current_compulsory and not visible_interaction_path and adjacent and _can_pay_action_cost(state, capability, move_cost):
+    if not current_compulsory and (not visible_interaction_path or courtship_pursuit["should_seek"]) and adjacent and _can_pay_action_cost(state, capability, move_cost):
         for target_node_id in adjacent[:3]:
             proposals.append(
                 _move_plan(
@@ -3580,9 +3884,12 @@ def _day_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
     current_energy = int((state.get("poulpita") or {}).get("energy") or 0)
     needs_size = any(
         str(objective.get("type") or "") == "increase_size"
-        and int((state.get("objective_progress") or {}).get("size_increases") or 0) < max(1, int(objective.get("count") or 1))
+        and int((state.get("objective_progress") or {}).get("size_increases") or 0) < max(1, int(objective.get("target") or objective.get("count") or 1))
         for objective in state.get("objectives") or []
     )
+    current_size_index = max(0, int((state.get("poulpita") or {}).get("size_index") or 0))
+    courtship_unlock_size = max(0, int(state.get("courtship_min_size_index") if state.get("courtship_min_size_index") is not None else 3))
+    unlocks_courtship = _courtship_objective_pending(state) and current_size_index < courtship_unlock_size <= current_size_index + 1
     if cost is not None and next_size and not (state.get("poulpita") or {}).get("size_upgraded_today") and current_energy - int(cost or 0) >= min_energy_after_growth:
         commands = [{"type": "buy_poulpita_size", "payload": {}}]
         statistics = _plan_statistics(
@@ -3600,8 +3907,12 @@ def _day_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
                 risk_label="low",
                 step_preview=[f"Spend {int(cost or 0)} energy to grow"],
                 expected_resources={"expected_resource_delta": {"energy": -int(cost or 0), "size_index": 1}, **_resource_estimate()},
-                score=90 if needs_size else 55,
-                objective_effect="Progresses size objectives." if needs_size else None,
+                score=(90 if needs_size else 55) + (85 if unlocks_courtship else 0),
+                objective_effect=(
+                    "Unlocks the courtship objective."
+                    if unlocks_courtship
+                    else ("Progresses size objectives." if needs_size else None)
+                ),
                 commands=commands,
                 plan_chain=_plan_chain(["Grow Poulpita"], commands),
                 statistics=statistics,
@@ -3869,14 +4180,17 @@ def _local_orchestrator_day_candidates(state: dict[str, Any]) -> list[dict[str, 
         and not poulpita.get("size_upgraded_today")
         and int(poulpita.get("energy") or 0) - int(cost) >= min_energy
     ):
+        current_size_index = max(0, int(poulpita.get("size_index") or 0))
+        courtship_unlock_size = max(0, int(state.get("courtship_min_size_index") if state.get("courtship_min_size_index") is not None else 3))
+        unlocks_courtship = _courtship_objective_pending(state) and current_size_index < courtship_unlock_size <= current_size_index + 1
         candidates.append(
             _local_orchestrator_candidate(
                 state,
                 plan_id="local_day_grow",
                 title="Grow Poulpita",
                 command={"type": "buy_poulpita_size", "payload": {}},
-                base_score=85,
-                expected_gain=14,
+                base_score=85 + (85 if unlocks_courtship else 0),
+                expected_gain=14 + (70 if unlocks_courtship else 0),
             )
         )
     shared_neurons = int(poulpita.get("neurons") or 0)
@@ -4081,6 +4395,14 @@ def _control_take_followup_value(state: dict[str, Any], ability_id: str) -> floa
             return 70 + float(shelter_return["urgency"])
         return None
 
+    courtship_pursuit = _courtship_pursuit_context(state, current_node_id)
+    if courtship_pursuit["should_seek"]:
+        if _can_pay_action_cost(state, capability, move_cost):
+            return 118 if courtship_pursuit.get("next_node_id") else 82
+        if _can_collect_toward_action_cost(state, capability, move_cost):
+            return 72
+        return None
+
     initiable = [entry for entry in visible if _can_initiate(state, ability_id, entry.get("tile") or {})]
     if initiable:
         if _can_pay_action_cost(state, capability, interact_cost):
@@ -4107,6 +4429,8 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
     compulsory = _compulsory_choices_on_node(state, current_node_id)
     shelter_return = _shelter_return_context(state, current_node_id)
     returning_to_shelter = bool(shelter_return["should_return"] and not compulsory)
+    courtship_pursuit = _courtship_pursuit_context(state, current_node_id)
+    pursuing_courtship = bool(courtship_pursuit["should_seek"] and not compulsory and not returning_to_shelter)
     if phase == "night_idle":
         active_id = ""
     if not active_id:
@@ -4116,7 +4440,7 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
             for ability_id in _all_capability_ids(state)
             if _has_control_take_left(_capability(state, ability_id))
             and any(_can_initiate(state, ability_id, entry.get("tile") or {}) for entry in visible)
-        }
+        } if not pursuing_courtship else set()
         followup_values = {
             ability_id: _control_take_followup_value(state, ability_id)
             for ability_id in _all_capability_ids(state)
@@ -4226,6 +4550,8 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
             is_compulsory = bool(_tile_category(state, tile).get("compulsory_on_same_node"))
             if returning_to_shelter and not is_compulsory:
                 continue
+            if pursuing_courtship and not is_compulsory:
+                continue
             if highest_compulsory_priority is not None and not is_compulsory and priority <= highest_compulsory_priority:
                 continue
             if highest_compulsory_priority is not None and is_compulsory and priority < highest_compulsory_priority:
@@ -4271,6 +4597,8 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
             collect_setup_score = 110
         elif returning_to_shelter and _can_collect_toward_action_cost(state, capability, move_cost):
             collect_setup_score = 75 + float(shelter_return["urgency"])
+        elif pursuing_courtship and _can_collect_toward_action_cost(state, capability, move_cost):
+            collect_setup_score = 90 if courtship_pursuit.get("next_node_id") else 60
         elif active_initiable_entries and _can_collect_toward_action_cost(state, capability, interact_cost):
             collect_setup_score = 65
         elif (
@@ -4297,6 +4625,7 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
         if (
             active_interaction_candidate_count == 0
             and not returning_to_shelter
+            and not pursuing_courtship
             and _can_pay_action_cost(state, capability, draw_cost)
             and (capability.get("draw_pile") or capability.get("discard"))
         ):
@@ -4314,14 +4643,18 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
             )
         if (
             not compulsory
-            and (not visible_initiators or returning_to_shelter)
+            and (not visible_initiators or returning_to_shelter or pursuing_courtship)
             and active_interaction_candidate_count == 0
             and _can_pay_action_cost(state, capability, move_cost)
         ):
             target_nodes = (
                 [shelter_return["next_node_id"]]
                 if returning_to_shelter
-                else ((state.get("map") or {}).get("adjacency") or {}).get(current_node_id, []) or []
+                else (
+                    [courtship_pursuit["next_node_id"]]
+                    if pursuing_courtship and courtship_pursuit.get("next_node_id")
+                    else ((state.get("map") or {}).get("adjacency") or {}).get(current_node_id, []) or []
+                )
             )
             for target_node_id in target_nodes:
                 node_score, _entries, _distance = _node_followup_score(state, str(target_node_id), active_id)
@@ -4330,11 +4663,19 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
                     plan_id=f"local_move_{active_id}_{target_node_id}",
                     title=f"Move to {target_node_id}",
                     command={"type": "move_poulpita", "payload": {"capability_id": active_id, "target_node_id": str(target_node_id)}},
-                    base_score=38 + node_score + (90 + float(shelter_return["urgency"]) if returning_to_shelter else 0),
+                    base_score=(
+                        38
+                        + node_score
+                        + (90 + float(shelter_return["urgency"]) if returning_to_shelter else 0)
+                        + (95 if pursuing_courtship else 0)
+                    ),
                 )
                 if returning_to_shelter:
                     candidate["statistics"]["safe_shelter_route"] = shelter_return["route"]
                     candidate["statistics"]["shelter_return_start"] = shelter_return["return_start"]
+                if pursuing_courtship:
+                    candidate["statistics"]["courtship_route"] = courtship_pursuit.get("route")
+                    candidate["statistics"]["courtship_exploration"] = courtship_pursuit["exploring"]
                 candidates.append(
                     candidate
                 )
