@@ -361,7 +361,7 @@ def run_bot_simulation(
         try:
             next_state, events = reducer._reduce(state, command, user=user, room_id=room_id, room=room)
         except CommandRejection as exc:
-            stop_reason = f"command_rejected:{type(exc).__name__}:{exc}"
+            stop_reason = f"command_rejected:{exc.reason}:{exc.message}"
             break
         if next_state.get("phase") in {PHASE_NIGHT_IDLE, PHASE_NIGHT_ACTION}:
             _mark_game_lost_if_needed(next_state)

@@ -4298,6 +4298,7 @@ def _local_orchestrator_day_candidates(state: dict[str, Any]) -> list[dict[str, 
                 expected_gain=14 + (70 if unlocks_courtship else 0),
             )
         )
+        return candidates
     shared_neurons = int(poulpita.get("neurons") or 0)
     for ability_id in _playable_ability_ids(state):
         capability = _capability(state, ability_id)

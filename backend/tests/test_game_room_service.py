@@ -2343,6 +2343,105 @@ def test_bot_day_plans_include_size_growth_and_ability_upgrades():
     run(scenario())
 
 
+def test_bot_orchestrator_prioritizes_eligible_size_growth_over_other_day_choices():
+    state = _goldfish_state("room_mandatory_bot_growth", level_id="test-level", mode="bots_only")
+    state["phase"] = "day"
+    state["poulpita"]["energy"] = 14
+    state["poulpita"]["neurons"] = 8
+    state["poulpita"]["size_index"] = 0
+    state["poulpita"]["size_upgraded_today"] = False
+    state["tile_catalog"]["poulpita_panel"] = {
+        "sizes": [
+            {"amount": 200, "unit": "mg", "energy_cost": 0},
+            {"amount": 1, "unit": "kg", "energy_cost": 8},
+        ]
+    }
+    state["tile_catalog"]["bot_settings"] = {"min_energy_after_size_upgrade": 4}
+    for capability in state["capabilities"].values():
+        capability["hand_size_upgrades"] = [
+            {"cost_resource": "neurons", "cost": 1, "hand_size_bonus": 1}
+        ]
+
+    candidates = bot_planner._local_orchestrator_day_candidates(state)
+    decision = bot_planner.choose_fast_bot_orchestrator_action(state)
+
+    assert [candidate["commands"][0]["type"] for candidate in candidates] == ["buy_poulpita_size"]
+    assert decision["command"] == {"type": "buy_poulpita_size", "payload": {}}
+
+
+def test_auto_selected_dual_symbol_cards_are_assigned_to_distinct_requirements():
+    state = _goldfish_state("room_dual_symbol_assignment", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "agility"
+    agility = state["capabilities"]["agility"]
+    agility["pa"] = 5
+    agility["actions_taken_this_control"] = 0
+    agility["initiates_event_ids"] = ["mollusc-event"]
+    agility["hand"] = [
+        {
+            "card_id": "dual-card",
+            "interaction_id": "tighten",
+            "interaction_ids": ["tighten", "handle"],
+            "owner_capability_id": "agility",
+            "upgraded": True,
+        },
+        {
+            "card_id": "tighten-card",
+            "interaction_id": "tighten",
+            "interaction_ids": ["tighten"],
+            "owner_capability_id": "agility",
+        },
+    ]
+    current_node_id = state["poulpita"]["node_id"]
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "categories": {"prey": {"id": "prey", "compulsory_on_same_node": False}},
+        "events": {"mollusc-event": {"id": "mollusc-event", "category_id": "prey"}},
+        "tiles": {
+            "mollusc-tile": {
+                "id": "mollusc-tile",
+                "event_id": "mollusc-event",
+                "interaction_ids": ["handle", "tighten"],
+                "counter_attack_interaction_ids": [],
+            }
+        },
+    }
+    state["tiles"] = {
+        current_node_id: [
+            {"instance_id": "mollusc-instance", "tile_id": "mollusc-tile", "face_up": True}
+        ]
+    }
+    service = GameRoomService()
+    user = User(id="backend_bot_simulator", username="Bots", is_admin=True)
+
+    next_state, events = service._reduce(
+        state,
+        {
+            "command_id": "cmd_dual_symbol_interaction",
+            "expected_version": state["version"],
+            "type": "start_interaction",
+            "payload": {
+                "capability_id": "agility",
+                "tile_instance_id": "mollusc-instance",
+                "auto_select_cards": True,
+            },
+        },
+        user=user,
+        room_id=state["room_id"],
+        room={"id": state["room_id"], "mode": "bots_only"},
+    )
+
+    assert events[0]["type"] == "interaction_started"
+    assert {
+        card["card_id"]: card["interaction_id"]
+        for card in next_state["interaction"]["played_cards"]
+    } == {
+        "dual-card": "handle",
+        "tighten-card": "tighten",
+    }
+    assert next_state["capabilities"]["agility"]["hand"] == []
+
+
 def test_start_goldfish_game_initializes_16_node_board():
     async def scenario():
         service, user, room, start = await create_started_room()

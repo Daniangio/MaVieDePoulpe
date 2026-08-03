@@ -1220,6 +1220,38 @@ def _choose_card_interaction(next_state: dict[str, Any], played_cards: list[dict
     return options[0]
 
 
+def _best_card_requirement_assignments(
+    cards: list[dict[str, Any]],
+    required_interaction_ids: list[str],
+) -> list[tuple[dict[str, Any], str]]:
+    best: list[tuple[dict[str, Any], str]] = []
+
+    def search(
+        card_index: int,
+        remaining: list[str],
+        assignments: list[tuple[dict[str, Any], str]],
+    ) -> None:
+        nonlocal best
+        if len(assignments) > len(best):
+            best = list(assignments)
+        if card_index >= len(cards) or len(assignments) + len(cards) - card_index <= len(best):
+            return
+        card = cards[card_index]
+        options = set(_card_interaction_options(card))
+        for requirement_index, interaction_id in enumerate(remaining):
+            if interaction_id not in options:
+                continue
+            search(
+                card_index + 1,
+                remaining[:requirement_index] + remaining[requirement_index + 1 :],
+                [*assignments, (card, interaction_id)],
+            )
+        search(card_index + 1, remaining, assignments)
+
+    search(0, [str(interaction_id) for interaction_id in required_interaction_ids if interaction_id], [])
+    return best
+
+
 def _sync_interaction_cards(next_state: dict[str, Any], capability_id: str, selected_card_ids: list[str]) -> None:
     interaction = next_state.get("interaction") or {}
     capability = next_state.get("capabilities", {}).get(capability_id)
@@ -1246,24 +1278,32 @@ def _sync_interaction_cards(next_state: dict[str, Any], capability_id: str, sele
         or interaction_tile.get("interaction_ids")
         or []
     ) + _counter_attack_requirements(next_state, interaction_tile)
-    hand = []
-    for card in capability.get("hand") or []:
-        if str(card.get("card_id")) in selected:
-            remaining = list(required_ids)
-            for played_card in next_played:
-                played_interaction_id = str(played_card.get("interaction_id") or "")
-                if played_interaction_id in remaining:
-                    remaining.remove(played_interaction_id)
-            chosen_interaction_id = _choose_card_interaction(next_state, next_played, card)
-            if chosen_interaction_id not in remaining:
-                raise ValueError("Cards can only be played for requirements that are still missing.")
-            next_played.append({**card, "interaction_id": chosen_interaction_id, "interaction_ids": _card_interaction_options(card), "capability_id": capability_id})
-        else:
-            hand.append(card)
-    missing = selected - {str(card.get("card_id")) for card in next_played if card.get("capability_id") == capability_id}
+    available_cards = list(capability.get("hand") or [])
+    selected_cards = [card for card in available_cards if str(card.get("card_id") or "") in selected]
+    missing = selected - {str(card.get("card_id") or "") for card in selected_cards}
     if missing:
         raise ValueError("Selected cards must be in this ability hand or already played by it.")
-    capability["hand"] = hand
+    remaining = list(required_ids)
+    for played_card in next_played:
+        played_interaction_id = str(played_card.get("interaction_id") or "")
+        if played_interaction_id in remaining:
+            remaining.remove(played_interaction_id)
+    assignments = _best_card_requirement_assignments(selected_cards, remaining)
+    if len(assignments) != len(selected_cards):
+        raise ValueError("Cards can only be played for requirements that are still missing.")
+    assigned_ids = {str(card.get("card_id") or "") for card, _interaction_id in assignments}
+    capability["hand"] = [
+        card for card in available_cards if str(card.get("card_id") or "") not in assigned_ids
+    ]
+    next_played.extend(
+        {
+            **card,
+            "interaction_id": interaction_id,
+            "interaction_ids": _card_interaction_options(card),
+            "capability_id": capability_id,
+        }
+        for card, interaction_id in assignments
+    )
     interaction["played_cards"] = next_played
 
 
@@ -1273,21 +1313,12 @@ def _auto_selected_interaction_card_ids(next_state: dict[str, Any], capability_i
     if capability is None:
         return []
     remaining = [str(interaction_id) for interaction_id in required_interaction_ids if interaction_id]
-    selected: list[str] = []
     for card in interaction.get("played_cards") or []:
-        if str(card.get("capability_id") or "") == capability_id and card.get("card_id"):
-            selected.append(str(card.get("card_id")))
         played_interaction_id = str(card.get("interaction_id") or "")
         if played_interaction_id in remaining:
             remaining.remove(played_interaction_id)
-    for card in capability.get("hand") or []:
-        if not remaining:
-            break
-        match = next((interaction_id for interaction_id in remaining if interaction_id in _card_interaction_options(card)), None)
-        if match:
-            remaining.remove(match)
-            selected.append(str(card.get("card_id")))
-    return selected
+    assignments = _best_card_requirement_assignments(list(capability.get("hand") or []), remaining)
+    return [str(card.get("card_id") or "") for card, _interaction_id in assignments]
 
 
 def _auto_discard_card_id_for_draw(state: dict[str, Any], capability: dict[str, Any]) -> str:
