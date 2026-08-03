@@ -111,6 +111,60 @@ const shelterData = (entry: any) => {
   };
 };
 
+const specialPowerDescriptions: Record<string, string> = {
+  agility: "Every ability draws one action card.",
+  camouflage: "Move Poulpita to an adjacent node using camouflage.",
+  force: "Remove one required symbol from the next interaction.",
+  propulsion: "Move Poulpita across exactly two connected edges; the destination cannot be the level starting node.",
+  intelligence: "Reveal one hidden tile on a node adjacent to Poulpita.",
+};
+
+const SpecialPowerHint = ({ capability, projection }: { capability: CapabilityProjection | null; projection: GameProjection | null }) => {
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const [popupPosition, setPopupPosition] = useState<{ left: number; top: number } | null>(null);
+  if (!capability) return null;
+  const cost = projection?.tile_catalog?.action_costs?.special_power || {};
+  const description = specialPowerDescriptions[capability.id] || "No special power is configured for this ability.";
+  const showPopup = () => {
+    const rect = buttonRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const halfWidth = 144;
+    setPopupPosition({
+      left: Math.max(halfWidth + 8, Math.min(window.innerWidth - halfWidth - 8, rect.left + rect.width / 2)),
+      top: Math.max(120, rect.top - 8),
+    });
+  };
+  return (
+    <>
+      <button
+        aria-label={`${capability.name} special power`}
+        className="flex h-7 w-7 items-center justify-center rounded-full border border-fuchsia-400 bg-fuchsia-950 text-fuchsia-100 transition hover:bg-fuchsia-900 focus:outline-none focus:ring-2 focus:ring-fuchsia-300"
+        onBlur={() => setPopupPosition(null)}
+        onFocus={showPopup}
+        onMouseEnter={showPopup}
+        onMouseLeave={() => setPopupPosition(null)}
+        ref={buttonRef}
+        type="button"
+      >
+        <Sparkles size={15} />
+      </button>
+      {popupPosition && typeof document !== "undefined" ? createPortal(
+        <div
+          className="pointer-events-none fixed z-[200] w-72 -translate-x-1/2 -translate-y-full rounded-md border border-fuchsia-300 bg-slate-950 p-3 text-left text-xs leading-relaxed text-slate-100 shadow-2xl"
+          style={{ left: popupPosition.left, top: popupPosition.top }}
+        >
+          <strong className="block text-fuchsia-200">{capability.name} special power</strong>
+          <span className="mt-1 block">{description}</span>
+          <span className="mt-2 block text-slate-400">
+            {Number(cost.ap_cost ?? 2)} AP / {Number(cost.neuron_cost ?? 1)} neurons / {Number(cost.time_cost ?? 2)} time
+          </span>
+        </div>,
+        document.body,
+      ) : null}
+    </>
+  );
+};
+
 type ApRollAnimation = {
   capabilityId: string;
   displayedValue: number;
@@ -1472,6 +1526,7 @@ const actionVisual = (step: PlanChainStep, projection: GameProjection) => {
   if (type === "collect_action_points") return { actorId, text: "AP", Icon: CirclePlus, title: "Collect AP" };
   if (type === "move_poulpita") return { actorId, text: String(payload.target_node_id || ""), Icon: MoveRight, title: `Move ${payload.target_node_id || ""}` };
   if (type === "draw_action_card") return { actorId, text: "Draw", Icon: Sparkles, title: "Draw card" };
+  if (type === "use_special_power") return { actorId, text: "Power", Icon: Sparkles, title: "Use special power" };
   if (type === "start_interaction") return { actorId, text: "Fight", Icon: Swords, title: `Interact ${tileNameForInstance(projection, payload.tile_instance_id)}` };
   if (type === "resolve_interaction") return { actorId, text: "OK", Icon: Check, title: "Commit cards" };
   if (type === "fail_interaction") return { actorId, text: "Fail", Icon: X, title: "Fail interaction" };
@@ -1498,6 +1553,8 @@ const compactPlanStepLabel = (step: PlanChainStep, projection: GameProjection) =
       return `${actor} Move ${payload.target_node_id || "?"}`;
     case "draw_action_card":
       return `${actor} Draw`;
+    case "use_special_power":
+      return `${actor} Special power`;
     case "start_interaction":
       return `${actor} Interact ${tileNameForInstance(projection, payload.tile_instance_id)}`;
     case "resolve_interaction":
@@ -2871,7 +2928,10 @@ const GameRoomPage = ({ replayMode = false }: { replayMode?: boolean }) => {
           />
           <div className="rounded-md border border-slate-800 bg-slate-900 p-3">
             <div className="flex items-center justify-between gap-3">
-              <h3 className="text-sm font-semibold text-white">{projection?.phase === "day" ? "Day upgrades" : "Player hand"}</h3>
+              <div className="flex items-center gap-2">
+                <h3 className="text-sm font-semibold text-white">{projection?.phase === "day" ? "Day upgrades" : "Player hand"}</h3>
+                {projection?.phase !== "day" ? <SpecialPowerHint capability={selectedCapability || null} projection={projection} /> : null}
+              </div>
               {discardBeforeDraw ? (
                 <button className="text-xs text-slate-400 hover:text-white" onClick={() => setDiscardBeforeDraw(false)} type="button">
                   Cancel discard

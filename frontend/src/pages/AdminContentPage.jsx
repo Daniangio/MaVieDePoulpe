@@ -157,6 +157,7 @@ const defaultBotSettings = {
   orchestrator_max_candidates: 8,
   max_plans: 3,
   min_energy_after_size_upgrade: 4,
+  special_power_start_night: 4,
   weights: {
     efficiency: 35,
     confidence: 35,
@@ -1230,6 +1231,19 @@ const BotSettingsEditor = ({ botSettings, onSave, busy }) => {
             type="number"
             value={Number(draft.planning_depth_take_controls || 3)}
             onChange={(event) => setDraft((current) => ({ ...current, planning_depth_take_controls: Math.max(1, Math.min(20, Number(event.target.value || 3))) }))}
+          />
+        </label>
+        <label className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3 text-sm">
+          <span className="font-semibold text-teal-950">Special powers from night</span>
+          <span className="mt-1 block text-xs text-slate-500">Bots consider ability powers from this night onward. Default is 4.</span>
+          <input
+            className={`${input} mt-3`}
+            max="20"
+            min="1"
+            step="1"
+            type="number"
+            value={Number(draft.special_power_start_night || 4)}
+            onChange={(event) => setDraft((current) => ({ ...current, special_power_start_night: Math.max(1, Math.min(20, Number(event.target.value || 4))) }))}
           />
         </label>
         <label className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3 text-sm">

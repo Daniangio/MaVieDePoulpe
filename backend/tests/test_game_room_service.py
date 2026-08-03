@@ -3626,6 +3626,143 @@ def test_bot_secures_required_shelter_before_pursuing_courtship():
     assert ready["next_node_id"] == "1B"
 
 
+def test_courtship_support_search_outranks_failure_when_missing_card_is_in_deck():
+    state = _goldfish_state("room_courtship_support_priority", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "propulsion"
+    current_node_id = state["poulpita"]["node_id"]
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "tiles": {
+            "__courtship_token__": {
+                "id": "__courtship_token__",
+                "token_type": "courtship",
+                "interaction_ids": [],
+            }
+        },
+    }
+    state["tiles"] = {
+        current_node_id: [
+            {
+                "instance_id": "courtship-instance",
+                "tile_id": "__courtship_token__",
+                "token_type": "courtship",
+                "face_up": True,
+            }
+        ]
+    }
+    state["interaction"] = {
+        "tile_instance_id": "courtship-instance",
+        "tile_id": "__courtship_token__",
+        "node_id": current_node_id,
+        "initiator_capability_id": "propulsion",
+        "initiator_confirmed": True,
+        "played_cards": [],
+        "courtship_card": {"id": "courtship-card", "name": "Courtship", "interaction_ids": ["analyse"]},
+    }
+    intelligence = state["capabilities"]["intelligence"]
+    intelligence["pa"] = 0
+    intelligence["draw_pile"] = [
+        {"card_id": "analyse-card", "interaction_id": "analyse", "interaction_ids": ["analyse"]}
+    ]
+    intelligence["hand"] = []
+
+    candidates = bot_planner._local_orchestrator_interaction_candidates(state)
+    search = next(candidate for candidate in candidates if candidate["commands"][0]["type"] == "take_control")
+    failure = next(candidate for candidate in candidates if candidate["commands"][0]["type"] == "fail_interaction")
+
+    assert search["commands"][0]["payload"]["capability_id"] == "intelligence"
+    assert search["statistics"]["planner_score"] > failure["statistics"]["planner_score"]
+    assert failure["statistics"]["courtship_failure_penalty"] > 300
+
+
+def test_final_night_continues_toward_pending_courtship_instead_of_ending():
+    state = _goldfish_state("room_final_night_objective_push", level_id="test-level", mode="bots_only")
+    state["map"] = deepcopy(TEST_MAP)
+    state["phase"] = "night_action"
+    state["day_index"] = 5
+    state["max_nights"] = 5
+    state["night_shelter_available_at"] = 16
+    state["night_time_spent"] = 16
+    state["active_capability_id"] = "force"
+    state["poulpita"]["node_id"] = "1A"
+    state["poulpita"]["size_index"] = 2
+    state["courtship_min_size_index"] = 2
+    state["shelters"] = {"1A": {"count": 1, "seashells": 3, "secure": True}}
+    state["objectives"] = [{"id": "courtship", "type": "resolve_courtship"}]
+    state["tiles"] = {node_id: [] for node_id in TEST_MAP["nodes"]}
+    state["tiles"]["1B"] = [
+        {
+            "instance_id": "courtship-visible",
+            "tile_id": "__courtship_token__",
+            "token_type": "courtship",
+            "face_up": True,
+        }
+    ]
+    state["capabilities"]["force"]["pa"] = 5
+    state["capabilities"]["force"]["actions_taken_this_control"] = 0
+
+    candidates = bot_planner._local_orchestrator_night_candidates(state)
+    commands = [bot_planner._orchestrator_command(candidate) for candidate in candidates]
+
+    assert not any(command and command["type"] == "end_night" for command in commands)
+    assert any(
+        command == {"type": "move_poulpita", "payload": {"capability_id": "force", "target_node_id": "1B"}}
+        for command in commands
+    )
+
+
+def test_bot_special_power_unlock_night_and_force_simulation():
+    state = _goldfish_state("room_bot_special_power", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "force"
+    state["day_index"] = 3
+    state["poulpita"]["neurons"] = 3
+    state["capabilities"]["force"]["pa"] = 5
+    state["tile_catalog"]["bot_settings"] = {"special_power_start_night": 4}
+    state["tile_catalog"]["action_costs"] = {
+        "special_power": {"ap_cost": 2, "time_cost": 2, "neuron_cost": 1}
+    }
+    state["tile_catalog"]["tiles"] = {
+        "crab": {"id": "crab", "event_id": "crab-event", "interaction_ids": ["charge", "tighten"]}
+    }
+    current_node_id = state["poulpita"]["node_id"]
+    state["tiles"] = {
+        current_node_id: [{"instance_id": "crab-instance", "tile_id": "crab", "face_up": True}]
+    }
+
+    assert bot_planner._local_special_power_candidates(state, "force") == []
+    state["day_index"] = 4
+
+    candidates = bot_planner._local_special_power_candidates(state, "force")
+
+    assert candidates[0]["commands"][0] == {
+        "type": "use_special_power",
+        "payload": {"capability_id": "force"},
+    }
+    bot_planner._simulate_public_command(state, candidates[0]["commands"][0])
+    assert state["force_reduces_next_interaction"] is True
+    assert state["poulpita"]["neurons"] == 2
+    assert state["capabilities"]["force"]["pa"] == 3
+
+
+def test_neuron_value_declines_as_upgrades_are_purchased():
+    state = _goldfish_state("room_bot_neuron_value", level_id="test-level", mode="bots_only")
+    state["day_index"] = 4
+    capability = state["capabilities"]["force"]
+    capability["hand_size_upgrades"] = [
+        {"type": "hand_size", "cost": 1},
+        {"type": "hand_size", "cost": 1},
+        {"type": "deck_exchange", "cost": 1},
+    ]
+    capability["purchased_hand_size_upgrade_indices"] = []
+    before = bot_planner._weighted_expected_gain(state, {"neurons": 1})
+    capability["purchased_hand_size_upgrade_indices"] = [0, 1, 2]
+    after = bot_planner._weighted_expected_gain(state, {"neurons": 1})
+
+    assert before > after > 0
+
+
 def test_bot_pursues_visible_courtship_after_size_unlock():
     state = _goldfish_state("room_bot_courtship_route", level_id="test-level", mode="bots_only")
     state["map"] = deepcopy(TEST_MAP)

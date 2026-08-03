@@ -17,6 +17,7 @@ BOT_PLAN_TERMINAL_COMMANDS = {
     "move_poulpita",
     "start_interaction",
     "resolve_interaction",
+    "use_special_power",
     "end_day",
 }
 DEFAULT_PLANNING_TAKE_CONTROL_DEPTH = 3
@@ -83,7 +84,7 @@ def _safe_public_command(command: dict[str, Any]) -> dict[str, Any] | None:
         "draw_action_card": {"capability_id", "auto_discard_card"},
         "start_interaction": {"capability_id", "tile_instance_id", "auto_select_cards"},
         "resolve_interaction": {"capability_id", "auto_select_cards", "confirm_only"},
-        "fail_interaction": {"target_node_id"},
+        "fail_interaction": {"target_node_id", "spend_energy_to_retry"},
         "fail_unavailable_compulsory_tile": {"tile_instance_id", "target_node_id"},
         "end_day": set(),
         "end_night": {"capability_id"},
@@ -92,6 +93,7 @@ def _safe_public_command(command: dict[str, Any]) -> dict[str, Any] | None:
         "buy_hand_size_upgrade": {"capability_id", "upgrade_index"},
         "buy_poulpita_size": set(),
         "resolve_surprise_card": {"accept", "capability_id", "auto_select_cards"},
+        "use_special_power": {"capability_id", "tile_instance_id", "target_node_id", "path"},
         "bot_no_actions_available": set(),
     }
     if command_type not in safe_payload_keys:
@@ -274,6 +276,8 @@ def _weighted_expected_gain(state: dict[str, Any], delta: dict[str, Any]) -> flo
             current_shells = _total_team_shells(state)
             shell_delta = float(delta.get(key) or 0)
             score += (_shell_progress_value(current_shells + shell_delta) - _shell_progress_value(current_shells)) * _resource_weight(state, key, fallback)
+        elif key == "neurons":
+            score += float(delta.get(key) or 0) * _resource_weight(state, key, fallback) * _neuron_utility_multiplier(state)
         else:
             score += float(delta.get(key) or 0) * _resource_weight(state, key, fallback)
     return round(score, 2)
@@ -297,6 +301,22 @@ def _total_team_shells(state: dict[str, Any]) -> float:
 def _shell_progress_value(shell_count: float) -> float:
     shell_count = max(0.0, float(shell_count or 0))
     return min(3.0, shell_count) + max(0.0, shell_count - 3.0) * 0.7
+
+
+def _neuron_utility_multiplier(state: dict[str, Any]) -> float:
+    total_upgrades = 0
+    purchased_upgrades = 0
+    for capability in (state.get("capabilities") or {}).values():
+        total_upgrades += len(capability.get("hand_size_upgrades") or [])
+        purchased_upgrades += len(set(capability.get("purchased_hand_size_upgrade_indices") or []))
+    if total_upgrades <= 0:
+        return 0.2
+    remaining_ratio = max(0.0, min(1.0, (total_upgrades - purchased_upgrades) / total_upgrades))
+    multiplier = 0.2 + 0.8 * remaining_ratio
+    special_start = max(1, int(_bot_settings(state).get("special_power_start_night") or 4))
+    if int(state.get("day_index") or 1) >= special_start:
+        multiplier *= 0.8
+    return round(max(0.15, multiplier), 3)
 
 
 def _shell_acquisition_bonus(state: dict[str, Any], expected_delta: dict[str, Any]) -> float:
@@ -323,6 +343,13 @@ def _has_objective(state: dict[str, Any], objective_types: set[str]) -> bool:
 
 def _objective_completed(state: dict[str, Any], objective_type: str) -> bool:
     progress = state.get("objective_progress") or {}
+    if objective_type == "increase_size":
+        targets = [
+            max(1, int(objective.get("target") or 1))
+            for objective in state.get("objectives") or []
+            if str(objective.get("type") or "") == objective_type
+        ]
+        return bool(targets) and int(progress.get("size_increases") or 0) >= max(targets)
     if objective_type == "find_shelter":
         return bool(progress.get("found_shelter"))
     if objective_type == "secure_shelter":
@@ -338,6 +365,21 @@ def _objective_completed(state: dict[str, Any], objective_type: str) -> bool:
         reached = int(progress.get("secured_shelter_return_energy_after_courtship") or 0)
         return bool(targets) and reached >= max(targets)
     return False
+
+
+def _pending_objective_types(state: dict[str, Any]) -> set[str]:
+    return {
+        str(objective.get("type") or "")
+        for objective in state.get("objectives") or []
+        if str(objective.get("type") or "") and not _objective_completed(state, str(objective.get("type") or ""))
+    }
+
+
+def _final_night_objective_push(state: dict[str, Any]) -> bool:
+    return (
+        int(state.get("day_index") or 1) >= int(state.get("max_nights") or 5)
+        and bool(_pending_objective_types(state))
+    )
 
 
 def _current_size_value(state: dict[str, Any]) -> float:
@@ -382,6 +424,7 @@ def _global_state_score_components(state: dict[str, Any]) -> dict[str, float]:
     return {
         "energy": float(poulpita.get("energy") or 0),
         "neurons": float(poulpita.get("neurons") or 0),
+        "neuron_utility": float(poulpita.get("neurons") or 0) * _neuron_utility_multiplier(state),
         "seashells": _shell_progress_value(total_shells),
         "shell_objective_progress": min(3.0, total_shells) / 3.0,
         "carried_shell_reserve": 1.0 if is_night and int(poulpita.get("seashells") or 0) > 0 else 0.0,
@@ -408,7 +451,8 @@ def _global_state_score(state: dict[str, Any]) -> float:
         return 100000.0 if str(state.get("game_outcome") or "") == "won" else -100000.0
     defaults = {
         "energy": 10.0,
-        "neurons": 5.0,
+        "neurons": 0.0,
+        "neuron_utility": 5.0,
         "seashells": 8.0,
         "shell_objective_progress": 30.0,
         "carried_shell_reserve": 12.0,
@@ -431,7 +475,8 @@ def _global_state_score(state: dict[str, Any]) -> float:
     components = _global_state_score_components(state)
     score = 0.0
     for key, fallback in defaults.items():
-        score += float(components.get(key) or 0) * _resource_weight(state, key, fallback)
+        weight_key = "neurons" if key == "neuron_utility" else key
+        score += float(components.get(key) or 0) * _resource_weight(state, weight_key, fallback)
     if state.get("phase") in {"night_idle", "night_action"}:
         current_node_id = str((state.get("poulpita") or {}).get("node_id") or "")
         shelter_distance = _distance_to_closest_shelter(state, current_node_id)
@@ -1254,6 +1299,9 @@ def _plan_statistics(
         elif command_type == "draw_action_card":
             estimated_actions += 1
             estimated_time_steps += _action_cost(state, "draw")["time_cost"]
+        elif command_type == "use_special_power":
+            estimated_actions += 1
+            estimated_time_steps += _action_cost(state, "special_power")["time_cost"]
         elif command_type in {"buy_hand_size_upgrade", "buy_poulpita_size", "end_night", "end_day"}:
             pass
     if not interaction_probabilities:
@@ -1278,6 +1326,7 @@ def _is_action_command(command_type: str) -> bool:
         "draw_action_card",
         "move_poulpita",
         "start_interaction",
+        "use_special_power",
     }
 
 
@@ -1904,6 +1953,44 @@ def _simulate_public_command(state: dict[str, Any], command: dict[str, Any]) -> 
         if drawn_card is not None and drawn_zone:
             capability[drawn_zone] = [card for card in capability.get(drawn_zone) or [] if str(card.get("card_id") or "") != str(drawn_card.get("card_id") or "")]
             capability.setdefault("hand", []).append(drawn_card)
+    elif command_type == "use_special_power" and ability_id:
+        cost = _action_cost(state, "special_power")
+        _simulate_spend_action(state, capability, cost)
+        current_node_id = str((state.get("poulpita") or {}).get("node_id") or "")
+        if ability_id == "intelligence":
+            tile_instance_id = str(payload.get("tile_instance_id") or "")
+            entry = _simulated_tile_entry(state, tile_instance_id)
+            if entry:
+                (entry.get("instance") or {})["face_up"] = True
+        elif ability_id == "agility":
+            for target in (state.get("capabilities") or {}).values():
+                if not target.get("draw_pile") and target.get("discard"):
+                    target["draw_pile"] = list(target.get("discard") or [])
+                    target["discard"] = []
+                if target.get("draw_pile"):
+                    target.setdefault("hand", []).append(target["draw_pile"].pop(0))
+        elif ability_id == "propulsion":
+            path = [str(node_id) for node_id in payload.get("path") or []]
+            if len(path) == 2:
+                state.setdefault("poulpita", {})["previous_node_id"] = current_node_id
+                state["poulpita"]["node_id"] = path[0]
+                _simulate_tile_visibility(state)
+                state["poulpita"]["node_id"] = path[1]
+                state["courtship_blocked_node_id"] = None
+                if _state_has_shelter(state, path[1]):
+                    state.setdefault("objective_progress", {})["found_shelter"] = True
+                _simulate_tile_visibility(state)
+        elif ability_id == "force":
+            state["force_reduces_next_interaction"] = True
+        elif ability_id == "camouflage":
+            target_node_id = str(payload.get("target_node_id") or "")
+            if target_node_id:
+                state.setdefault("poulpita", {})["previous_node_id"] = current_node_id
+                state["poulpita"]["node_id"] = target_node_id
+                state["courtship_blocked_node_id"] = None
+                if _state_has_shelter(state, target_node_id):
+                    state.setdefault("objective_progress", {})["found_shelter"] = True
+                _simulate_tile_visibility(state)
     elif command_type == "resolve_surprise_card":
         card = ((state.get("pending_surprise") or {}).get("card") or {})
         costs = card.get("costs") or []
@@ -1945,7 +2032,9 @@ def _simulate_public_command(state: dict[str, Any], command: dict[str, Any]) -> 
                 "initiator_capability_id": ability_id,
                 "initiator_confirmed": False,
                 "played_cards": [],
+                "requirement_reduction": 1 if state.get("force_reduces_next_interaction") else 0,
             }
+            state["force_reduces_next_interaction"] = False
             if payload.get("auto_select_cards"):
                 _simulate_play_cards_for_requirements(state, ability_id, list((entry.get("tile") or {}).get("interaction_ids") or []))
     elif command_type == "resolve_interaction":
@@ -2634,9 +2723,8 @@ def _missing_interaction_ids_for_open_interaction(state: dict[str, Any], *, incl
     if not entry:
         return []
     tile = entry["tile"]
-    missing = []
     played = list(_played_interactions(state))
-    required_ids = [
+    normal_required_ids = [
         str(interaction_id)
         for interaction_id in (
             ((state.get("interaction") or {}).get("courtship_card") or {}).get("interaction_ids")
@@ -2645,14 +2733,23 @@ def _missing_interaction_ids_for_open_interaction(state: dict[str, Any], *, incl
         )
         if interaction_id
     ]
-    if include_counter_attack and _counter_attack_unlocked(state):
-        required_ids.extend(str(interaction_id) for interaction_id in (tile.get("counter_attack_interaction_ids") or []) if interaction_id)
-    for required_id in required_ids:
+    normal_missing = []
+    for required_id in normal_required_ids:
         if required_id in played:
             played.remove(required_id)
         else:
-            missing.append(required_id)
-    return missing
+            normal_missing.append(required_id)
+    reduction = max(0, int((state.get("interaction") or {}).get("requirement_reduction") or 0))
+    normal_missing = normal_missing[min(reduction, len(normal_missing)):]
+    if not include_counter_attack or not _counter_attack_unlocked(state):
+        return normal_missing
+    counter_missing = []
+    for required_id in (str(interaction_id) for interaction_id in (tile.get("counter_attack_interaction_ids") or []) if interaction_id):
+        if required_id in played:
+            played.remove(required_id)
+        else:
+            counter_missing.append(required_id)
+    return [*normal_missing, *counter_missing]
 
 
 def _missing_support_ids_for_open_interaction(state: dict[str, Any]) -> list[str]:
@@ -4509,12 +4606,22 @@ def _local_orchestrator_interaction_candidates(state: dict[str, Any]) -> list[di
         for capability in (state.get("capabilities") or {}).values()
     )
     control_scarcity_bonus = max(0, 4 - remaining_controls) * 12
+    is_courtship = bool(
+        interaction.get("courtship_card")
+        or str(tile.get("token_type") or "") == "courtship"
+        or str(tile.get("id") or "") == "__courtship_token__"
+    )
+    failure_base_score = 75 - best_search_probability * 35 + late_failure_bonus + control_scarcity_bonus
+    if is_courtship:
+        # A failed courtship can block the level's win path. Exhaust every known
+        # support or draw route before accepting it, even late in the final night.
+        failure_base_score = -260 if search_candidates else -70
     fail_candidate = _local_orchestrator_candidate(
         state,
         plan_id=f"local_fail_{(entry.get('instance') or {}).get('instance_id')}",
         title=f"Fail {_tile_display_name(state, tile)}",
         command=_local_orchestrator_fail_command(state, entry),
-        base_score=75 - best_search_probability * 35 + late_failure_bonus + control_scarcity_bonus,
+        base_score=failure_base_score,
         confidence=1.0,
         expected_gain=failure_gain,
     )
@@ -4522,6 +4629,7 @@ def _local_orchestrator_interaction_candidates(state: dict[str, Any]) -> list[di
     fail_candidate["statistics"]["best_support_search_probability"] = round(best_search_probability, 2)
     fail_candidate["statistics"]["late_night_failure_bonus"] = round(late_failure_bonus, 2)
     fail_candidate["statistics"]["control_scarcity_bonus"] = round(control_scarcity_bonus, 2)
+    fail_candidate["statistics"]["courtship_failure_penalty"] = 335 if is_courtship and search_candidates else (145 if is_courtship else 0)
     return [*search_candidates, fail_candidate]
 
 
@@ -4581,16 +4689,130 @@ def _control_take_followup_value(state: dict[str, Any], ability_id: str) -> floa
     return None
 
 
+def _local_special_power_candidates(state: dict[str, Any], ability_id: str) -> list[dict[str, Any]]:
+    if int(state.get("day_index") or 1) < max(1, int(_bot_settings(state).get("special_power_start_night") or 4)):
+        return []
+    if ability_id != str(state.get("active_capability_id") or ""):
+        return []
+    capability = _capability(state, ability_id)
+    cost = _action_cost(state, "special_power")
+    if _action_slots_left(capability) <= 0 or not _can_pay_action_cost(state, capability, cost):
+        return []
+    current_node_id = str((state.get("poulpita") or {}).get("node_id") or "")
+    adjacency = (state.get("map") or {}).get("adjacency") or {}
+    candidates: list[dict[str, Any]] = []
+    if ability_id == "intelligence":
+        for adjacent_node_id in adjacency.get(current_node_id, []) or []:
+            for instance in (state.get("tiles") or {}).get(str(adjacent_node_id), []) or []:
+                if instance.get("face_up"):
+                    continue
+                candidates.append(
+                    _local_orchestrator_candidate(
+                        state,
+                        plan_id=f"local_special_intelligence_{instance.get('instance_id')}",
+                        title=f"Reveal a tile on {adjacent_node_id}",
+                        command={
+                            "type": "use_special_power",
+                            "payload": {
+                                "capability_id": ability_id,
+                                "tile_instance_id": instance.get("instance_id"),
+                            },
+                        },
+                        base_score=48 + (18 if _courtship_pursuit_context(state).get("exploring") else 0),
+                    )
+                )
+    elif ability_id == "agility":
+        draw_count = sum(
+            1
+            for target in (state.get("capabilities") or {}).values()
+            if target.get("draw_pile") or target.get("discard")
+        )
+        if draw_count:
+            candidates.append(
+                _local_orchestrator_candidate(
+                    state,
+                    plan_id="local_special_agility_draw_all",
+                    title="All abilities draw a card",
+                    command={"type": "use_special_power", "payload": {"capability_id": ability_id}},
+                    base_score=38 + draw_count * 8,
+                    expected_gain=draw_count * 2,
+                )
+            )
+    elif ability_id == "propulsion":
+        starting_node_id = str(state.get("poulpita_starting_node_id") or "")
+        seen_paths: set[tuple[str, str]] = set()
+        for middle_node_id in adjacency.get(current_node_id, []) or []:
+            for target_node_id in adjacency.get(str(middle_node_id), []) or []:
+                path = (str(middle_node_id), str(target_node_id))
+                if path in seen_paths or path[1] == starting_node_id:
+                    continue
+                seen_paths.add(path)
+                node_score, _entries, _distance = _node_followup_score(state, path[1], ability_id)
+                candidates.append(
+                    _local_orchestrator_candidate(
+                        state,
+                        plan_id=f"local_special_propulsion_{path[0]}_{path[1]}",
+                        title=f"Propel through {path[0]} to {path[1]}",
+                        command={"type": "use_special_power", "payload": {"capability_id": ability_id, "path": list(path)}},
+                        base_score=58 + node_score,
+                    )
+                )
+    elif ability_id == "force":
+        if not state.get("force_reduces_next_interaction"):
+            visible = _visible_current_tiles(state)
+            requirement_count = max(
+                (len((entry.get("tile") or {}).get("interaction_ids") or []) for entry in visible),
+                default=0,
+            )
+            compulsory = any(
+                _tile_category(state, entry.get("tile") or {}).get("compulsory_on_same_node")
+                for entry in visible
+            )
+            if requirement_count:
+                candidates.append(
+                    _local_orchestrator_candidate(
+                        state,
+                        plan_id="local_special_force_reduce",
+                        title="Reduce the next interaction requirement",
+                        command={"type": "use_special_power", "payload": {"capability_id": ability_id}},
+                        base_score=48 + requirement_count * 10 + (35 if compulsory else 0),
+                    )
+                )
+    elif ability_id == "camouflage":
+        for target_node_id in adjacency.get(current_node_id, []) or []:
+            node_score, _entries, _distance = _node_followup_score(state, str(target_node_id), ability_id)
+            candidates.append(
+                _local_orchestrator_candidate(
+                    state,
+                    plan_id=f"local_special_camouflage_{target_node_id}",
+                    title=f"Camouflage move to {target_node_id}",
+                    command={
+                        "type": "use_special_power",
+                        "payload": {"capability_id": ability_id, "target_node_id": str(target_node_id)},
+                    },
+                    base_score=36 + node_score,
+                )
+            )
+    return candidates
+
+
 def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str, Any]]:
     candidates = []
     phase = str(state.get("phase") or "")
     active_id = str(state.get("active_capability_id") or "")
     current_node_id = str((state.get("poulpita") or {}).get("node_id") or "")
     compulsory = _compulsory_choices_on_node(state, current_node_id)
+    final_objective_push = _final_night_objective_push(state)
     shelter_return = _shelter_return_context(state, current_node_id)
     returning_to_shelter = bool(shelter_return["should_return"] and not compulsory)
     courtship_pursuit = _courtship_pursuit_context(state, current_node_id)
-    pursuing_courtship = bool(courtship_pursuit["should_seek"] and not compulsory and not returning_to_shelter)
+    pursuing_courtship = bool(
+        courtship_pursuit["should_seek"]
+        and not compulsory
+        and (not returning_to_shelter or final_objective_push)
+    )
+    if pursuing_courtship and final_objective_push:
+        returning_to_shelter = False
     if phase == "night_idle":
         active_id = ""
     unavailable_compulsory = _unavailable_compulsory_entries(state, compulsory)
@@ -4698,7 +4920,7 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
 
     capability = _capability(state, active_id)
     action_slot = _action_slots_left(capability) > 0
-    if _can_end_night_now(state):
+    if _can_end_night_now(state) and not final_objective_push:
         return [
             _local_orchestrator_candidate(
                 state,
@@ -4768,6 +4990,9 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
             candidate["statistics"]["initiative_change_penalty"] = team_penalty
             candidates.append(candidate)
             active_interaction_candidate_count += 1
+
+    if not compulsory or active_id == "force":
+        candidates.extend(_local_special_power_candidates(state, active_id))
 
     active_can_address_compulsory = not compulsory or active_can_initiate_compulsory
     if action_slot and active_can_address_compulsory:
