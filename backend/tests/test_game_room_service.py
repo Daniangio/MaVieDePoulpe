@@ -1,6 +1,10 @@
 import asyncio
+from copy import deepcopy
 import pytest
 
+import backend.app.bots.planner as bot_planner
+import backend.app.bot_simulation_service as bot_simulation_service
+from backend.app.bots.planner import choose_bot_orchestrator_action
 from backend.app.game_room_service import (
     DEFAULT_ACTIVE_CAPABILITY_ID,
     GameWorker,
@@ -129,7 +133,7 @@ def explicit_test_map(monkeypatch):
         "backend.app.game_room_service.get_game_content_catalog",
         lambda: {"tiles": {}, "events": {}, "interactions": {}},
     )
-    monkeypatch.setattr("backend.app.game_room_service.random.randint", lambda _min, _max: 1)
+    monkeypatch.setattr("backend.app.game_room_service.random.choice", lambda values: values[0])
 
 
 def run(coro):
@@ -192,6 +196,41 @@ async def prepare_active_capability_with_ap(service, user, room):
         payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID},
     )
     return control, collect
+
+
+def test_collect_ap_uses_configured_die_sides(monkeypatch):
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state.setdefault("tile_catalog", {}).setdefault("poulpita_panel", {})["ap_die_sides"] = [0, 2, 2, 8]
+        monkeypatch.setattr("backend.app.game_room_service.random.choice", lambda sides: sides[-1])
+
+        control = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_custom_die_control",
+            expected_version=1,
+            command_type="take_control",
+            payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID},
+        )
+        initial_ap = int(control["projection"]["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["pa"])
+        collected = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_custom_die_collect",
+            expected_version=2,
+            command_type="collect_action_points",
+            payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID},
+        )
+
+        assert collected["ok"] is True
+        assert collected["events"][0]["amount"] == 8
+        assert collected["events"][0]["die_sides"] == [0, 2, 2, 8]
+        assert collected["projection"]["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["pa"] == initial_ap + 8
+
+    run(scenario())
 
 
 def test_room_creation_returns_setup_state():
@@ -271,6 +310,437 @@ def test_solo_with_bots_rejects_intelligence_as_human_seat():
 
         with pytest.raises(ValueError):
             await service.create_room(user=user, mode="solo_with_bots", game_type="goldfish", human_ability_id="intelligence")
+
+    run(scenario())
+
+
+def test_bots_only_assigns_all_player_abilities_to_bots():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+
+        room = await service.create_room(user=user, mode="bots_only", game_type="goldfish")
+        projection = await service.get_projection(room_id=room["id"], user=user)
+
+        assert room["mode"] == "bots_only"
+        assert projection["mode"] == "bots_only"
+        assert projection["bot_config"]["human_ability_id"] is None
+        assert {
+            capability_id
+            for capability_id, capability in projection["capabilities"].items()
+            if capability.get("controller_type") == "bot"
+        } == {"agility", "camouflage", "force", "propulsion"}
+        assert projection["capabilities"]["intelligence"]["controller_type"] == "shared"
+
+    run(scenario())
+
+
+def test_bots_only_orchestrator_simulates_and_executes_one_real_action():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+        room = await service.create_room(user=user, mode="bots_only", game_type="goldfish")
+        await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_start_bots_only",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "goldfish",
+                "expected_version": 0,
+                "type": "start_goldfish_game",
+                "payload": {},
+            },
+        )
+        state = service._memory_states[room["id"]]
+        state["tile_catalog"]["bot_settings"] = {
+            "planning_depth_take_controls": 1,
+            "orchestrator_rollout_take_controls": 1,
+            "orchestrator_rollouts_per_plan": 1,
+            "orchestrator_sampling_temperature": 0.5,
+            "max_plans": 1,
+        }
+
+        result = await service.execute_bot_orchestrator_step(room_id=room["id"], user=user)
+
+        assert result["ok"] is True
+        assert result["status"] == "action_executed"
+        assert result["decision"]["settings"]["rollout_take_controls"] == 1
+        assert result["decision"]["command"]["type"] == "take_control"
+        assert result["projection"]["version"] == 2
+        assert result["projection"]["active_capability_id"] in {"agility", "camouflage", "force", "propulsion", "intelligence"}
+        assert len(result["decision"]["evaluated_plans"]) >= 1
+
+    run(scenario())
+
+
+def test_backend_only_bot_simulation_persists_compact_replay(tmp_path, monkeypatch):
+    monkeypatch.setattr(bot_simulation_service, "REPLAYS_ROOT", tmp_path)
+    monkeypatch.setattr(bot_simulation_service, "get_level_config", lambda level_id: TEST_LEVEL)
+
+    summaries = bot_simulation_service.run_bot_simulation_batch(
+        level_id="test-level",
+        game_count=1,
+        max_steps=10,
+        seed=123,
+    )
+
+    assert len(summaries) == 1
+    replay = bot_simulation_service.get_bot_replay(summaries[0]["id"])
+    assert summaries[0]["status"] == "completed"
+    assert replay["seed"] == 123
+    assert replay["frames"][0]["command"] is None
+    assert replay["map"]["id"] == "test-map"
+    assert "map" not in replay["frames"][0]["projection"]
+    assert "tile_catalog" not in replay["frames"][0]["projection"]
+    assert replay["metadata"]["steps"] == len(replay["frames"]) - 1
+    assert replay["progress"]["status"] == "completed"
+    assert replay["progress"]["percent"] == 100
+    assert replay["progress"]["phase_label"]
+    assert "neurons" in replay["progress"]
+    assert "seashells" in replay["progress"]
+
+    bot_simulation_service.delete_bot_replay(replay["id"])
+    assert bot_simulation_service.list_bot_replays() == []
+
+
+def test_background_bot_simulations_are_listed_immediately_as_queued(tmp_path, monkeypatch):
+    monkeypatch.setattr(bot_simulation_service, "REPLAYS_ROOT", tmp_path)
+    monkeypatch.setattr(bot_simulation_service, "get_level_config", lambda level_id: TEST_LEVEL)
+    worker_started = bot_simulation_service.threading.Event()
+    release_worker = bot_simulation_service.threading.Event()
+
+    def paused_worker(_instances):
+        worker_started.set()
+        release_worker.wait(timeout=2)
+
+    monkeypatch.setattr(bot_simulation_service, "_run_background_batch", paused_worker)
+
+    summaries = bot_simulation_service.start_bot_simulation_batch(
+        level_id="test-level",
+        game_count=2,
+        max_steps=50,
+        seed=500,
+    )
+    assert worker_started.wait(timeout=1)
+    listed = bot_simulation_service.list_bot_replays()
+
+    assert len(summaries) == 2
+    assert {summary["status"] for summary in summaries} == {"queued"}
+    assert {summary["status"] for summary in listed} == {"queued"}
+    assert {summary["seed"] for summary in listed} == {500, 501}
+    assert all(summary["progress"]["phase_label"] == "Queued" for summary in listed)
+    release_worker.set()
+
+
+def test_backend_simulation_reshuffles_an_initial_no_action_layout(tmp_path, monkeypatch):
+    monkeypatch.setattr(bot_simulation_service, "REPLAYS_ROOT", tmp_path)
+    monkeypatch.setattr(bot_simulation_service, "get_level_config", lambda level_id: TEST_LEVEL)
+    playable_state = _goldfish_state("simulation_template", level_id="test-level", mode="bots_only")
+    dead_state = deepcopy(playable_state)
+    for capability in dead_state["capabilities"].values():
+        capability["max_control_takes_per_night"] = 0
+    generated_states = [dead_state, playable_state]
+
+    def generate_state(*_args, **_kwargs):
+        return deepcopy(generated_states.pop(0) if generated_states else playable_state)
+
+    monkeypatch.setattr(bot_simulation_service, "_goldfish_state", generate_state)
+
+    summary = bot_simulation_service.run_bot_simulation(
+        level_id="test-level",
+        seed=700,
+        max_steps=10,
+    )
+    replay = bot_simulation_service.get_bot_replay(summary["id"])
+
+    assert replay["metadata"]["setup_rerolls"] == 1
+    assert replay["frames"][1]["command"]["type"] != "bot_no_actions_available"
+    assert not (summary["outcome"] == "lost" and summary["steps"] == 1)
+
+
+def test_bots_only_orchestrator_marks_an_early_shelter_dead_end_as_lost():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+        room = await service.create_room(user=user, mode="bots_only", game_type="goldfish")
+        await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_start_bots_only_dead_end",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "goldfish",
+                "expected_version": 0,
+                "type": "start_goldfish_game",
+                "payload": {},
+            },
+        )
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = DEFAULT_ACTIVE_CAPABILITY_ID
+        state["night_time_spent"] = 0
+        current_node_id = state["poulpita"]["node_id"]
+        state["shelters"][current_node_id] = {"count": 1, "seashells": 0, "secure": False}
+        for capability in state["capabilities"].values():
+            capability["control_takes_this_night"] = capability["max_control_takes_per_night"]
+        active = state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]
+        active["actions_taken_this_control"] = active["max_actions_per_control"]
+
+        result = await service.execute_bot_orchestrator_step(room_id=room["id"], user=user)
+        game_result = await service.get_result(room_id=room["id"], user_id=user.id)
+
+        assert result["ok"] is True
+        assert result["projection"]["phase"] == "game_over"
+        assert service._memory_states[room["id"]]["game_over_reason"] == "no_controls_or_actions"
+        assert game_result["outcome"] == "lost"
+
+    run(scenario())
+
+
+def test_bots_only_orchestrator_marks_unaffordable_action_dead_end_as_lost():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+        room = await service.create_room(user=user, mode="bots_only", game_type="goldfish")
+        await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_start_unaffordable_dead_end",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "goldfish",
+                "expected_version": 0,
+                "type": "start_goldfish_game",
+                "payload": {},
+            },
+        )
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "force"
+        current_node_id = state["poulpita"]["node_id"]
+        state["map"]["adjacency"][current_node_id] = []
+        state["poulpita"]["neurons"] = 0
+        state["tile_catalog"]["action_costs"] = {
+            "gain_ap": {"ap_cost": 0, "time_cost": 0, "neuron_cost": 1},
+        }
+        for ability_id, capability in state["capabilities"].items():
+            capability["hand"] = []
+            capability["draw_pile"] = []
+            capability["discard"] = []
+            if ability_id != "force":
+                capability["control_takes_this_night"] = capability["max_control_takes_per_night"]
+
+        result = await service.execute_bot_orchestrator_step(room_id=room["id"], user=user)
+
+        assert result["ok"] is True
+        assert result["decision"]["command"]["type"] == "bot_no_actions_available"
+        assert result["projection"]["phase"] == "game_over"
+        assert service._memory_states[room["id"]]["game_over_reason"] == "no_controls_or_actions"
+
+    run(scenario())
+
+
+def test_bot_no_actions_command_is_rejected_while_another_control_take_remains():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+        room = await service.create_room(user=user, mode="bots_only", game_type="goldfish")
+        await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_start_false_dead_end",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "goldfish",
+                "expected_version": 0,
+                "type": "start_goldfish_game",
+                "payload": {},
+            },
+        )
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "intelligence"
+        active = state["capabilities"]["intelligence"]
+        active["actions_taken_this_control"] = active["max_actions_per_control"]
+        state["capabilities"]["force"]["control_takes_this_night"] = 0
+
+        result = await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_false_dead_end",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "bot_orchestrator",
+                "expected_version": state["version"],
+                "type": "bot_no_actions_available",
+                "payload": {},
+            },
+        )
+
+        assert result["ok"] is False
+        assert result["reason"] == "bot_actions_still_available"
+        assert service._memory_states[room["id"]]["phase"] == "night_action"
+
+    run(scenario())
+
+
+def test_bot_orchestrator_rollouts_do_not_mutate_authoritative_state():
+    state = _goldfish_state(
+        "room_bot_rollout_copy",
+        level_id="test-level",
+        mode="bots_only",
+        bot_config={
+            "mode": "bots_only",
+            "human_ability_id": None,
+            "controllers": [
+                {"ability_id": capability_id, "controller_type": "bot", "seat_id": f"bot_{capability_id}"}
+                for capability_id in ["agility", "camouflage", "force", "propulsion"]
+            ]
+            + [{"ability_id": "intelligence", "controller_type": "shared", "seat_id": "shared_intelligence"}],
+        },
+    )
+    state["tile_catalog"]["bot_settings"] = {
+        "planning_depth_take_controls": 1,
+        "orchestrator_rollout_take_controls": 1,
+        "orchestrator_rollouts_per_plan": 1,
+        "max_plans": 1,
+    }
+    authoritative_snapshot = deepcopy(state)
+
+    decision = choose_bot_orchestrator_action(state)
+
+    assert decision["status"] == "selected"
+    assert decision["command"]["type"] == "take_control"
+    assert state == authoritative_snapshot
+
+
+def test_bot_orchestrator_does_not_generate_the_detailed_plan_tree(monkeypatch):
+    state = _goldfish_state(
+        "room_bot_local_processor",
+        level_id="test-level",
+        mode="bots_only",
+        bot_config={
+            "mode": "bots_only",
+            "human_ability_id": None,
+            "controllers": [
+                {"ability_id": capability_id, "controller_type": "bot", "seat_id": f"bot_{capability_id}"}
+                for capability_id in ["agility", "camouflage", "force", "propulsion"]
+            ]
+            + [{"ability_id": "intelligence", "controller_type": "shared", "seat_id": "shared_intelligence"}],
+        },
+    )
+    state["tile_catalog"]["bot_settings"] = {
+        "orchestrator_rollout_take_controls": 1,
+        "orchestrator_rollouts_per_plan": 1,
+        "orchestrator_max_candidates": 5,
+    }
+
+    monkeypatch.setattr(
+        bot_planner,
+        "generate_bot_plan_status",
+        lambda _state: (_ for _ in ()).throw(AssertionError("Detailed planner must not run in local bot simulation.")),
+    )
+
+    decision = choose_bot_orchestrator_action(state)
+
+    assert decision["status"] == "selected"
+    assert decision["planner_debug"]["processor"] == "local"
+
+
+def test_bot_orchestrator_follows_plan_commands_before_replanning(monkeypatch):
+    state = _goldfish_state(
+        "room_bot_precise_rollout",
+        level_id="test-level",
+        mode="bots_only",
+        bot_config={
+            "mode": "bots_only",
+            "human_ability_id": None,
+            "controllers": [
+                {"ability_id": capability_id, "controller_type": "bot", "seat_id": f"bot_{capability_id}"}
+                for capability_id in ["agility", "camouflage", "force", "propulsion"]
+            ]
+            + [{"ability_id": "intelligence", "controller_type": "shared", "seat_id": "shared_intelligence"}],
+        },
+    )
+    root = {
+        "plan_id": "precise_root",
+        "title": "Precise root",
+        "commands": [
+            {"type": "take_control", "payload": {"capability_id": "agility"}},
+            {"type": "collect_action_points", "payload": {"capability_id": "agility"}},
+        ],
+        "statistics": {"planner_score": 10, "pareto_axes": {"expected_gain": 1}},
+    }
+    continuation = {
+        "plan_id": "next_control",
+        "title": "Next control",
+        "commands": [{"type": "take_control", "payload": {"capability_id": "force"}}],
+        "statistics": {"planner_score": 10, "pareto_axes": {"expected_gain": 1}},
+    }
+    planner_calls = 0
+
+    def generated_status(_state):
+        nonlocal planner_calls
+        planner_calls += 1
+        return {"proposals": [continuation], "message": ""}
+
+    monkeypatch.setattr(bot_planner, "_local_orchestrator_candidates", lambda next_state: generated_status(next_state)["proposals"])
+
+    rollout = bot_planner._simulate_orchestrator_rollout(
+        state,
+        root_proposal=root,
+        horizon=1,
+        temperature=1,
+        seed="precise",
+    )
+
+    assert [step["command"]["type"] for step in rollout["path"]] == [
+        "take_control",
+        "collect_action_points",
+    ]
+    assert planner_calls == 1
+    assert rollout["replans"] == 1
+    assert rollout["stop_reason"] == "initiative horizon reached"
+
+
+def test_bots_only_rejects_manual_game_commands_after_start():
+    async def scenario():
+        service = GameRoomService()
+        user = User(id="user_1", username="Player One")
+        room = await service.create_room(user=user, mode="bots_only", game_type="goldfish")
+        await service.enqueue_game_command(
+            room_id=room["id"],
+            user=user,
+            command={
+                "command_id": "cmd_start_bots_only_manual_rejection",
+                "room_id": room["id"],
+                "actor_user_id": user.id,
+                "actor_seat_id": "goldfish",
+                "expected_version": 0,
+                "type": "start_goldfish_game",
+                "payload": {},
+            },
+        )
+
+        rejected = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_manual_take_control",
+            expected_version=1,
+            command_type="take_control",
+            payload={"capability_id": "agility"},
+        )
+
+        assert rejected["ok"] is False
+        assert rejected["reason"] == "bots_only_room"
+        assert rejected["current_version"] == 1
 
     run(scenario())
 
@@ -374,7 +844,7 @@ def test_execute_bot_plan_runs_only_next_command_through_reducer():
         assert [entry["type"] for entry in result["command_results"]] == ["take_control"]
         assert result["projection"]["active_capability_id"] == "agility"
         assert result["projection"]["version"] == 2
-        assert result["projection"]["capabilities"]["agility"]["pa"] == 0
+        assert result["projection"]["capabilities"]["agility"]["pa"] == 5
 
     run(scenario())
 
@@ -501,7 +971,7 @@ def test_bot_plans_after_surprise_can_take_control_for_camouflage_forced_tile():
     run(scenario())
 
 
-def test_bot_plans_keep_current_active_plan_and_show_take_control_alternatives():
+def test_bot_plans_keep_current_active_control_until_actions_are_exhausted():
     async def scenario():
         service = GameRoomService()
         user = User(id="user_1", username="Player One")
@@ -530,15 +1000,675 @@ def test_bot_plans_keep_current_active_plan_and_show_take_control_alternatives()
 
         assert plans["status"] == "awaiting_selection"
         assert "collect_force" in plan_ids
-        assert any(plan_id.startswith("take_control_collect_") for plan_id in plan_ids)
+        assert not any(
+            (plan.get("plan_chain") or [{}])[0].get("public_command", {}).get("type") == "take_control"
+            for plan in plans["proposals"]
+        )
         active_plan = next(plan for plan in plans["proposals"] if plan["plan_id"] == "collect_force")
-        alternative_plan = next(plan for plan in plans["proposals"] if plan["plan_id"].startswith("take_control_collect_"))
-        assert active_plan["statistics"]["efficiency"] >= alternative_plan["statistics"]["efficiency"]
+        assert active_plan["statistics"]["recommended_active_ability_id"] == "force"
+        assert active_plan["proposer_ability_id"] != "force"
+
+        state["capabilities"]["force"]["actions_taken_this_control"] = state["capabilities"]["force"]["max_actions_per_control"]
+        exhausted = bot_planner.generate_bot_plan_status(state)
+
+        assert any(
+            (plan.get("commands") or [{}])[0].get("type") == "take_control"
+            for plan in exhausted["proposals"]
+        )
 
     run(scenario())
 
 
-def test_forced_current_tile_reports_manual_blocker_instead_of_empty_plans():
+def test_local_orchestrator_switches_control_only_without_active_actions():
+    state = _goldfish_state("room_local_active", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "force"
+    state["capabilities"]["force"]["pa"] = 2
+    state["capabilities"]["force"]["actions_taken_this_control"] = 0
+
+    active_candidates = bot_planner._local_orchestrator_night_candidates(state)
+
+    assert active_candidates
+    assert all(
+        (candidate.get("commands") or [{}])[0].get("type") != "take_control"
+        for candidate in active_candidates
+    )
+
+    state["capabilities"]["force"]["actions_taken_this_control"] = state["capabilities"]["force"]["max_actions_per_control"]
+    exhausted_candidates = bot_planner._local_orchestrator_night_candidates(state)
+
+    assert exhausted_candidates
+    assert all(
+        (candidate.get("commands") or [{}])[0].get("type") == "take_control"
+        for candidate in exhausted_candidates
+    )
+
+
+def test_local_orchestrator_switches_to_compulsory_initiator_with_immediate_followup():
+    state = _goldfish_state("room_required_initiator", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "force"
+    current_node_id = state["poulpita"]["node_id"]
+    for ability_id, capability in state["capabilities"].items():
+        capability["initiates_event_ids"] = ["threat-event"] if ability_id == "camouflage" else []
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "categories": {"threat": {"id": "threat", "name": "Threat", "compulsory_on_same_node": True}},
+        "events": {"threat-event": {"id": "threat-event", "name": "Big fish", "category_id": "threat"}},
+        "tiles": {
+            "threat-tile": {
+                "id": "threat-tile",
+                "event_id": "threat-event",
+                "priority": 5,
+                "interaction_ids": [],
+            }
+        },
+    }
+    state["tiles"] = {
+        current_node_id: [{"instance_id": "threat-instance", "tile_id": "threat-tile", "face_up": True}]
+    }
+
+    candidates = bot_planner._local_orchestrator_night_candidates(state)
+
+    assert [candidate["commands"][0] for candidate in candidates] == [
+        {"type": "take_control", "payload": {"capability_id": "camouflage"}}
+    ]
+    simulated = deepcopy(state)
+    bot_planner._simulate_public_command(simulated, candidates[0]["commands"][0])
+    followups = bot_planner._local_orchestrator_night_candidates(simulated)
+    assert followups
+    assert followups[0]["commands"][0]["type"] == "start_interaction"
+
+
+def test_local_orchestrator_uses_active_fallback_before_switching_control():
+    state = _goldfish_state("room_active_fallback", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "force"
+    current_node_id = state["poulpita"]["node_id"]
+    state["map"]["adjacency"][current_node_id] = []
+    for capability in state["capabilities"].values():
+        capability["hand"] = []
+        capability["draw_pile"] = []
+        capability["discard"] = []
+
+    candidates = bot_planner._local_orchestrator_night_candidates(state)
+
+    assert [candidate["commands"][0] for candidate in candidates] == [
+        {"type": "collect_action_points", "payload": {"capability_id": "force"}}
+    ]
+
+
+def test_local_orchestrator_fails_unassigned_compulsory_tile_instead_of_switching_controls():
+    state = _goldfish_state("room_unassigned_compulsory", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "intelligence"
+    active = state["capabilities"]["intelligence"]
+    active["actions_taken_this_control"] = active["max_actions_per_control"]
+    current_node_id = state["poulpita"]["node_id"]
+    for capability in state["capabilities"].values():
+        capability["initiates_event_ids"] = []
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "categories": {"threat": {"id": "threat", "name": "Threat", "compulsory_on_same_node": True}},
+        "events": {"moray": {"id": "moray", "name": "Moray", "category_id": "threat"}},
+        "tiles": {"moray-tile": {"id": "moray-tile", "event_id": "moray", "priority": 6, "interaction_ids": []}},
+    }
+    state["tiles"] = {
+        current_node_id: [{"instance_id": "moray-instance", "tile_id": "moray-tile", "face_up": True}]
+    }
+
+    candidates = bot_planner._local_orchestrator_night_candidates(state)
+    commands = [candidate["commands"][0] for candidate in candidates]
+
+    assert commands == [
+        {
+            "type": "fail_unavailable_compulsory_tile",
+            "payload": {"tile_instance_id": "moray-instance"},
+        }
+    ]
+
+
+def test_exhausted_compulsory_initiator_applies_failure_once_per_night():
+    state = _goldfish_state("room_exhausted_compulsory", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "intelligence"
+    current_node_id = state["poulpita"]["node_id"]
+    for ability_id, capability in state["capabilities"].items():
+        capability["initiates_event_ids"] = ["moray"] if ability_id == "force" else []
+    force = state["capabilities"]["force"]
+    force["control_takes_this_night"] = force["max_control_takes_per_night"]
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "categories": {"threat": {"id": "threat", "compulsory_on_same_node": True}},
+        "events": {"moray": {"id": "moray", "category_id": "threat"}},
+        "tiles": {
+            "moray-tile": {
+                "id": "moray-tile",
+                "event_id": "moray",
+                "priority": 6,
+                "interaction_ids": ["hide"],
+                "failure_effects": [
+                    {"type": "lose_energy", "amount": 2},
+                    {"type": "keep_tile"},
+                ],
+            }
+        },
+    }
+    state["tiles"] = {
+        current_node_id: [{"instance_id": "moray-instance", "tile_id": "moray-tile", "face_up": True}]
+    }
+    starting_energy = state["poulpita"]["energy"]
+    service = GameRoomService()
+    user = User(id="bot_orchestrator", username="Bots")
+
+    next_state, events = service._reduce(
+        state,
+        {
+            "command_id": "cmd_fail_exhausted",
+            "expected_version": state["version"],
+            "type": "fail_unavailable_compulsory_tile",
+            "payload": {"tile_instance_id": "moray-instance"},
+        },
+        user=user,
+        room_id=state["room_id"],
+        room={"id": state["room_id"], "mode": "bots_only"},
+    )
+
+    assert next_state["poulpita"]["energy"] == starting_energy - 2
+    assert next_state["tiles"][current_node_id][0]["auto_failed_day_index"] == next_state["day_index"]
+    assert bot_planner._compulsory_choices_on_node(next_state, current_node_id) == []
+    assert all(
+        candidate["commands"][0]["type"] != "fail_unavailable_compulsory_tile"
+        for candidate in bot_planner._local_orchestrator_night_candidates(next_state)
+    )
+    next_state["day_index"] += 1
+    assert [
+        entry["instance"]["instance_id"]
+        for entry in bot_planner._compulsory_choices_on_node(next_state, current_node_id)
+    ] == ["moray-instance"]
+    assert events[0]["type"] == "interaction_failed"
+    assert events[0]["reason"] == "initiator_initiatives_exhausted"
+
+
+def test_optional_tile_is_excluded_when_its_only_initiator_has_no_initiative():
+    state = _goldfish_state("room_exhausted_optional", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "intelligence"
+    current_node_id = state["poulpita"]["node_id"]
+    for ability_id, capability in state["capabilities"].items():
+        capability["initiates_event_ids"] = ["crab"] if ability_id == "force" else []
+    force = state["capabilities"]["force"]
+    force["control_takes_this_night"] = force["max_control_takes_per_night"]
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "categories": {"prey": {"id": "prey", "compulsory_on_same_node": False}},
+        "events": {"crab": {"id": "crab", "category_id": "prey"}},
+        "tiles": {"crab-tile": {"id": "crab-tile", "event_id": "crab", "interaction_ids": []}},
+    }
+    state["tiles"] = {
+        current_node_id: [{"instance_id": "crab-instance", "tile_id": "crab-tile", "face_up": True}]
+    }
+
+    candidates = bot_planner._local_orchestrator_night_candidates(state)
+    commands = [candidate["commands"][0] for candidate in candidates]
+
+    assert any(command["type"] == "move_poulpita" for command in commands)
+    assert all(command["type"] != "start_interaction" for command in commands)
+    assert {command.get("payload", {}).get("capability_id") for command in commands} <= {"intelligence"}
+
+
+def test_destination_with_unavailable_compulsory_initiator_has_extreme_route_penalty():
+    state = _goldfish_state("room_exhausted_route", level_id="test-level", mode="bots_only")
+    for ability_id, capability in state["capabilities"].items():
+        capability["initiates_event_ids"] = ["moray"] if ability_id == "force" else []
+    force = state["capabilities"]["force"]
+    force["control_takes_this_night"] = force["max_control_takes_per_night"]
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "categories": {"threat": {"id": "threat", "compulsory_on_same_node": True}},
+        "events": {"moray": {"id": "moray", "category_id": "threat"}},
+        "tiles": {"moray-tile": {"id": "moray-tile", "event_id": "moray", "interaction_ids": []}},
+    }
+    state["tiles"] = {
+        "1B": [{"instance_id": "moray-instance", "tile_id": "moray-tile", "face_up": True}]
+    }
+
+    blocked_score, _entries, _distance = bot_planner._node_followup_score(state, "1B", "intelligence")
+    safe_score, _entries, _distance = bot_planner._node_followup_score(state, "1C", "intelligence")
+
+    assert blocked_score < safe_score - 400
+
+
+def test_local_orchestrator_ignores_gain_only_control_when_productive_control_exists():
+    state = _goldfish_state("room_productive_control", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_idle"
+    state["active_capability_id"] = None
+    for ability_id, capability in state["capabilities"].items():
+        capability["pa"] = 0 if ability_id == "force" else 2
+        if ability_id not in {"force", "camouflage"}:
+            capability["control_takes_this_night"] = capability["max_control_takes_per_night"]
+
+    candidates = bot_planner._local_orchestrator_night_candidates(state)
+    commands = [candidate["commands"][0] for candidate in candidates]
+
+    assert {"type": "take_control", "payload": {"capability_id": "camouflage"}} in commands
+    assert {"type": "take_control", "payload": {"capability_id": "force"}} not in commands
+
+
+def test_local_orchestrator_finishes_when_no_control_can_start_the_night():
+    state = _goldfish_state("room_no_controls", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_idle"
+    state["active_capability_id"] = None
+    for capability in state["capabilities"].values():
+        capability["control_takes_this_night"] = capability["max_control_takes_per_night"]
+
+    candidates = bot_planner._local_orchestrator_night_candidates(state)
+
+    assert [candidate["commands"][0] for candidate in candidates] == [
+        {"type": "bot_no_actions_available", "payload": {}}
+    ]
+
+
+def test_local_orchestrator_finishes_instead_of_idling_when_no_action_is_affordable():
+    state = _goldfish_state("room_no_affordable_action", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "force"
+    current_node_id = state["poulpita"]["node_id"]
+    state["map"]["adjacency"][current_node_id] = []
+    state["poulpita"]["neurons"] = 0
+    state["tile_catalog"]["action_costs"] = {
+        "gain_ap": {"ap_cost": 0, "time_cost": 0, "neuron_cost": 1},
+    }
+    for ability_id, capability in state["capabilities"].items():
+        capability["hand"] = []
+        capability["draw_pile"] = []
+        capability["discard"] = []
+        if ability_id != "force":
+            capability["control_takes_this_night"] = capability["max_control_takes_per_night"]
+
+    candidates = bot_planner._local_orchestrator_night_candidates(state)
+
+    assert [candidate["commands"][0] for candidate in candidates] == [
+        {"type": "bot_no_actions_available", "payload": {}}
+    ]
+    assert bot_planner.has_executable_bot_orchestrator_action(state) is False
+
+
+def test_local_orchestrator_collects_ap_instead_of_switching_for_free_surprise_tile():
+    state = _goldfish_state("room_local_surprise", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "force"
+    state["capabilities"]["force"]["pa"] = 0
+    state["capabilities"]["force"]["actions_taken_this_control"] = 1
+    current_node_id = state["poulpita"]["node_id"]
+    surprise_event_id = "surprise-event"
+    for capability in state["capabilities"].values():
+        capability["initiates_event_ids"] = [surprise_event_id]
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "categories": {
+            "surprise-category": {
+                "id": "surprise-category",
+                "name": "Surprise",
+                "compulsory_on_same_node": True,
+            }
+        },
+        "events": {
+            surprise_event_id: {
+                "id": surprise_event_id,
+                "name": "Surprise",
+                "category_id": "surprise-category",
+            }
+        },
+        "tiles": {
+            "surprise-tile": {
+                "id": "surprise-tile",
+                "event_id": surprise_event_id,
+                "priority": 100,
+                "interaction_ids": [],
+                "success_effects": [{"type": "draw_surprise_card"}],
+            }
+        },
+    }
+    state["tiles"] = {
+        current_node_id: [
+            {
+                "instance_id": "surprise-instance",
+                "tile_id": "surprise-tile",
+                "face_up": True,
+            }
+        ]
+    }
+
+    candidates = bot_planner._local_orchestrator_night_candidates(state)
+
+    assert candidates
+    assert candidates[0]["commands"][0]["type"] == "collect_action_points"
+    assert all(candidate["commands"][0]["type"] != "take_control" for candidate in candidates)
+
+    state["capabilities"]["force"]["pa"] = 1
+    state["interaction"] = {
+        "tile_instance_id": "surprise-instance",
+        "tile_id": "surprise-tile",
+        "node_id": current_node_id,
+        "initiator_capability_id": "force",
+        "played_cards": [],
+    }
+    interaction_candidates = bot_planner._local_orchestrator_interaction_candidates(state)
+    assert [candidate["commands"][0]["type"] for candidate in interaction_candidates] == ["resolve_interaction"]
+
+
+def test_local_orchestrator_switches_to_bot_with_partial_interaction_support():
+    state = _goldfish_state("room_local_support", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "force"
+    current_node_id = state["poulpita"]["node_id"]
+    for capability in state["capabilities"].values():
+        capability["hand"] = []
+        capability["draw_pile"] = []
+        capability["discard"] = []
+    state["capabilities"]["camouflage"]["hand"] = [
+        {
+            "card_id": "hide-card",
+            "interaction_id": "hide",
+            "interaction_ids": ["hide"],
+            "owner_capability_id": "camouflage",
+        }
+    ]
+    state["capabilities"]["intelligence"]["hand"] = [
+        {
+            "card_id": "analyse-card",
+            "interaction_id": "analyse",
+            "interaction_ids": ["analyse"],
+            "owner_capability_id": "intelligence",
+        }
+    ]
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "categories": {"threat": {"id": "threat", "name": "Threat", "compulsory_on_same_node": True}},
+        "events": {"fish": {"id": "fish", "name": "Big fish", "category_id": "threat"}},
+        "interactions": {
+            "charge": {"id": "charge", "name": "Charge"},
+            "hide": {"id": "hide", "name": "Hide"},
+            "analyse": {"id": "analyse", "name": "Analyse"},
+        },
+        "tiles": {
+            "fish-tile": {
+                "id": "fish-tile",
+                "event_id": "fish",
+                "interaction_ids": ["charge", "hide", "analyse"],
+            }
+        },
+    }
+    state["tiles"] = {
+        current_node_id: [{"instance_id": "fish-instance", "tile_id": "fish-tile", "face_up": True}]
+    }
+    state["interaction"] = {
+        "tile_instance_id": "fish-instance",
+        "tile_id": "fish-tile",
+        "node_id": current_node_id,
+        "initiator_capability_id": "force",
+        "played_cards": [
+            {
+                "card_id": "charge-card",
+                "interaction_id": "charge",
+                "interaction_ids": ["charge"],
+                "capability_id": "force",
+            }
+        ],
+    }
+
+    candidates = bot_planner._local_orchestrator_interaction_candidates(state)
+    camouflage = next(
+        candidate
+        for candidate in candidates
+        if candidate["commands"][0] == {"type": "resolve_interaction", "payload": {"capability_id": "camouflage", "auto_select_cards": True, "confirm_only": True}}
+    )
+    simulated = deepcopy(state)
+    bot_planner._simulate_public_command(simulated, camouflage["commands"][0])
+    support_commands, _entries, _label = bot_planner._next_interaction_support_command(simulated, "intelligence")
+
+    assert support_commands[0]["type"] == "resolve_interaction"
+    assert support_commands[0]["payload"]["auto_select_cards"] is True
+    assert all(candidate["commands"][0]["type"] == "resolve_interaction" for candidate in candidates)
+    state["tile_catalog"]["bot_settings"] = {
+        "orchestrator_rollout_take_controls": 2,
+        "orchestrator_rollouts_per_plan": 1,
+        "orchestrator_sampling_temperature": 0.1,
+    }
+    decision = choose_bot_orchestrator_action(state)
+    assert decision["command"]["type"] == "resolve_interaction"
+    assert decision["command"]["payload"]["capability_id"] in {"camouflage", "intelligence"}
+
+
+def test_local_orchestrator_keeps_useful_support_search_and_fails_when_no_path_remains():
+    state = _goldfish_state("room_local_support_search", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "force"
+    current_node_id = state["poulpita"]["node_id"]
+    for capability in state["capabilities"].values():
+        capability["hand"] = []
+        capability["draw_pile"] = []
+        capability["discard"] = []
+        capability["pa"] = 3
+        capability["actions_taken_this_control"] = 0
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "categories": {"threat": {"id": "threat", "name": "Threat", "compulsory_on_same_node": True}},
+        "events": {"fish": {"id": "fish", "name": "Big fish", "category_id": "threat"}},
+        "interactions": {"hide": {"id": "hide", "name": "Hide"}},
+        "tiles": {
+            "fish-tile": {
+                "id": "fish-tile",
+                "event_id": "fish",
+                "interaction_ids": ["hide"],
+                "failure_effects": [{"type": "lose_energy", "amount": 1}],
+            }
+        },
+    }
+    state["tiles"] = {current_node_id: [{"instance_id": "fish-instance", "tile_id": "fish-tile", "face_up": True}]}
+    state["interaction"] = {
+        "tile_instance_id": "fish-instance",
+        "tile_id": "fish-tile",
+        "node_id": current_node_id,
+        "initiator_capability_id": "force",
+        "initiator_confirmed": True,
+        "played_cards": [],
+    }
+    state["capabilities"]["force"]["draw_pile"] = [
+        {"card_id": "force-hide", "interaction_id": "hide", "interaction_ids": ["hide"], "owner_capability_id": "force"}
+    ]
+    state["capabilities"]["camouflage"]["draw_pile"] = [
+        {"card_id": "camouflage-hide", "interaction_id": "hide", "interaction_ids": ["hide"], "owner_capability_id": "camouflage"}
+    ]
+
+    active_search = bot_planner._local_orchestrator_interaction_candidates(state)
+    assert [candidate["commands"][0]["type"] for candidate in active_search] == ["draw_action_card", "fail_interaction"]
+    assert active_search[0]["commands"][0]["payload"]["capability_id"] == "force"
+    assert all(candidate["commands"][0]["type"] != "take_control" for candidate in active_search)
+    state["tile_catalog"]["bot_settings"] = {
+        "orchestrator_rollout_take_controls": 1,
+        "orchestrator_rollouts_per_plan": 1,
+        "orchestrator_sampling_temperature": 0.1,
+    }
+    assert choose_bot_orchestrator_action(state)["command"] == {
+        "type": "draw_action_card",
+        "payload": {"capability_id": "force"},
+    }
+
+    state["capabilities"]["force"]["actions_taken_this_control"] = state["capabilities"]["force"]["max_actions_per_control"]
+    targeted_switch = bot_planner._local_orchestrator_interaction_candidates(state)
+    take_commands = [candidate["commands"][0] for candidate in targeted_switch if candidate["commands"][0]["type"] == "take_control"]
+    assert take_commands == [{"type": "take_control", "payload": {"capability_id": "camouflage"}}]
+
+    state["capabilities"]["camouflage"]["draw_pile"] = []
+    no_path = bot_planner._local_orchestrator_interaction_candidates(state)
+    assert [candidate["commands"][0]["type"] for candidate in no_path] == ["fail_interaction"]
+
+
+def test_local_orchestrator_does_not_draw_for_exhausted_interaction_initiator():
+    state = _goldfish_state("room_exhausted_support", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "force"
+    current_node_id = state["poulpita"]["node_id"]
+    for capability in state["capabilities"].values():
+        capability["hand"] = []
+        capability["draw_pile"] = []
+        capability["discard"] = []
+    force = state["capabilities"]["force"]
+    force["actions_taken_this_control"] = force["max_actions_per_control"]
+    force["pa"] = 3
+    force["draw_pile"] = [
+        {
+            "card_id": "force-hide",
+            "interaction_id": "hide",
+            "interaction_ids": ["hide"],
+            "owner_capability_id": "force",
+        }
+    ]
+    state["capabilities"]["camouflage"]["hand"] = [
+        {
+            "card_id": "camouflage-hide",
+            "interaction_id": "hide",
+            "interaction_ids": ["hide"],
+            "owner_capability_id": "camouflage",
+        }
+    ]
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "categories": {"threat": {"id": "threat", "name": "Threat", "compulsory_on_same_node": True}},
+        "events": {"fish": {"id": "fish", "name": "Big fish", "category_id": "threat"}},
+        "interactions": {"hide": {"id": "hide", "name": "Hide"}},
+        "tiles": {
+            "fish-tile": {
+                "id": "fish-tile",
+                "event_id": "fish",
+                "interaction_ids": ["hide"],
+            }
+        },
+    }
+    state["tiles"] = {
+        current_node_id: [{"instance_id": "fish-instance", "tile_id": "fish-tile", "face_up": True}]
+    }
+    state["interaction"] = {
+        "tile_instance_id": "fish-instance",
+        "tile_id": "fish-tile",
+        "node_id": current_node_id,
+        "initiator_capability_id": "force",
+        "played_cards": [],
+    }
+
+    candidates = bot_planner._local_orchestrator_interaction_candidates(state)
+    commands = [candidate["commands"][0] for candidate in candidates]
+
+    assert {"type": "draw_action_card", "payload": {"capability_id": "force"}} not in commands
+    assert {"type": "collect_action_points", "payload": {"capability_id": "force"}} not in commands
+    assert {"type": "resolve_interaction", "payload": {"capability_id": "camouflage", "auto_select_cards": True, "confirm_only": True}} in commands
+
+
+def test_local_orchestrator_interacts_instead_of_farming_ap_when_tile_is_available():
+    state = _goldfish_state("room_local_tile_reward", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "force"
+    state["capabilities"]["force"]["pa"] = 2
+    state["capabilities"]["force"]["actions_taken_this_control"] = 0
+    state["capabilities"]["force"]["initiates_event_ids"] = ["prey-event"]
+    current_node_id = state["poulpita"]["node_id"]
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "categories": {"prey": {"id": "prey", "name": "Prey", "compulsory_on_same_node": False}},
+        "events": {"prey-event": {"id": "prey-event", "name": "Crab", "category_id": "prey"}},
+        "tiles": {
+            "prey-tile": {
+                "id": "prey-tile",
+                "event_id": "prey-event",
+                "priority": 1,
+                "interaction_ids": [],
+                "success_effects": [{"type": "gain_energy", "amount": 1}],
+            }
+        },
+    }
+    state["tiles"] = {
+        current_node_id: [{"instance_id": "prey-instance", "tile_id": "prey-tile", "face_up": True}]
+    }
+
+    candidates = bot_planner._local_orchestrator_night_candidates(state)
+    command_types = [candidate["commands"][0]["type"] for candidate in candidates]
+
+    assert "start_interaction" in command_types
+    assert "collect_action_points" not in command_types
+    interaction_candidate = next(
+        candidate for candidate in candidates if candidate["commands"][0]["type"] == "start_interaction"
+    )
+    assert interaction_candidate["statistics"]["planner_score"] > 55
+    state["tile_catalog"]["bot_settings"] = {
+        "orchestrator_rollout_take_controls": 1,
+        "orchestrator_rollouts_per_plan": 1,
+        "orchestrator_sampling_temperature": 0.1,
+    }
+    decision = choose_bot_orchestrator_action(state)
+    assert decision["command"]["type"] == "start_interaction"
+
+
+def test_local_orchestrator_switches_to_an_optional_tile_initiator_before_moving():
+    state = _goldfish_state("room_local_optional_switch", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "force"
+    state["capabilities"]["force"]["actions_taken_this_control"] = state["capabilities"]["force"]["max_actions_per_control"]
+    state["capabilities"]["camouflage"]["initiates_event_ids"] = ["prey-event"]
+    current_node_id = state["poulpita"]["node_id"]
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "categories": {"prey": {"id": "prey", "name": "Prey", "compulsory_on_same_node": False}},
+        "events": {"prey-event": {"id": "prey-event", "name": "Crab", "category_id": "prey"}},
+        "tiles": {
+            "prey-tile": {
+                "id": "prey-tile",
+                "event_id": "prey-event",
+                "priority": 1,
+                "interaction_ids": [],
+                "success_effects": [{"type": "gain_energy", "amount": 1}],
+            }
+        },
+    }
+    state["tiles"] = {
+        current_node_id: [{"instance_id": "prey-instance", "tile_id": "prey-tile", "face_up": True}]
+    }
+
+    candidates = bot_planner._local_orchestrator_night_candidates(state)
+    commands = [candidate["commands"][0] for candidate in candidates]
+
+    assert commands == [{"type": "take_control", "payload": {"capability_id": "camouflage"}}]
+
+
+def test_interaction_requiring_three_abilities_receives_configured_penalty():
+    state = _goldfish_state("room_team_penalty", level_id="test-level", mode="bots_only")
+    state["active_capability_id"] = "force"
+    state["tile_catalog"]["bot_settings"] = {"weights": {"third_ability_penalty": 60}}
+    for capability in state["capabilities"].values():
+        capability["hand"] = []
+    state["capabilities"]["force"]["hand"] = [
+        {"card_id": "charge-card", "interaction_id": "charge", "interaction_ids": ["charge"]}
+    ]
+    state["capabilities"]["camouflage"]["hand"] = [
+        {"card_id": "hide-card", "interaction_id": "hide", "interaction_ids": ["hide"]}
+    ]
+    state["capabilities"]["intelligence"]["hand"] = [
+        {"card_id": "analyse-card", "interaction_id": "analyse", "interaction_ids": ["analyse"]}
+    ]
+    entry = {
+        "tile": {"id": "complex-threat", "interaction_ids": ["charge", "hide", "analyse"]},
+        "instance": {"instance_id": "complex-threat-instance", "tile_id": "complex-threat"},
+        "node_id": state["poulpita"]["node_id"],
+    }
+
+    team_size, penalty = bot_planner._interaction_team_penalty(state, entry, "force")
+
+    assert team_size == 3
+    assert penalty == 60
+
+
+def test_forced_current_tile_reports_failure_when_no_initiator_has_initiative():
     async def scenario():
         service = GameRoomService()
         user = User(id="user_1", username="Player One")
@@ -574,8 +1704,9 @@ def test_forced_current_tile_reports_manual_blocker_instead_of_empty_plans():
         plans = await service.get_bot_plans(room_id=room["id"], user=user)
 
         assert plans["status"] == "awaiting_selection"
-        assert plans["proposals"][0]["plan_id"] == "forced_tile_needs_manual_resolution"
+        assert plans["proposals"][0]["plan_id"] == "fail_exhausted_compulsory_tile_moray"
         assert plans["proposals"][0]["risk_label"] == "forced"
+        assert plans["proposals"][0]["plan_chain"][0]["command_type"] == "fail_unavailable_compulsory_tile"
 
     run(scenario())
 
@@ -726,8 +1857,7 @@ def test_bot_plans_use_shared_intelligence_cards_for_open_interaction_support():
         plan = next(plan for plan in plans["proposals"] if plan["plan_id"] == "support_interaction_intelligence_tile_fish")
 
         assert plan["proposer_ability_id"] == "intelligence"
-        assert plan["plan_chain"][0]["public_command"]["type"] == "take_control"
-        assert plan["plan_chain"][1]["public_command"]["type"] == "resolve_interaction"
+        assert plan["plan_chain"][0]["public_command"]["type"] == "resolve_interaction"
         assert plan["statistics"]["support_estimate"]["hand_matches"] == 1
         assert "analyse_card" not in str(plans)
 
@@ -741,6 +1871,7 @@ def test_auto_resolve_interaction_selects_counter_attack_cards():
         state["phase"] = "night_action"
         state["active_capability_id"] = "camouflage"
         state["poulpita"]["energy"] = 3
+        state["poulpita"]["size_index"] = 1
         state["tile_catalog"] = {
             "categories": {"threat": {"id": "threat", "name": "Threat", "compulsory_on_same_node": True}},
             "events": {"fish": {"id": "fish", "name": "Big fish", "category_id": "threat"}},
@@ -788,6 +1919,57 @@ def test_auto_resolve_interaction_selects_counter_attack_cards():
     run(scenario())
 
 
+def test_counter_attack_cards_cannot_be_played_before_size_unlock():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "camouflage"
+        state["counter_attack_min_size_index"] = 2
+        state["poulpita"]["size_index"] = 1
+        state["tile_catalog"] = {
+            "categories": {"threat": {"id": "threat", "compulsory_on_same_node": True}},
+            "events": {"fish": {"id": "fish", "category_id": "threat"}},
+            "tiles": {
+                "fish-tile": {
+                    "id": "fish-tile",
+                    "event_id": "fish",
+                    "interaction_ids": ["charge"],
+                    "counter_attack_interaction_ids": ["hide"],
+                }
+            },
+            "interactions": {"charge": {"id": "charge"}, "hide": {"id": "hide"}},
+        }
+        state["interaction"] = {
+            "tile_instance_id": "tile_fish",
+            "tile_id": "fish-tile",
+            "node_id": "1A",
+            "initiator_capability_id": "force",
+            "initiator_confirmed": True,
+            "played_cards": [{"card_id": "charge", "interaction_id": "charge", "interaction_ids": ["charge"], "capability_id": "force"}],
+        }
+        state["capabilities"]["camouflage"]["hand"] = [
+            {"card_id": "hide", "interaction_id": "hide", "interaction_ids": ["hide"], "owner_capability_id": "camouflage"}
+        ]
+
+        rejected = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_locked_counter",
+            expected_version=1,
+            command_type="resolve_interaction",
+            payload={"capability_id": "camouflage", "card_ids": ["hide"]},
+        )
+
+        assert rejected["ok"] is False
+        assert rejected["reason"] == "invalid_selected_cards"
+        assert rejected["projection"]["counter_attack_unlocked"] is False
+        assert rejected["projection"]["capabilities"]["camouflage"]["hand"][0]["card_id"] == "hide"
+
+    run(scenario())
+
+
 def test_bot_support_plan_draws_with_auto_discard_for_counter_attack_when_hand_is_full():
     async def scenario():
         service = GameRoomService()
@@ -809,6 +1991,7 @@ def test_bot_support_plan_draws_with_auto_discard_for_counter_attack_when_hand_i
         state = service._memory_states[room["id"]]
         state["phase"] = "night_action"
         state["active_capability_id"] = "force"
+        state["poulpita"]["size_index"] = 1
         state["capabilities"]["force"]["actions_taken_this_control"] = state["capabilities"]["force"]["max_actions_per_control"]
         state["capabilities"]["camouflage"]["pa"] = 1
         state["capabilities"]["camouflage"]["current_max_cards_in_hand"] = 2
@@ -916,6 +2099,212 @@ def test_bot_plans_prioritize_ending_night_at_shelter_when_late():
     run(scenario())
 
 
+def test_shelter_proximity_becomes_more_valuable_as_night_gets_later():
+    state = _goldfish_state("room_late_shelter_value", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "force"
+    state["shelters"] = {"1D": {"count": 1, "seashells": 0, "secure": False}}
+    state["night_time_spent"] = int(state.get("night_shelter_available_at") or 16) - 1
+    early_near, _entries, _distance = bot_planner._node_followup_score(state, "1C", "force")
+    early_far, _entries, _distance = bot_planner._node_followup_score(state, "1B", "force")
+
+    state["night_time_spent"] = int(state["night_time_total"]) - 2
+    late_near, _entries, _distance = bot_planner._node_followup_score(state, "1C", "force")
+    late_far, _entries, _distance = bot_planner._node_followup_score(state, "1B", "force")
+
+    assert late_near - late_far > early_near - early_far
+
+
+def test_safe_shelter_route_avoids_known_compulsory_nodes():
+    state = _goldfish_state("room_safe_shelter_route", level_id="test-level", mode="bots_only")
+    state["map"]["adjacency"] = {
+        "start": ["shortcut", "safe-a"],
+        "shortcut": ["start", "shelter"],
+        "safe-a": ["start", "safe-b"],
+        "safe-b": ["safe-a", "shelter"],
+        "shelter": ["shortcut", "safe-b"],
+    }
+    state["poulpita"]["node_id"] = "start"
+    state["shelters"] = {"shelter": {"count": 1, "seashells": 0, "secure": False}}
+    state["tile_catalog"]["categories"] = {
+        "threat": {"id": "threat", "name": "Threat", "compulsory_on_same_node": True}
+    }
+    state["tile_catalog"]["events"] = {
+        "danger": {"id": "danger", "name": "Danger", "category_id": "threat"}
+    }
+    state["tile_catalog"]["tiles"] = {
+        "blocker": {"id": "blocker", "name": "Blocker", "event_id": "danger"}
+    }
+    state["tiles"] = {
+        "shortcut": [{"instance_id": "known_blocker", "tile_id": "blocker", "face_up": True}]
+    }
+
+    route = bot_planner._safe_route_to_closest_shelter(state, "start")
+
+    assert route == {
+        "shelter_node_id": "shelter",
+        "path": ["start", "safe-a", "safe-b", "shelter"],
+        "distance": 3,
+    }
+
+
+def test_late_shelter_return_uses_blocked_route_instead_of_optional_interaction():
+    state = _goldfish_state("room_blocked_shelter_return", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "force"
+    state["map"]["adjacency"] = {
+        "start": ["blocked"],
+        "blocked": ["start", "shelter"],
+        "shelter": ["blocked"],
+    }
+    state["poulpita"]["node_id"] = "start"
+    state["shelters"] = {"shelter": {"count": 1, "seashells": 0, "secure": False}}
+    state["night_time_spent"] = 12
+    state["night_shelter_available_at"] = 16
+    state["capabilities"]["force"]["pa"] = 5
+    state["capabilities"]["force"]["initiates_event_ids"] = ["optional-event"]
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "categories": {
+            "prey": {"id": "prey", "name": "Prey", "compulsory_on_same_node": False},
+            "threat": {"id": "threat", "name": "Threat", "compulsory_on_same_node": True},
+        },
+        "events": {
+            "optional-event": {"id": "optional-event", "name": "Crab", "category_id": "prey"},
+            "blocker-event": {"id": "blocker-event", "name": "Shark", "category_id": "threat"},
+        },
+        "tiles": {
+            "optional-tile": {"id": "optional-tile", "event_id": "optional-event", "interaction_ids": []},
+            "blocker-tile": {"id": "blocker-tile", "event_id": "blocker-event", "interaction_ids": []},
+        },
+    }
+    state["tiles"] = {
+        "start": [{"instance_id": "optional-instance", "tile_id": "optional-tile", "face_up": True}],
+        "blocked": [{"instance_id": "blocker-instance", "tile_id": "blocker-tile", "face_up": True}],
+    }
+
+    context = bot_planner._shelter_return_context(state)
+    candidates = bot_planner._local_orchestrator_night_candidates(state)
+    commands = [bot_planner._orchestrator_command(candidate) for candidate in candidates]
+
+    assert context["route_is_safe"] is False
+    assert context["route"]["path"] == ["start", "blocked", "shelter"]
+    assert commands == [
+        {"type": "move_poulpita", "payload": {"capability_id": "force", "target_node_id": "blocked"}}
+    ]
+
+
+def test_local_orchestrator_returns_toward_safe_shelter_before_end_night_threshold():
+    state = _goldfish_state("room_shelter_return_window", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "force"
+    state["poulpita"]["node_id"] = "1A"
+    state["shelters"] = {"1D": {"count": 1, "seashells": 0, "secure": False}}
+    state["tiles"] = {}
+    state["night_time_spent"] = 12
+    state["night_shelter_available_at"] = 16
+    state["capabilities"]["force"]["pa"] = 5
+    state["capabilities"]["force"]["actions_taken_this_control"] = 0
+
+    context = bot_planner._shelter_return_context(state)
+    candidates = bot_planner._local_orchestrator_night_candidates(state)
+    commands = [bot_planner._orchestrator_command(candidate) for candidate in candidates]
+
+    assert context["should_return"] is True
+    assert context["next_node_id"] == "1B"
+    assert commands == [
+        {"type": "move_poulpita", "payload": {"capability_id": "force", "target_node_id": "1B"}}
+    ]
+
+
+def test_local_orchestrator_does_not_start_optional_interaction_inside_return_margin():
+    state = _goldfish_state("room_optional_at_return_margin", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "force"
+    state["poulpita"]["node_id"] = "1C"
+    state["shelters"] = {"1D": {"count": 1, "seashells": 0, "secure": False}}
+    state["night_time_spent"] = 13
+    state["night_shelter_available_at"] = 16
+    state["capabilities"]["force"]["pa"] = 5
+    state["capabilities"]["force"]["initiates_event_ids"] = ["optional-event"]
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "categories": {"prey": {"id": "prey", "name": "Prey", "compulsory_on_same_node": False}},
+        "events": {"optional-event": {"id": "optional-event", "name": "Crab", "category_id": "prey"}},
+        "tiles": {
+            "optional-tile": {
+                "id": "optional-tile",
+                "event_id": "optional-event",
+                "interaction_ids": [],
+            }
+        },
+    }
+    state["tiles"] = {
+        "1C": [{"instance_id": "optional-instance", "tile_id": "optional-tile", "face_up": True}]
+    }
+
+    context = bot_planner._shelter_return_context(state)
+    candidates = bot_planner._local_orchestrator_night_candidates(state)
+    commands = [bot_planner._orchestrator_command(candidate) for candidate in candidates]
+
+    assert context["return_start"] == 13
+    assert context["safety_margin"] == 2
+    assert commands == [
+        {"type": "move_poulpita", "payload": {"capability_id": "force", "target_node_id": "1D"}}
+    ]
+
+
+def test_optimistic_rollout_does_not_stop_for_optional_tile_during_shelter_return():
+    state = _goldfish_state("room_rollout_shelter_return", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "force"
+    state["poulpita"]["node_id"] = "1A"
+    state["shelters"] = {"1D": {"count": 1, "seashells": 0, "secure": False}}
+    state["night_time_spent"] = 12
+    state["night_shelter_available_at"] = 16
+    state["capabilities"]["force"]["pa"] = 5
+    state["capabilities"]["force"]["initiates_event_ids"] = ["optional-event"]
+    state["tile_catalog"]["categories"] = {
+        "prey": {"id": "prey", "name": "Prey", "compulsory_on_same_node": False}
+    }
+    state["tile_catalog"]["events"] = {
+        "optional-event": {"id": "optional-event", "name": "Optional", "category_id": "prey"}
+    }
+    state["tile_catalog"]["tiles"] = {
+        "optional-tile": {"id": "optional-tile", "name": "Optional", "event_id": "optional-event"}
+    }
+    state["tiles"] = {
+        "1A": [{"instance_id": "optional-1", "tile_id": "optional-tile", "face_up": True}]
+    }
+
+    commands, interactions, label = bot_planner._rollout_next_commands(state, "force")
+
+    assert commands == [
+        {"type": "move_poulpita", "payload": {"capability_id": "force", "target_node_id": "1B"}}
+    ]
+    assert interactions == []
+    assert label == "safe shelter route via 1B"
+
+
+def test_simulated_no_actions_loss_has_extreme_negative_value():
+    state = _goldfish_state("room_simulated_loss_value", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "force"
+    for capability in state["capabilities"].values():
+        capability["control_takes_this_night"] = capability["max_control_takes_per_night"]
+    active = state["capabilities"]["force"]
+    active["actions_taken_this_control"] = active["max_actions_per_control"] - 1
+
+    bot_planner._simulate_public_command(
+        state,
+        {"type": "collect_action_points", "payload": {"capability_id": "force"}},
+    )
+
+    assert state["phase"] == "game_over"
+    assert state["game_outcome"] == "lost"
+    assert bot_planner._global_state_score(state) == -100000
+
+
 def test_bot_day_plans_include_size_growth_and_ability_upgrades():
     async def scenario():
         service = GameRoomService()
@@ -952,6 +2341,232 @@ def test_bot_day_plans_include_size_growth_and_ability_upgrades():
         assert "day_buy_upgrade_force_0" in plan_ids
 
     run(scenario())
+
+
+def test_bot_orchestrator_prioritizes_eligible_size_growth_over_other_day_choices():
+    state = _goldfish_state("room_mandatory_bot_growth", level_id="test-level", mode="bots_only")
+    state["phase"] = "day"
+    state["poulpita"]["energy"] = 14
+    state["poulpita"]["neurons"] = 8
+    state["poulpita"]["size_index"] = 0
+    state["poulpita"]["size_upgraded_today"] = False
+    state["tile_catalog"]["poulpita_panel"] = {
+        "sizes": [
+            {"amount": 200, "unit": "mg", "energy_cost": 0},
+            {"amount": 1, "unit": "kg", "energy_cost": 8},
+        ]
+    }
+    state["tile_catalog"]["bot_settings"] = {"min_energy_after_size_upgrade": 4}
+    for capability in state["capabilities"].values():
+        capability["hand_size_upgrades"] = [
+            {"cost_resource": "neurons", "cost": 1, "hand_size_bonus": 1}
+        ]
+
+    candidates = bot_planner._local_orchestrator_day_candidates(state)
+    decision = bot_planner.choose_fast_bot_orchestrator_action(state)
+
+    assert [candidate["commands"][0]["type"] for candidate in candidates] == ["buy_poulpita_size"]
+    assert decision["command"] == {"type": "buy_poulpita_size", "payload": {}}
+
+
+def test_auto_selected_dual_symbol_cards_are_assigned_to_distinct_requirements():
+    state = _goldfish_state("room_dual_symbol_assignment", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "agility"
+    agility = state["capabilities"]["agility"]
+    agility["pa"] = 5
+    agility["actions_taken_this_control"] = 0
+    agility["initiates_event_ids"] = ["mollusc-event"]
+    agility["hand"] = [
+        {
+            "card_id": "dual-card",
+            "interaction_id": "tighten",
+            "interaction_ids": ["tighten", "handle"],
+            "owner_capability_id": "agility",
+            "upgraded": True,
+        },
+        {
+            "card_id": "tighten-card",
+            "interaction_id": "tighten",
+            "interaction_ids": ["tighten"],
+            "owner_capability_id": "agility",
+        },
+    ]
+    current_node_id = state["poulpita"]["node_id"]
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "categories": {"prey": {"id": "prey", "compulsory_on_same_node": False}},
+        "events": {"mollusc-event": {"id": "mollusc-event", "category_id": "prey"}},
+        "tiles": {
+            "mollusc-tile": {
+                "id": "mollusc-tile",
+                "event_id": "mollusc-event",
+                "interaction_ids": ["handle", "tighten"],
+                "counter_attack_interaction_ids": [],
+            }
+        },
+    }
+    state["tiles"] = {
+        current_node_id: [
+            {"instance_id": "mollusc-instance", "tile_id": "mollusc-tile", "face_up": True}
+        ]
+    }
+    service = GameRoomService()
+    user = User(id="backend_bot_simulator", username="Bots", is_admin=True)
+
+    next_state, events = service._reduce(
+        state,
+        {
+            "command_id": "cmd_dual_symbol_interaction",
+            "expected_version": state["version"],
+            "type": "start_interaction",
+            "payload": {
+                "capability_id": "agility",
+                "tile_instance_id": "mollusc-instance",
+                "auto_select_cards": True,
+            },
+        },
+        user=user,
+        room_id=state["room_id"],
+        room={"id": state["room_id"], "mode": "bots_only"},
+    )
+
+    assert events[0]["type"] == "interaction_started"
+    assert {
+        card["card_id"]: card["interaction_id"]
+        for card in next_state["interaction"]["played_cards"]
+    } == {
+        "dual-card": "handle",
+        "tighten-card": "tighten",
+    }
+    assert next_state["capabilities"]["agility"]["hand"] == []
+
+
+def test_bot_support_confirmation_keeps_previously_committed_cards():
+    state = _goldfish_state("room_cumulative_support", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "force"
+    current_node_id = state["poulpita"]["node_id"]
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "categories": {"threat": {"id": "threat", "compulsory_on_same_node": True}},
+        "events": {"fish-event": {"id": "fish-event", "category_id": "threat"}},
+        "tiles": {
+            "fish-tile": {
+                "id": "fish-tile",
+                "event_id": "fish-event",
+                "interaction_ids": ["handle", "tighten"],
+                "counter_attack_interaction_ids": [],
+            }
+        },
+    }
+    state["tiles"] = {
+        current_node_id: [{"instance_id": "fish-instance", "tile_id": "fish-tile", "face_up": True}]
+    }
+    state["capabilities"]["agility"]["hand"] = [
+        {
+            "card_id": "tighten-card",
+            "interaction_id": "tighten",
+            "interaction_ids": ["tighten"],
+            "owner_capability_id": "agility",
+        }
+    ]
+    state["interaction"] = {
+        "tile_instance_id": "fish-instance",
+        "tile_id": "fish-tile",
+        "node_id": current_node_id,
+        "initiator_capability_id": "force",
+        "initiator_confirmed": True,
+        "requirement_reduction": 0,
+        "played_cards": [
+            {
+                "card_id": "handle-card",
+                "interaction_id": "handle",
+                "interaction_ids": ["handle"],
+                "owner_capability_id": "agility",
+                "capability_id": "agility",
+            }
+        ],
+    }
+    service = GameRoomService()
+    user = User(id="backend_bot_simulator", username="Bots", is_admin=True)
+
+    next_state, events = service._reduce(
+        state,
+        {
+            "command_id": "cmd_cumulative_support",
+            "expected_version": state["version"],
+            "type": "resolve_interaction",
+            "payload": {
+                "capability_id": "agility",
+                "auto_select_cards": True,
+                "confirm_only": True,
+            },
+        },
+        user=user,
+        room_id=state["room_id"],
+        room={"id": state["room_id"], "mode": "bots_only"},
+    )
+
+    assert events[0]["type"] == "interaction_cards_confirmed"
+    assert events[0]["success_ready"] is True
+    assert {
+        card["card_id"]: card["interaction_id"]
+        for card in next_state["interaction"]["played_cards"]
+    } == {"handle-card": "handle", "tighten-card": "tighten"}
+
+
+def test_simulation_progress_includes_size_and_remaining_initiatives():
+    state = _goldfish_state("room_progress_resources", level_id="test-level", mode="bots_only")
+    state["poulpita"]["size_index"] = 1
+    state["tile_catalog"]["poulpita_panel"] = {
+        "sizes": [
+            {"amount": 200, "unit": "mg", "energy_cost": 0},
+            {"amount": 1.5, "unit": "kg", "energy_cost": 3},
+        ]
+    }
+    state["capabilities"]["agility"]["control_takes_this_night"] = 2
+    state["capabilities"]["force"]["control_takes_this_night"] = 1
+    state["poulpita"]["seashells"] = 1
+    state["shelters"] = {
+        state["poulpita"]["node_id"]: {"count": 1, "seashells": 3, "secure": True}
+    }
+
+    progress = bot_simulation_service._simulation_progress(
+        state=state,
+        status="running",
+        step=12,
+        max_steps=100,
+    )
+
+    assert progress["size_label"] == "1.5 kg"
+    assert progress["total_initiatives"] == 15
+    assert progress["remaining_initiatives"] == 12
+    assert progress["seashells"] == 1
+    assert progress["shelter_seashells"] == 3
+
+
+def test_replay_summary_backfills_shelter_shells_for_older_replays():
+    summary = bot_simulation_service._replay_summary(
+        {
+            "id": "older-replay",
+            "status": "completed",
+            "progress": {"seashells": 1},
+            "frames": [
+                {
+                    "projection": {
+                        "shelters": {
+                            "1A": {"count": 1, "seashells": 2, "secure": False},
+                            "1B": {"count": 1, "seashells": 3, "secure": True},
+                        }
+                    }
+                }
+            ],
+        }
+    )
+
+    assert summary["progress"]["seashells"] == 1
+    assert summary["progress"]["shelter_seashells"] == 5
 
 
 def test_start_goldfish_game_initializes_16_node_board():
@@ -1091,7 +2706,7 @@ def test_adjacent_movement_is_accepted_and_increments_version():
         assert projection["version"] == 4
         assert projection["poulpita"]["node_id"] == "1B"
         assert projection["poulpita"]["previous_node_id"] == "1A"
-        assert projection["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["pa"] == 0
+        assert projection["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["pa"] == 5
         assert projection["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["actions_taken_this_control"] == 2
         assert result["events"][0]["type"] == "poulpita_moved"
 
@@ -1265,10 +2880,11 @@ def test_failed_interaction_can_move_poulpita_and_tile_to_previous_node():
         state["poulpita"]["previous_node_id"] = "1A"
         state["tile_catalog"] = {
             "tiles": {
-                "crab-tile": {
-                    "id": "crab-tile",
-                    "event_id": "crab",
-                    "failure_effects": [
+                    "crab-tile": {
+                        "id": "crab-tile",
+                        "event_id": "crab",
+                        "interaction_ids": ["charge"],
+                        "failure_effects": [
                         {"type": "pulpita_move_previous", "amount": None},
                         {"type": "move_tile_previous", "amount": None},
                     ],
@@ -1352,10 +2968,11 @@ def test_failed_interaction_free_move_requires_adjacent_target():
         state = service._memory_states[room["id"]]
         state["tile_catalog"] = {
             "tiles": {
-                "crab-tile": {
-                    "id": "crab-tile",
-                    "event_id": "crab",
-                    "failure_effects": [{"type": "pulpita_move_free", "amount": None}],
+                    "crab-tile": {
+                        "id": "crab-tile",
+                        "event_id": "crab",
+                        "interaction_ids": ["charge"],
+                        "failure_effects": [{"type": "pulpita_move_free", "amount": None}],
                 }
             },
             "events": {"crab": {"id": "crab", "category_id": "prey"}},
@@ -1402,7 +3019,7 @@ def test_failed_interaction_removes_tiles_by_selected_category_on_node():
         state = service._memory_states[room["id"]]
         state["tile_catalog"] = {
             "tiles": {
-                "crab-tile": {"id": "crab-tile", "event_id": "crab", "failure_effects": [{"type": "remove_preys", "amount": None, "category_id": "prey"}]},
+                "crab-tile": {"id": "crab-tile", "event_id": "crab", "interaction_ids": ["charge"], "failure_effects": [{"type": "remove_preys", "amount": None, "category_id": "prey"}]},
                 "fish-tile": {"id": "fish-tile", "event_id": "fish", "failure_effects": []},
                 "rock-tile": {"id": "rock-tile", "event_id": "rock", "failure_effects": []},
             },
@@ -1540,7 +3157,7 @@ def test_octopus_token_hydrates_tile_definition_and_enforces_initiators(monkeypa
         state = service._memory_states[room["id"]]
         state["phase"] = "night_action"
         state["active_capability_id"] = "force"
-        state["capabilities"]["force"]["pa"] = 1
+        state["capabilities"]["force"]["pa"] = 2
         state["tile_catalog"] = {
             "categories": {},
             "tiles": {},
@@ -1590,7 +3207,7 @@ def test_octopus_token_hydrates_tile_definition_and_enforces_initiators(monkeypa
         state = service._memory_states[room["id"]]
         state["phase"] = "night_action"
         state["active_capability_id"] = "force"
-        state["capabilities"]["force"]["pa"] = 1
+        state["capabilities"]["force"]["pa"] = 2
         state["tile_catalog"] = {"categories": {}, "tiles": {}, "events": {}, "interactions": {}}
         state["tiles"] = {"1A": [{"instance_id": "octopus_legacy", "tile_id": "octopus", "face_up": True, "token_type": "octopus"}]}
 
@@ -1612,7 +3229,7 @@ def test_octopus_token_hydrates_tile_definition_and_enforces_initiators(monkeypa
         state = service._memory_states[room["id"]]
         state["phase"] = "night_action"
         state["active_capability_id"] = "agility"
-        state["capabilities"]["agility"]["pa"] = 1
+        state["capabilities"]["agility"]["pa"] = 2
         state["tile_catalog"] = {
             "categories": {},
             "tiles": {},
@@ -1656,7 +3273,7 @@ def test_higher_priority_optional_interaction_can_precede_lower_compulsory_inter
         state = service._memory_states[room["id"]]
         state["phase"] = "night_action"
         state["active_capability_id"] = DEFAULT_ACTIVE_CAPABILITY_ID
-        state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["pa"] = 3
+        state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["pa"] = 4
         state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["initiates_event_ids"] = ["shark", "crab"]
         state["tile_catalog"] = {
             "categories": {
@@ -1689,13 +3306,13 @@ def test_higher_priority_optional_interaction_can_precede_lower_compulsory_inter
             command_type="start_interaction",
             payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID, "tile_instance_id": "tile_crab_high"},
         )
-        failed_optional = await send_command(
+        resolved_optional = await send_command(
             service,
             user,
             room,
-            command_id="cmd_fail_optional_high",
+            command_id="cmd_resolve_optional_high",
             expected_version=2,
-            command_type="fail_interaction",
+            command_type="resolve_interaction",
         )
         accepted_compulsory = await send_command(
             service,
@@ -1709,7 +3326,7 @@ def test_higher_priority_optional_interaction_can_precede_lower_compulsory_inter
 
         assert accepted_optional["ok"] is True
         assert accepted_optional["projection"]["interaction"]["tile_instance_id"] == "tile_crab_high"
-        assert failed_optional["ok"] is True
+        assert resolved_optional["ok"] is True
         assert accepted_compulsory["ok"] is True
         assert accepted_compulsory["projection"]["interaction"]["tile_instance_id"] == "tile_shark_low"
 
@@ -1722,7 +3339,7 @@ def test_latest_tile_priority_metadata_allows_high_priority_optional_interaction
         state = service._memory_states[room["id"]]
         state["phase"] = "night_action"
         state["active_capability_id"] = DEFAULT_ACTIVE_CAPABILITY_ID
-        state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["pa"] = 1
+        state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["pa"] = 2
         state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["initiates_event_ids"] = ["shark", "surprise"]
         state["tile_catalog"] = {
             "categories": {
@@ -1823,10 +3440,416 @@ def test_success_reward_places_shelter_and_enables_end_night_after_four_hours():
 
         assert resolved["ok"] is True
         assert resolved["projection"]["shelters"]["1A"]["count"] == 1
+        assert resolved["projection"]["objective_progress"]["found_shelter"] is False
         assert ended["ok"] is True
         assert ended["projection"]["phase"] == "day"
 
     run(scenario())
+
+
+def test_find_shelter_objective_completes_only_when_poulpita_moves_onto_it():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = DEFAULT_ACTIVE_CAPABILITY_ID
+        state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["pa"] = 1
+        state["shelters"] = {"1B": {"count": 1, "seashells": 0, "secure": False}}
+        state["objectives"] = [{"id": "find", "type": "find_shelter"}]
+        state["objective_progress"]["found_shelter"] = False
+
+        moved = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_find_shelter_by_moving",
+            expected_version=1,
+            command_type="move_poulpita",
+            payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID, "target_node_id": "1B"},
+        )
+
+        assert moved["ok"] is True
+        assert moved["projection"]["objective_progress"]["found_shelter"] is True
+        assert moved["projection"]["phase"] == "game_over"
+
+    run(scenario())
+
+
+def test_end_night_is_blocked_by_compulsory_tiles_and_octopus_tokens():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = DEFAULT_ACTIVE_CAPABILITY_ID
+        state["night_time_spent"] = 16
+        state["shelters"] = {"1A": {"count": 1, "seashells": 0, "secure": False}}
+        state["tile_catalog"] = {
+            "tiles": {"threat-tile": {"id": "threat-tile", "event_id": "threat-event"}},
+            "events": {"threat-event": {"id": "threat-event", "category_id": "threat"}},
+            "categories": {"threat": {"id": "threat", "compulsory_on_same_node": True}},
+        }
+        state["tiles"] = {"1A": [{"instance_id": "threat-instance", "tile_id": "threat-tile", "face_up": True}]}
+
+        compulsory_blocked = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_end_night_compulsory_blocked",
+            expected_version=1,
+            command_type="end_night",
+            payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID},
+        )
+
+        state["tiles"] = {
+            "1A": [
+                {
+                    "instance_id": "octopus-instance",
+                    "tile_id": "__octopus_token__",
+                    "token_type": "octopus",
+                    "face_up": True,
+                }
+            ]
+        }
+        octopus_blocked = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_end_night_octopus_blocked",
+            expected_version=1,
+            command_type="end_night",
+            payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID},
+        )
+
+        assert compulsory_blocked["ok"] is False
+        assert compulsory_blocked["reason"] == "night_end_blocked"
+        assert octopus_blocked["ok"] is False
+        assert octopus_blocked["reason"] == "night_end_blocked"
+
+    run(scenario())
+
+
+def test_bot_stores_shells_until_shelter_is_secure_but_keeps_one_carried():
+    state = _goldfish_state("room_bot_secure_shelter", level_id="test-level", mode="bots_only")
+    state["phase"] = "day"
+    current_node_id = state["poulpita"]["node_id"]
+    state["poulpita"]["seashells"] = 4
+    state["shelters"] = {current_node_id: {"count": 1, "seashells": 0, "secure": False}}
+
+    for _index in range(3):
+        candidates = bot_planner._local_orchestrator_day_candidates(state)
+        assert candidates[0]["commands"][0]["type"] == "move_seashell_to_shelter"
+        bot_planner._simulate_public_command(state, candidates[0]["commands"][0])
+
+    assert state["poulpita"]["seashells"] == 1
+    assert state["shelters"][current_node_id]["seashells"] == 3
+    assert state["shelters"][current_node_id]["secure"] is True
+    assert all(
+        candidate["commands"][0]["type"] != "move_seashell_to_shelter"
+        for candidate in bot_planner._local_orchestrator_day_candidates(state)
+    )
+
+
+def test_bot_shell_value_diminishes_only_after_the_third_shell():
+    state = _goldfish_state("room_bot_shell_value", level_id="test-level", mode="bots_only")
+    state["shelters"] = {}
+    state["poulpita"]["seashells"] = 2
+    third_shell_value = bot_planner._weighted_expected_gain(state, {"seashells": 1})
+
+    state["poulpita"]["seashells"] = 3
+    fourth_shell_value = bot_planner._weighted_expected_gain(state, {"seashells": 1})
+
+    assert third_shell_value > fourth_shell_value > 0
+
+
+def test_bot_prioritizes_shell_node_over_equivalent_empty_node():
+    state = _goldfish_state("room_bot_shell_route", level_id="test-level", mode="bots_only")
+    state["map"] = deepcopy(TEST_MAP)
+    state["poulpita"]["node_id"] = "1A"
+    state["objectives"] = [{"id": "secure", "type": "secure_shelter"}]
+    state["shelters"] = {"1A": {"count": 1, "seashells": 0, "secure": False}}
+    state["capabilities"]["force"]["initiates_event_ids"] = ["mollusc-event"]
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "categories": {"prey": {"id": "prey", "name": "Prey", "compulsory_on_same_node": False}},
+        "events": {"mollusc-event": {"id": "mollusc-event", "name": "Mollusc", "category_id": "prey"}},
+        "tiles": {
+            "mollusc-tile": {
+                "id": "mollusc-tile",
+                "event_id": "mollusc-event",
+                "interaction_ids": [],
+                "success_effects": [{"type": "gain_seashells", "amount": 1}],
+            }
+        },
+    }
+    state["tiles"] = {
+        "1B": [{"instance_id": "mollusc-instance", "tile_id": "mollusc-tile", "face_up": True}],
+        "1C": [],
+    }
+
+    shell_score = bot_planner._node_followup_score(state, "1B", "force")[0]
+    empty_score = bot_planner._node_followup_score(state, "1C", "force")[0]
+
+    assert shell_score > empty_score
+
+
+def test_bot_secures_required_shelter_before_pursuing_courtship():
+    state = _goldfish_state("room_bot_shells_before_courtship", level_id="test-level", mode="bots_only")
+    state["map"] = deepcopy(TEST_MAP)
+    state["poulpita"]["node_id"] = "1A"
+    state["poulpita"]["size_index"] = 2
+    state["courtship_min_size_index"] = 2
+    state["objectives"] = [
+        {"id": "secure", "type": "secure_shelter"},
+        {"id": "courtship", "type": "resolve_courtship"},
+    ]
+    state["shelters"] = {"1A": {"count": 1, "seashells": 0, "secure": False}}
+    state["tiles"] = {node_id: [] for node_id in TEST_MAP["nodes"]}
+    state["tiles"]["1D"] = [
+        {
+            "instance_id": "courtship-visible",
+            "tile_id": "__courtship_token__",
+            "token_type": "courtship",
+            "face_up": True,
+        }
+    ]
+
+    blocked = bot_planner._courtship_pursuit_context(state)
+
+    assert blocked["prerequisites_ready"] is False
+    assert blocked["should_seek"] is False
+    state["shelters"]["1A"] = {"count": 1, "seashells": 3, "secure": True}
+
+    ready = bot_planner._courtship_pursuit_context(state)
+
+    assert ready["prerequisites_ready"] is True
+    assert ready["should_seek"] is True
+    assert ready["next_node_id"] == "1B"
+
+
+def test_courtship_support_search_outranks_failure_when_missing_card_is_in_deck():
+    state = _goldfish_state("room_courtship_support_priority", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "propulsion"
+    current_node_id = state["poulpita"]["node_id"]
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "tiles": {
+            "__courtship_token__": {
+                "id": "__courtship_token__",
+                "token_type": "courtship",
+                "interaction_ids": [],
+            }
+        },
+    }
+    state["tiles"] = {
+        current_node_id: [
+            {
+                "instance_id": "courtship-instance",
+                "tile_id": "__courtship_token__",
+                "token_type": "courtship",
+                "face_up": True,
+            }
+        ]
+    }
+    state["interaction"] = {
+        "tile_instance_id": "courtship-instance",
+        "tile_id": "__courtship_token__",
+        "node_id": current_node_id,
+        "initiator_capability_id": "propulsion",
+        "initiator_confirmed": True,
+        "played_cards": [],
+        "courtship_card": {"id": "courtship-card", "name": "Courtship", "interaction_ids": ["analyse"]},
+    }
+    intelligence = state["capabilities"]["intelligence"]
+    intelligence["pa"] = 0
+    intelligence["draw_pile"] = [
+        {"card_id": "analyse-card", "interaction_id": "analyse", "interaction_ids": ["analyse"]}
+    ]
+    intelligence["hand"] = []
+
+    candidates = bot_planner._local_orchestrator_interaction_candidates(state)
+    search = next(candidate for candidate in candidates if candidate["commands"][0]["type"] == "take_control")
+    failure = next(candidate for candidate in candidates if candidate["commands"][0]["type"] == "fail_interaction")
+
+    assert search["commands"][0]["payload"]["capability_id"] == "intelligence"
+    assert search["statistics"]["planner_score"] > failure["statistics"]["planner_score"]
+    assert failure["statistics"]["courtship_failure_penalty"] > 300
+
+
+def test_final_night_continues_toward_pending_courtship_instead_of_ending():
+    state = _goldfish_state("room_final_night_objective_push", level_id="test-level", mode="bots_only")
+    state["map"] = deepcopy(TEST_MAP)
+    state["phase"] = "night_action"
+    state["day_index"] = 5
+    state["max_nights"] = 5
+    state["night_shelter_available_at"] = 16
+    state["night_time_spent"] = 16
+    state["active_capability_id"] = "force"
+    state["poulpita"]["node_id"] = "1A"
+    state["poulpita"]["size_index"] = 2
+    state["courtship_min_size_index"] = 2
+    state["shelters"] = {"1A": {"count": 1, "seashells": 3, "secure": True}}
+    state["objectives"] = [{"id": "courtship", "type": "resolve_courtship"}]
+    state["tiles"] = {node_id: [] for node_id in TEST_MAP["nodes"]}
+    state["tiles"]["1B"] = [
+        {
+            "instance_id": "courtship-visible",
+            "tile_id": "__courtship_token__",
+            "token_type": "courtship",
+            "face_up": True,
+        }
+    ]
+    state["capabilities"]["force"]["pa"] = 5
+    state["capabilities"]["force"]["actions_taken_this_control"] = 0
+
+    candidates = bot_planner._local_orchestrator_night_candidates(state)
+    commands = [bot_planner._orchestrator_command(candidate) for candidate in candidates]
+
+    assert not any(command and command["type"] == "end_night" for command in commands)
+    assert any(
+        command == {"type": "move_poulpita", "payload": {"capability_id": "force", "target_node_id": "1B"}}
+        for command in commands
+    )
+
+
+def test_bot_special_power_unlock_night_and_force_simulation():
+    state = _goldfish_state("room_bot_special_power", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "force"
+    state["day_index"] = 3
+    state["poulpita"]["neurons"] = 3
+    state["capabilities"]["force"]["pa"] = 5
+    state["tile_catalog"]["bot_settings"] = {"special_power_start_night": 4}
+    state["tile_catalog"]["action_costs"] = {
+        "special_power": {"ap_cost": 2, "time_cost": 2, "neuron_cost": 1}
+    }
+    state["tile_catalog"]["tiles"] = {
+        "crab": {"id": "crab", "event_id": "crab-event", "interaction_ids": ["charge", "tighten"]}
+    }
+    current_node_id = state["poulpita"]["node_id"]
+    state["tiles"] = {
+        current_node_id: [{"instance_id": "crab-instance", "tile_id": "crab", "face_up": True}]
+    }
+
+    assert bot_planner._local_special_power_candidates(state, "force") == []
+    state["day_index"] = 4
+
+    candidates = bot_planner._local_special_power_candidates(state, "force")
+
+    assert candidates[0]["commands"][0] == {
+        "type": "use_special_power",
+        "payload": {"capability_id": "force"},
+    }
+    bot_planner._simulate_public_command(state, candidates[0]["commands"][0])
+    assert state["force_reduces_next_interaction"] is True
+    assert state["poulpita"]["neurons"] == 2
+    assert state["capabilities"]["force"]["pa"] == 3
+
+
+def test_neuron_value_declines_as_upgrades_are_purchased():
+    state = _goldfish_state("room_bot_neuron_value", level_id="test-level", mode="bots_only")
+    state["day_index"] = 4
+    capability = state["capabilities"]["force"]
+    capability["hand_size_upgrades"] = [
+        {"type": "hand_size", "cost": 1},
+        {"type": "hand_size", "cost": 1},
+        {"type": "deck_exchange", "cost": 1},
+    ]
+    capability["purchased_hand_size_upgrade_indices"] = []
+    before = bot_planner._weighted_expected_gain(state, {"neurons": 1})
+    capability["purchased_hand_size_upgrade_indices"] = [0, 1, 2]
+    after = bot_planner._weighted_expected_gain(state, {"neurons": 1})
+
+    assert before > after > 0
+
+
+def test_bot_pursues_visible_courtship_after_size_unlock():
+    state = _goldfish_state("room_bot_courtship_route", level_id="test-level", mode="bots_only")
+    state["map"] = deepcopy(TEST_MAP)
+    state["poulpita"]["node_id"] = "1A"
+    state["poulpita"]["size_index"] = 2
+    state["courtship_min_size_index"] = 2
+    state["objectives"] = [{"id": "courtship", "type": "resolve_courtship"}]
+    state["tiles"] = {
+        node_id: [] for node_id in TEST_MAP["nodes"]
+    }
+    state["tiles"]["1D"] = [
+        {
+            "instance_id": "courtship-visible",
+            "tile_id": "__courtship_token__",
+            "token_type": "courtship",
+            "face_up": True,
+        }
+    ]
+
+    context = bot_planner._courtship_pursuit_context(state)
+
+    assert context["should_seek"] is True
+    assert context["visible"] is True
+    assert context["next_node_id"] == "1B"
+    assert context["route"]["path"] == ["1A", "1B", "1C", "1D"]
+
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "force"
+    state["capabilities"]["force"]["actions_taken_this_control"] = 0
+    state["capabilities"]["force"]["pa"] = 5
+    candidates = bot_planner._local_orchestrator_night_candidates(state)
+    assert any(
+        candidate["commands"][0] == {
+            "type": "move_poulpita",
+            "payload": {"capability_id": "force", "target_node_id": "1B"},
+        }
+        for candidate in candidates
+    )
+
+
+def test_bot_explores_tile_rich_nodes_when_unlocked_courtship_is_not_visible():
+    state = _goldfish_state("room_bot_courtship_explore", level_id="test-level", mode="bots_only")
+    state["map"] = deepcopy(TEST_MAP)
+    state["poulpita"]["node_id"] = "1B"
+    state["poulpita"]["size_index"] = 2
+    state["courtship_min_size_index"] = 2
+    state["objectives"] = [{"id": "courtship", "type": "resolve_courtship"}]
+    state["shelters"] = {}
+    state["tiles"] = {node_id: [] for node_id in TEST_MAP["nodes"]}
+    state["tiles"]["1C"] = [
+        {"instance_id": f"hidden-{index}", "tile_id": f"unknown-{index}", "face_up": False}
+        for index in range(3)
+    ]
+
+    context = bot_planner._courtship_pursuit_context(state)
+    rich_score = bot_planner._node_followup_score(state, "1C", "force")[0]
+    empty_score = bot_planner._node_followup_score(state, "1A", "force")[0]
+
+    assert context["exploring"] is True
+    assert rich_score > empty_score
+
+
+def test_bot_returns_early_to_secured_shelter_after_courtship_when_energy_wins():
+    state = _goldfish_state("room_bot_courtship_return", level_id="test-level", mode="bots_only")
+    state["map"] = deepcopy(TEST_MAP)
+    state["phase"] = "night_action"
+    state["night_time_spent"] = 0
+    state["night_shelter_available_at"] = 16
+    state["poulpita"]["node_id"] = "1A"
+    state["poulpita"]["energy"] = 6
+    state["courtship_completed"] = True
+    state["objectives"] = [
+        {"id": "eggs", "type": "return_secured_shelter_after_courtship", "target": 6}
+    ]
+    state["shelters"] = {"1D": {"count": 1, "seashells": 3, "secure": True}}
+
+    return_context = bot_planner._shelter_return_context(state)
+
+    assert return_context["objective_return"] is True
+    assert return_context["should_return"] is True
+    assert return_context["next_node_id"] == "1B"
+    assert return_context["urgency"] >= 200
+
+    state["poulpita"]["energy"] = 5
+    insufficient_energy_context = bot_planner._shelter_return_context(state)
+    assert insufficient_energy_context["objective_return"] is False
+    assert insufficient_energy_context["should_return"] is False
 
 
 def test_end_night_is_free_and_day_upgrades_stack_before_next_night():
@@ -1838,8 +3861,15 @@ def test_end_night_is_free_and_day_upgrades_stack_before_next_night():
         state["night_time_spent"] = 16
         state["shelters"] = {"1A": 1}
         state["poulpita"]["neurons"] = 3
+        expected_initial_ap = {}
+        for index, (capability_id, configured_capability) in enumerate(state["capabilities"].items()):
+            configured_capability["initial_ap"] = index
+            configured_capability["pa"] = 99
+            expected_initial_ap[capability_id] = index
         capability = state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]
         capability["pa"] = 0
+        capability["initial_ap"] = 7
+        expected_initial_ap[DEFAULT_ACTIVE_CAPABILITY_ID] = 7
         capability["control_takes_this_night"] = 2
         capability["actions_taken_this_control"] = int(capability["max_actions_per_control"])
         capability["current_max_cards_in_hand"] = 3
@@ -1907,11 +3937,33 @@ def test_end_night_is_free_and_day_upgrades_stack_before_next_night():
         assert night["projection"]["phase"] == "night_idle"
         assert night["projection"]["day_index"] == 2
         assert night_capability["current_max_cards_in_hand"] == 8
+        assert night_capability["pa"] == 7
+        assert {
+            capability_id: projected_capability["pa"]
+            for capability_id, projected_capability in night["projection"]["capabilities"].items()
+        } == expected_initial_ap
         assert night_capability["control_takes_this_night"] == 0
         assert len(night_capability["hand"]) == min(8, len(night_capability["hand"]) + len(night_capability["draw_pile"]))
         assert night_capability["discard"] == []
 
     run(scenario())
+
+
+def test_planner_simulation_resets_ap_to_initial_value_when_day_ends():
+    state = _goldfish_state("room_simulated_night_reset", level_id="test-level", mode="bots_only")
+    state["phase"] = "day"
+    state["day_index"] = 1
+    state["max_nights"] = 5
+    for index, capability in enumerate(state["capabilities"].values()):
+        capability["initial_ap"] = index
+        capability["pa"] = 99
+
+    bot_planner._simulate_public_command(state, {"type": "end_day", "payload": {}})
+
+    assert state["phase"] == "night_idle"
+    assert [capability["pa"] for capability in state["capabilities"].values()] == list(
+        range(len(state["capabilities"]))
+    )
 
 
 def test_day_can_buy_deck_exchange_upgrade():
@@ -1931,7 +3983,9 @@ def test_day_can_buy_deck_exchange_upgrade():
             }
         ]
         capability["purchased_hand_size_upgrade_indices"] = []
-        capability["draw_pile"] = [{"card_id": "card_old", "interaction_id": "charge", "interaction_ids": ["charge"], "owner_capability_id": DEFAULT_ACTIVE_CAPABILITY_ID}]
+        capability["applied_deck_exchange_upgrade_indices"] = []
+        capability["deck"] = [{"interaction_id": "charge", "count": 1}]
+        capability["draw_pile"] = []
         capability["hand"] = []
         capability["discard"] = []
 
@@ -1944,14 +3998,37 @@ def test_day_can_buy_deck_exchange_upgrade():
             command_type="buy_hand_size_upgrade",
             payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID, "upgrade_index": 0},
         )
+        duplicate = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_buy_deck_exchange_again",
+            expected_version=2,
+            command_type="buy_hand_size_upgrade",
+            payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID, "upgrade_index": 0},
+        )
+        night = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_end_day_after_deck_exchange",
+            expected_version=2,
+            command_type="end_day",
+        )
 
         next_capability = result["projection"]["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]
+        night_capability = night["projection"]["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]
         assert result["ok"] is True
         assert result["projection"]["poulpita"]["neurons"] == 1
         assert next_capability["purchased_hand_size_upgrade_indices"] == [0]
-        assert len(next_capability["draw_pile"]) == 1
-        assert next_capability["draw_pile"][0]["interaction_ids"] == ["charge", "hide"]
-        assert next_capability["draw_pile"][0]["upgraded"] is True
+        assert next_capability["applied_deck_exchange_upgrade_indices"] == [0]
+        assert duplicate["ok"] is False
+        assert duplicate["reason"] == "upgrade_already_bought"
+        assert night["ok"] is True
+        night_cards = night_capability["hand"] + night_capability["draw_pile"]
+        assert len(night_cards) == 1
+        assert night_cards[0]["interaction_ids"] == ["charge", "hide"]
+        assert night_cards[0]["upgraded"] is True
 
     run(scenario())
 
@@ -2079,6 +4156,35 @@ def test_goldfish_game_uses_level_starting_node_and_node_tokens(monkeypatch):
     assert state["tile_catalog"]["categories"]["__octopus_token_threat__"]["compulsory_on_same_node"] is True
 
 
+def test_grouped_courtship_tile_is_visible_from_game_setup(monkeypatch):
+    level = {
+        **TEST_LEVEL,
+        "node_tile_counts": {**TEST_LEVEL["node_tile_counts"], "1A": 1},
+        "groups": [{"id": "main", "name": "Main", "tile_counts": {"__courtship_token__": 1}}],
+        "courtship_min_size_index": 2,
+    }
+    monkeypatch.setattr("backend.app.game_room_service.get_level_config", lambda level_id=None: level)
+    monkeypatch.setattr(
+        "backend.app.game_room_service.get_game_content_catalog",
+        lambda: {
+            "tiles": {},
+            "events": {},
+            "categories": {},
+            "interactions": {"dance": {"id": "dance", "name": "Dance"}},
+            "courtship_cards": {"dance-card": {"id": "dance-card", "name": "Dance", "interaction_ids": ["dance"]}},
+            "tokens": {"courtship": {"id": "courtship", "name": "Courtship token", "image_url": "/api/content/images/courtship.png"}},
+        },
+    )
+
+    state = _goldfish_state("room_grouped_courtship", level_id="test-level")
+    instance = state["tiles"]["1A"][0]
+
+    assert instance["tile_id"] == "__courtship_token__"
+    assert instance["token_type"] == "courtship"
+    assert instance["face_up"] is True
+    assert state["tile_catalog"]["tiles"]["__courtship_token__"]["image_url"] == "/api/content/images/courtship.png"
+
+
 def test_day_shell_transfer_secures_shelter_and_completes_objective():
     async def scenario():
         service, user, room, _start = await create_started_room()
@@ -2123,6 +4229,37 @@ def test_day_shell_transfer_secures_shelter_and_completes_objective():
         assert third["projection"]["shelters"]["1A"]["secure"] is True
         assert third["projection"]["objectives"][0]["completed"] is True
         assert third["projection"]["phase"] == "game_over"
+        assert service._memory_results[room["id"]]["outcome"] == "won"
+
+    run(scenario())
+
+
+def test_return_to_secured_shelter_after_courtship_objective_requires_energy():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "force"
+        state["courtship_completed"] = True
+        state["poulpita"]["energy"] = 6
+        state["shelters"] = {"1B": {"count": 1, "seashells": 3, "secure": True}}
+        state["objectives"] = [
+            {"id": "eggs", "type": "return_secured_shelter_after_courtship", "target": 6}
+        ]
+
+        result = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_return_with_eggs",
+            expected_version=1,
+            command_type="move_poulpita",
+            payload={"capability_id": "force", "target_node_id": "1B"},
+        )
+
+        assert result["ok"] is True
+        assert result["projection"]["objectives"][0]["completed"] is True
+        assert result["projection"]["phase"] == "game_over"
         assert service._memory_results[room["id"]]["outcome"] == "won"
 
     run(scenario())
@@ -2313,6 +4450,361 @@ def test_tile_with_no_required_interactions_resolves_successfully():
     run(scenario())
 
 
+def test_ap_persists_and_final_day_ends_in_loss():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = DEFAULT_ACTIVE_CAPABILITY_ID
+        state["day_index"] = 2
+        state["max_nights"] = 2
+        state["size_deadline_night"] = 99
+        state["night_time_spent"] = 16
+        state["shelters"] = {"1A": {"count": 1, "seashells": 0, "secure": False}}
+        state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["pa"] = 7
+
+        day = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_final_day",
+            expected_version=1,
+            command_type="end_night",
+            payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID},
+        )
+        lost = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_final_day_end",
+            expected_version=2,
+            command_type="end_day",
+        )
+
+        assert day["ok"] is True
+        assert day["projection"]["phase"] == "day"
+        assert day["projection"]["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]["pa"] == 7
+        assert lost["ok"] is True
+        assert lost["projection"]["phase"] == "game_over"
+        assert lost["projection"]["game_outcome"] == "lost"
+        assert lost["events"][0]["reason"] == "maximum_nights_reached"
+
+    run(scenario())
+
+
+def test_interaction_support_requires_initiator_confirmation_and_not_initiative():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "force"
+        state["capabilities"]["force"]["initiates_event_ids"] = ["fish"]
+        state["tile_catalog"] = {
+            "categories": {"threat": {"id": "threat", "compulsory_on_same_node": True}},
+            "events": {"fish": {"id": "fish", "name": "Fish", "category_id": "threat"}},
+            "interactions": {
+                "charge": {"id": "charge", "name": "Charge"},
+                "hide": {"id": "hide", "name": "Hide"},
+                "analyse": {"id": "analyse", "name": "Analyse"},
+            },
+            "tiles": {
+                "fish-tile": {
+                    "id": "fish-tile",
+                    "event_id": "fish",
+                    "interaction_ids": ["charge", "hide", "analyse"],
+                    "success_effects": [{"type": "gain_neurons", "amount": 1}],
+                }
+            },
+        }
+        state["tiles"] = {"1A": [{"instance_id": "fish-instance", "tile_id": "fish-tile", "face_up": True}]}
+        state["capabilities"]["force"]["hand"] = [
+            {"card_id": "charge-card", "interaction_id": "charge", "interaction_ids": ["charge"], "owner_capability_id": "force"},
+            {"card_id": "ink-card", "interaction_id": "ink", "interaction_ids": ["ink"], "owner_capability_id": "force"},
+        ]
+        state["capabilities"]["camouflage"]["hand"] = [{"card_id": "hide-card", "interaction_id": "hide", "interaction_ids": ["hide"], "owner_capability_id": "camouflage"}]
+        state["capabilities"]["intelligence"]["hand"] = [{"card_id": "analyse-card", "interaction_id": "analyse", "interaction_ids": ["analyse"], "owner_capability_id": "intelligence"}]
+
+        started = await send_command(
+            service, user, room, command_id="cmd_support_start", expected_version=1,
+            command_type="start_interaction", payload={"capability_id": "force", "tile_instance_id": "fish-instance"},
+        )
+        early_support = await send_command(
+            service, user, room, command_id="cmd_support_early", expected_version=2,
+            command_type="resolve_interaction", payload={"capability_id": "camouflage", "card_ids": ["hide-card"]},
+        )
+        confirmed = await send_command(
+            service, user, room, command_id="cmd_support_confirm", expected_version=2,
+            command_type="resolve_interaction", payload={"capability_id": "force", "card_ids": ["charge-card"], "confirm_only": True},
+        )
+        first_support = await send_command(
+            service, user, room, command_id="cmd_support_first", expected_version=3,
+            command_type="resolve_interaction", payload={"capability_id": "camouflage", "card_ids": ["hide-card"], "confirm_only": True},
+        )
+        stale_support = await send_command(
+            service, user, room, command_id="cmd_support_stale", expected_version=3,
+            command_type="resolve_interaction", payload={"capability_id": "intelligence", "card_ids": ["analyse-card"]},
+        )
+        completed = await send_command(
+            service, user, room, command_id="cmd_support_complete", expected_version=4,
+            command_type="resolve_interaction", payload={"capability_id": "intelligence", "card_ids": ["analyse-card"], "confirm_only": True},
+        )
+        extra_card = await send_command(
+            service, user, room, command_id="cmd_support_extra", expected_version=5,
+            command_type="resolve_interaction", payload={"capability_id": "force", "card_ids": ["ink-card"], "confirm_only": True},
+        )
+        resolved = await send_command(
+            service, user, room, command_id="cmd_support_resolve", expected_version=5,
+            command_type="resolve_interaction", payload={"capability_id": "force"},
+        )
+
+        assert started["projection"]["interaction"]["initiator_confirmed"] is False
+        assert early_support["reason"] == "initiator_confirmation_required"
+        assert confirmed["projection"]["interaction"]["initiator_confirmed"] is True
+        assert first_support["ok"] is True
+        assert stale_support["reason"] == "state_version_conflict"
+        assert any(card["card_id"] == "analyse-card" for card in stale_support["projection"]["capabilities"]["intelligence"]["hand"])
+        assert completed["ok"] is True
+        assert completed["projection"]["interaction"] is not None
+        assert completed["events"][0]["type"] == "interaction_cards_confirmed"
+        assert extra_card["reason"] == "invalid_selected_cards"
+        assert resolved["projection"]["interaction"] is None
+        assert resolved["projection"]["poulpita"]["neurons"] == 1
+        assert resolved["projection"]["active_capability_id"] == "force"
+
+    run(scenario())
+
+
+def test_special_power_spends_configured_resources_and_propulsion_cannot_return_to_start():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "force"
+        state["poulpita"]["neurons"] = 2
+        state["tile_catalog"]["action_costs"] = {
+            "special_power": {"ap_cost": 2, "time_cost": 2, "neuron_cost": 1}
+        }
+
+        force = await send_command(
+            service, user, room, command_id="cmd_force_special", expected_version=1,
+            command_type="use_special_power", payload={"capability_id": "force"},
+        )
+        next_state = service._memory_states[room["id"]]
+        next_state["active_capability_id"] = "propulsion"
+        next_state["poulpita"]["node_id"] = "1C"
+        next_state["poulpita_starting_node_id"] = "1A"
+        next_state["capabilities"]["propulsion"]["pa"] = 5
+        rejected = await send_command(
+            service, user, room, command_id="cmd_propulsion_home", expected_version=2,
+            command_type="use_special_power", payload={"capability_id": "propulsion", "path": ["1B", "1A"]},
+        )
+
+        assert force["ok"] is True
+        assert force["projection"]["capabilities"]["force"]["pa"] == 3
+        assert force["projection"]["poulpita"]["neurons"] == 1
+        assert force["projection"]["night_time_spent"] == 2
+        assert next_state["force_reduces_next_interaction"] is True
+        assert rejected["reason"] == "propulsion_starting_node_forbidden"
+        assert rejected["projection"]["poulpita"]["neurons"] == 1
+
+    run(scenario())
+
+
+def test_courtship_starts_automatically_after_control_when_size_is_unlocked():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_idle"
+        state["active_capability_id"] = None
+        state["poulpita"]["size_index"] = 2
+        state["poulpita"]["energy"] = 8
+        state["courtship_min_size_index"] = 2
+        state["courtship_min_energy"] = 8
+        state["tile_catalog"] = {
+            **state["tile_catalog"],
+            "categories": {"__courtship_token_category__": {"id": "__courtship_token_category__", "compulsory_on_same_node": False}},
+            "events": {"__courtship_token_event__": {"id": "__courtship_token_event__", "category_id": "__courtship_token_category__"}},
+            "interactions": {"dance": {"id": "dance", "name": "Dance"}},
+            "tiles": {"__courtship_token__": {"id": "__courtship_token__", "event_id": "__courtship_token_event__", "token_type": "courtship", "interaction_ids": []}},
+            "courtship_cards": {"dance-card": {"id": "dance-card", "name": "Dance", "interaction_ids": ["dance"]}},
+        }
+        current_node_id = state["poulpita"]["node_id"]
+        state["tiles"] = {
+            current_node_id: [{"instance_id": "courtship-1", "tile_id": "__courtship_token__", "token_type": "courtship", "face_up": True}],
+        }
+        state["objectives"] = [{"id": "courtship", "type": "resolve_courtship"}]
+        state["capabilities"]["force"]["hand"] = [
+            {"card_id": "dance-in-hand", "interaction_id": "dance", "interaction_ids": ["dance"], "owner_capability_id": "force"}
+        ]
+
+        result = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_take_control_at_courtship",
+            expected_version=1,
+            command_type="take_control",
+            payload={"capability_id": "force"},
+        )
+
+        assert result["ok"] is True
+        assert result["projection"]["interaction"]["courtship_card"]["id"] == "dance-card"
+        assert [event["type"] for event in result["events"]] == ["control_taken", "courtship_started"]
+
+        resolved = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_resolve_courtship_objective",
+            expected_version=2,
+            command_type="resolve_interaction",
+            payload={"capability_id": "force", "card_ids": ["dance-in-hand"]},
+        )
+
+        assert resolved["ok"] is True
+        assert resolved["projection"]["courtship_completed"] is True
+        assert resolved["projection"]["objectives"][0]["completed"] is True
+        assert resolved["projection"]["phase"] == "game_over"
+
+    run(scenario())
+
+
+def test_courtship_retry_draws_again_and_declining_blocks_until_movement():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = "force"
+        state["poulpita"]["size_index"] = 3
+        state["poulpita"]["energy"] = 8
+        state["courtship_min_size_index"] = 3
+        state["courtship_min_energy"] = 8
+        state["tile_catalog"] = {
+            **state["tile_catalog"],
+            "categories": {"__courtship_category__": {"id": "__courtship_category__", "compulsory_on_same_node": False}},
+            "events": {"__courtship_event__": {"id": "__courtship_event__", "category_id": "__courtship_category__"}},
+            "interactions": {"dance": {"id": "dance", "name": "Dance"}},
+            "tiles": {"__courtship_token__": {"id": "__courtship_token__", "event_id": "__courtship_event__", "token_type": "courtship", "interaction_ids": []}},
+            "courtship_cards": {"dance-card": {"id": "dance-card", "name": "Dance", "interaction_ids": ["dance"]}},
+        }
+        state["tiles"] = {
+            "1A": [],
+            "1B": [{"instance_id": "courtship-1", "tile_id": "__courtship_token__", "token_type": "courtship", "face_up": True}],
+        }
+
+        moved = await send_command(
+            service, user, room, command_id="cmd_move_to_courtship", expected_version=1,
+            command_type="move_poulpita", payload={"capability_id": "force", "target_node_id": "1B"},
+        )
+        confirmed = await send_command(
+            service, user, room, command_id="cmd_confirm_empty_courtship", expected_version=2,
+            command_type="resolve_interaction", payload={"capability_id": "force", "card_ids": []},
+        )
+        retried = await send_command(
+            service, user, room, command_id="cmd_retry_courtship", expected_version=3,
+            command_type="fail_interaction", payload={"spend_energy_to_retry": True},
+        )
+        blocked = await send_command(
+            service, user, room, command_id="cmd_block_courtship", expected_version=4,
+            command_type="fail_interaction", payload={"spend_energy_to_retry": False},
+        )
+        left = await send_command(
+            service, user, room, command_id="cmd_leave_courtship", expected_version=5,
+            command_type="move_poulpita", payload={"capability_id": "force", "target_node_id": "1A"},
+        )
+
+        assert moved["projection"]["interaction"]["courtship_card"]["id"] == "dance-card"
+        assert confirmed["projection"]["interaction"]["initiator_confirmed"] is True
+        assert retried["projection"]["poulpita"]["energy"] == 7
+        assert retried["projection"]["interaction"]["initiator_confirmed"] is False
+        assert blocked["projection"]["interaction"] is None
+        assert blocked["projection"]["courtship_blocked_node_id"] == "1B"
+        assert left["projection"]["courtship_blocked_node_id"] is None
+
+    run(scenario())
+
+
+def test_size_upgrade_uses_all_shelter_shell_discount_and_replaces_tiles():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "day"
+        state["poulpita"]["energy"] = 10
+        state["poulpita"]["size_index"] = 0
+        state["shelters"] = {"1A": {"count": 1, "seashells": 4, "secure": True}}
+        state["tile_catalog"] = {
+            **state["tile_catalog"],
+            "poulpita_panel": {"sizes": [{"amount": 1, "unit": "kg", "energy_cost": 0}, {"amount": 2, "unit": "kg", "energy_cost": 3}]},
+            "tiles": {"adult-tile": {"id": "adult-tile", "event_id": "adult", "interaction_ids": []}},
+            "events": {"adult": {"id": "adult", "category_id": "prey"}},
+        }
+        state["level_layout"] = {
+            "node_tile_counts": {node_id: (1 if node_id == "1A" else 0) for node_id in TEST_MAP["nodes"]},
+            "node_group_ids": {node_id: "main" for node_id in TEST_MAP["nodes"]},
+            "groups": [{"id": "main", "name": "Main", "tile_counts": {}}],
+            "node_tokens": {},
+        }
+        state["level_tile_sets"] = [{"id": "adult", "size_index": 1, "groups": [{"id": "main", "name": "Main", "tile_counts": {"adult-tile": 1}}]}]
+        state["tiles"] = {node_id: [] for node_id in TEST_MAP["nodes"]}
+
+        result = await send_command(
+            service, user, room, command_id="cmd_size_replace", expected_version=1,
+            command_type="buy_poulpita_size",
+        )
+
+        assert result["ok"] is True
+        assert result["projection"]["poulpita"]["energy"] == 9
+        assert result["events"][0]["energy_cost"] == 1
+        assert result["projection"]["tiles"]["1A"][0]["tile_id"] == "adult-tile"
+
+    run(scenario())
+
+
+def test_automatic_success_interaction_cannot_be_failed():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = DEFAULT_ACTIVE_CAPABILITY_ID
+        state["tile_catalog"] = {
+            "tiles": {
+                "surprise-tile": {
+                    "id": "surprise-tile",
+                    "event_id": "surprise",
+                    "interaction_ids": [],
+                    "success_effects": [{"type": "draw_surprise_card"}],
+                    "failure_effects": [],
+                }
+            },
+            "events": {"surprise": {"id": "surprise", "category_id": "exploration"}},
+            "interactions": {},
+        }
+        state["tiles"] = {
+            "1A": [{"instance_id": "tile_surprise", "tile_id": "surprise-tile", "face_up": True}]
+        }
+        state["interaction"] = {
+            "tile_instance_id": "tile_surprise",
+            "tile_id": "surprise-tile",
+            "node_id": "1A",
+            "played_cards": [],
+        }
+
+        rejected = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_fail_automatic_surprise",
+            expected_version=1,
+            command_type="fail_interaction",
+        )
+
+        assert rejected["ok"] is False
+        assert rejected["reason"] == "automatic_interaction_cannot_fail"
+        assert service._memory_states[room["id"]]["interaction"] is not None
+
+    run(scenario())
+
+
 def test_action_after_configured_night_duration_can_lose_game_when_energy_reaches_zero():
     async def scenario():
         service, user, room, _start = await create_started_room()
@@ -2342,5 +4834,68 @@ def test_action_after_configured_night_duration_can_lose_game_when_energy_reache
         assert result["projection"]["poulpita"]["energy"] == 0
         assert result["projection"]["phase"] == "game_over"
         assert game_result["outcome"] == "lost"
+
+    run(scenario())
+
+
+def test_game_is_lost_when_active_ability_ends_actions_and_no_other_ability_can_take_control():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = DEFAULT_ACTIVE_CAPABILITY_ID
+        active = state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]
+        active["actions_taken_this_control"] = int(active["max_actions_per_control"]) - 1
+        active["control_takes_this_night"] = 0
+        for capability_id, capability in state["capabilities"].items():
+            if capability_id != DEFAULT_ACTIVE_CAPABILITY_ID:
+                capability["control_takes_this_night"] = capability["max_control_takes_per_night"]
+
+        result = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_last_available_action",
+            expected_version=1,
+            command_type="collect_action_points",
+            payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID},
+        )
+
+        assert result["ok"] is True
+        assert result["projection"]["phase"] == "game_over"
+        finished_state = service._memory_states[room["id"]]
+        assert finished_state["game_outcome"] == "lost"
+        assert finished_state["game_over_reason"] == "no_controls_or_actions"
+
+    run(scenario())
+
+
+def test_game_continues_when_active_ability_ends_actions_and_another_can_take_control():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "night_action"
+        state["active_capability_id"] = DEFAULT_ACTIVE_CAPABILITY_ID
+        active = state["capabilities"][DEFAULT_ACTIVE_CAPABILITY_ID]
+        active["actions_taken_this_control"] = int(active["max_actions_per_control"]) - 1
+        next_ability_id = next(capability_id for capability_id in state["capabilities"] if capability_id != DEFAULT_ACTIVE_CAPABILITY_ID)
+        for capability_id, capability in state["capabilities"].items():
+            capability["control_takes_this_night"] = (
+                0 if capability_id == next_ability_id else capability["max_control_takes_per_night"]
+            )
+
+        result = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_last_action_with_successor",
+            expected_version=1,
+            command_type="collect_action_points",
+            payload={"capability_id": DEFAULT_ACTIVE_CAPABILITY_ID},
+        )
+
+        assert result["ok"] is True
+        assert result["projection"]["phase"] == "night_action"
+        assert service._memory_states[room["id"]].get("game_outcome") is None
 
     run(scenario())

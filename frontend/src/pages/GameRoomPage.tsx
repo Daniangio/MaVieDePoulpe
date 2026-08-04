@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Check, CirclePlus, Hand, Moon, MoveRight, RefreshCw, Sparkles, Swords, X } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, CirclePlus, Hand, LogOut, Moon, MoveRight, Pause, Play, RefreshCw, Sparkles, Swords, X } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
 import BoardView from "../components/BoardView.js";
 import CardPreview from "../components/CardPreview.jsx";
@@ -11,6 +11,24 @@ import { buildApiUrl, buildWsUrl } from "../utils/connection.js";
 
 const makeCommandId = () =>
   globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : `cmd_${Date.now()}_${Math.random()}`;
+
+type ReplayFrame = {
+  index: number;
+  command?: { type: string; payload?: Record<string, unknown> } | null;
+  events?: Array<any>;
+  decision?: { plan_id?: string; plan_title?: string; score?: number } | null;
+  projection: Partial<GameProjection>;
+};
+
+type BotReplay = {
+  id: string;
+  level_name: string;
+  seed: number;
+  map: GameProjection["map"];
+  tile_catalog: GameProjection["tile_catalog"];
+  metadata: Record<string, any>;
+  frames: ReplayFrame[];
+};
 
 const phaseLabel = (projection: GameProjection | null) => {
   if (!projection) return "Loading";
@@ -62,16 +80,17 @@ const TimeTracker = ({ projection }: { projection: GameProjection | null }) => {
   );
 };
 
-const EnergyBar = ({ energy }: { energy: number }) => {
-  const current = Math.max(0, Math.min(32, Number(energy || 0)));
+const EnergyBar = ({ energy, maximum = 32 }: { energy: number; maximum?: number }) => {
+  const maxEnergy = Math.max(1, Math.min(32, Number(maximum || 32)));
+  const current = Math.max(0, Math.min(maxEnergy, Number(energy || 0)));
   return (
     <div className="shrink-0 rounded bg-slate-800 p-2">
       <div className="flex items-center justify-between text-xs">
         <span className="text-slate-400">Energy</span>
-        <strong>{current}/32</strong>
+        <strong>{current}/{maxEnergy}</strong>
       </div>
       <div className="mt-1.5 flex flex-wrap gap-0.5">
-        {Array.from({ length: 32 }).map((_, index) => (
+        {Array.from({ length: maxEnergy }).map((_, index) => (
           <span
             aria-hidden="true"
             className={["h-2.5 w-2.5 shrink-0 rounded-[2px] border", index < current ? "border-emerald-300 bg-emerald-300" : "border-slate-600 bg-slate-900"].join(" ")}
@@ -91,6 +110,111 @@ const shelterData = (entry: any) => {
     secure: Boolean(entry?.secure) || Number(entry?.seashells || 0) >= 3,
   };
 };
+
+const specialPowerDescriptions: Record<string, string> = {
+  agility: "Every ability draws one action card.",
+  camouflage: "Move Poulpita to an adjacent node using camouflage.",
+  force: "Remove one required symbol from the next interaction.",
+  propulsion: "Move Poulpita across exactly two connected edges; the destination cannot be the level starting node.",
+  intelligence: "Reveal one hidden tile on a node adjacent to Poulpita.",
+};
+
+const SpecialPowerHint = ({ capability, projection }: { capability: CapabilityProjection | null; projection: GameProjection | null }) => {
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const [popupPosition, setPopupPosition] = useState<{ left: number; top: number } | null>(null);
+  if (!capability) return null;
+  const cost = projection?.tile_catalog?.action_costs?.special_power || {};
+  const description = specialPowerDescriptions[capability.id] || "No special power is configured for this ability.";
+  const showPopup = () => {
+    const rect = buttonRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const halfWidth = 144;
+    setPopupPosition({
+      left: Math.max(halfWidth + 8, Math.min(window.innerWidth - halfWidth - 8, rect.left + rect.width / 2)),
+      top: Math.max(120, rect.top - 8),
+    });
+  };
+  return (
+    <>
+      <button
+        aria-label={`${capability.name} special power`}
+        className="flex h-7 w-7 items-center justify-center rounded-full border border-fuchsia-400 bg-fuchsia-950 text-fuchsia-100 transition hover:bg-fuchsia-900 focus:outline-none focus:ring-2 focus:ring-fuchsia-300"
+        onBlur={() => setPopupPosition(null)}
+        onFocus={showPopup}
+        onMouseEnter={showPopup}
+        onMouseLeave={() => setPopupPosition(null)}
+        ref={buttonRef}
+        type="button"
+      >
+        <Sparkles size={15} />
+      </button>
+      {popupPosition && typeof document !== "undefined" ? createPortal(
+        <div
+          className="pointer-events-none fixed z-[200] w-72 -translate-x-1/2 -translate-y-full rounded-md border border-fuchsia-300 bg-slate-950 p-3 text-left text-xs leading-relaxed text-slate-100 shadow-2xl"
+          style={{ left: popupPosition.left, top: popupPosition.top }}
+        >
+          <strong className="block text-fuchsia-200">{capability.name} special power</strong>
+          <span className="mt-1 block">{description}</span>
+          <span className="mt-2 block text-slate-400">
+            {Number(cost.ap_cost ?? 2)} AP / {Number(cost.neuron_cost ?? 1)} neurons / {Number(cost.time_cost ?? 2)} time
+          </span>
+        </div>,
+        document.body,
+      ) : null}
+    </>
+  );
+};
+
+type ApRollAnimation = {
+  capabilityId: string;
+  displayedValue: number;
+  finalValue: number;
+  awarded: number;
+  sides: number[];
+  phase: "rolling" | "landed" | "awarding";
+};
+
+const ApRollOverlay = ({ animation, projection }: { animation: ApRollAnimation | null; projection: GameProjection | null }) => {
+  if (!animation) return null;
+  const abilityName = projection?.capabilities?.[animation.capabilityId]?.name || animation.capabilityId;
+  return (
+    <div className="pointer-events-none absolute inset-0 z-[64] flex items-center justify-center bg-cyan-950/10 backdrop-blur-[1px]">
+      <div className="flex flex-col items-center rounded-md border border-cyan-200/80 bg-white/90 px-8 py-5 shadow-2xl shadow-cyan-950/25">
+        <div className={["ap-die", animation.phase === "rolling" ? "ap-die-rolling" : "ap-die-landed"].join(" ")}>
+          <div className="ap-die-facet ap-die-facet-left" />
+          <div className="ap-die-facet ap-die-facet-right" />
+          <strong>{animation.displayedValue}</strong>
+        </div>
+        <p className="mt-3 text-xs font-semibold uppercase text-teal-900">{animation.phase === "rolling" ? "Collecting action points" : abilityName}</p>
+        {animation.phase === "rolling" ? (
+          <div className="mt-2 flex max-w-64 flex-wrap justify-center gap-1">
+            {animation.sides.slice(0, 16).map((side, index) => <span className="rounded bg-cyan-50 px-1.5 py-0.5 text-[0.6rem] text-slate-500" key={`${index}-${side}`}>{side}</span>)}
+          </div>
+        ) : (
+          <div className="mt-2 flex h-10 items-center gap-2">
+            <span className="text-sm font-semibold text-slate-500">AP</span>
+            <span className="ap-award-count text-3xl font-black text-teal-600" key={animation.awarded}>+{animation.awarded}</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+const hasNightEndBlocker = (projection: GameProjection | null, nodeId: string) =>
+  (projection?.tiles?.[nodeId] || []).some((instance: any) => {
+    const tile = projection?.tile_catalog?.tiles?.[instance.tile_id];
+    if (
+      instance.token_type === "octopus" ||
+      ["octopus", "__octopus_token__"].includes(String(instance.tile_id || "")) ||
+      tile?.token_type === "octopus"
+    ) {
+      return true;
+    }
+    const event = tile?.event || projection?.tile_catalog?.events?.[tile?.event_id];
+    const category = projection?.tile_catalog?.categories?.[event?.category_id];
+    return Boolean(category?.compulsory_on_same_node);
+  });
 
 const DotTrack = ({
   current,
@@ -141,10 +265,12 @@ const CapabilityBoard = ({
   onCollect,
   onDraw,
   onMoveMode,
+  onSpecialPower,
   onEndNight,
   onEndDay,
   onBuyUpgrade,
   showActions = true,
+  apPulseTick = 0,
 }: {
   capability: CapabilityProjection;
   active: boolean;
@@ -158,10 +284,12 @@ const CapabilityBoard = ({
   onCollect?: () => void;
   onDraw?: () => void;
   onMoveMode?: () => void;
+  onSpecialPower?: () => void;
   onEndNight?: () => void;
   onEndDay?: () => void;
   onBuyUpgrade?: (upgradeIndex: number) => void;
   showActions?: boolean;
+  apPulseTick?: number;
 }) => {
   const initiableEvents = (capability.initiates_event_ids || [])
     .map((eventId) => projection?.tile_catalog?.events?.[eventId])
@@ -185,7 +313,8 @@ const CapabilityBoard = ({
     projection?.phase === "night_action" &&
     Boolean(currentNodeId) &&
     shelterData(projection?.shelters?.[currentNodeId]).count > 0 &&
-    Number(projection?.night_time_spent || 0) >= Number(projection?.night_shelter_available_at || 16);
+    Number(projection?.night_time_spent || 0) >= Number(projection?.night_shelter_available_at || 16) &&
+    !hasNightEndBlocker(projection, currentNodeId);
   const purchasedUpgrades = new Set((capability.purchased_hand_size_upgrade_indices || []).map((index) => Number(index)));
   const sharedNeurons = Number(projection?.poulpita?.neurons || 0);
   const ArticleTag = compact ? "button" : "article";
@@ -197,7 +326,7 @@ const CapabilityBoard = ({
     className={[
       "group/board relative min-w-0 overflow-auto rounded-md border-2 bg-slate-900 text-left text-slate-100 shadow-xl transition",
       compact ? "cursor-pointer hover:z-50 hover:bg-slate-800 hover:shadow-cyan-500/20 focus:outline-none focus:ring-2 focus:ring-cyan-300" : "",
-      active ? "ring-2 ring-teal-200" : focused ? "ring-2 ring-amber-200" : "",
+      focused ? "z-10 bg-white opacity-100 ring-4 ring-amber-300 shadow-amber-200/60" : active ? "opacity-80 grayscale-[20%] ring-2 ring-teal-200" : "opacity-65 grayscale-[45%] hover:opacity-90",
       compact ? "h-full p-1" : "h-full p-2",
     ].join(" ")}
     onClick={compact ? onFocus : undefined}
@@ -228,7 +357,7 @@ const CapabilityBoard = ({
         </div>
         <p className="text-xs text-slate-400">{active ? "Controls Poulpita" : focused ? "In focus" : "Waiting"}</p>
       </div>
-      <div className="rounded bg-slate-800 px-2 py-1 text-xs font-semibold text-slate-100">
+      <div className={["rounded bg-slate-800 px-2 py-1 text-xs font-semibold text-slate-100", apPulseTick > 0 ? "ap-counter-pulse" : ""].join(" ")} key={`${capability.id}-ap-${apPulseTick}`}>
         <DotTrack current={actionPoints} label="AP" mode="available" total={actionPoints} />
       </div>
     </div>
@@ -365,6 +494,7 @@ const ActionPanel = ({
   onEndDay,
   onEndNight,
   onMoveMode,
+  onSpecialPower,
   onTakeControl,
   pending,
   projection,
@@ -377,6 +507,7 @@ const ActionPanel = ({
   onEndDay: () => void;
   onEndNight: () => void;
   onMoveMode: () => void;
+  onSpecialPower: () => void;
   onTakeControl: () => void;
   pending: boolean;
   projection: GameProjection | null;
@@ -385,12 +516,24 @@ const ActionPanel = ({
   const isNightAction = projection?.phase === "night_action";
   const isNight = projection?.phase === "night_idle" || projection?.phase === "night_action";
   const currentNodeId = projection?.poulpita?.node_id || "";
+  const actionCosts = projection?.tile_catalog?.action_costs || {};
+  const actionCost = (actionId: string, defaultAp: number, defaultTime: number, defaultNeurons = 0) => ({
+    ap: Number(actionCosts[actionId]?.ap_cost ?? defaultAp),
+    time: Number(actionCosts[actionId]?.time_cost ?? defaultTime),
+    neurons: Number(actionCosts[actionId]?.neuron_cost ?? defaultNeurons),
+  });
+  const gainCost = actionCost("gain_ap", 0, 0);
+  const moveCost = actionCost("move", 1, 1);
+  const drawCost = actionCost("draw", 1, 1);
+  const specialCost = actionCost("special_power", 2, 2, 1);
+  const canAfford = (cost: { ap: number; neurons: number }) => Number(capability.pa || 0) >= cost.ap && Number(projection?.poulpita?.neurons || 0) >= cost.neurons;
   const canEndNight =
     active &&
     projection?.phase === "night_action" &&
     Boolean(currentNodeId) &&
     shelterData(projection?.shelters?.[currentNodeId]).count > 0 &&
-    Number(projection?.night_time_spent || 0) >= Number(projection?.night_shelter_available_at || 16);
+    Number(projection?.night_time_spent || 0) >= Number(projection?.night_shelter_available_at || 16) &&
+    !hasNightEndBlocker(projection, currentNodeId);
   return (
     <div className="flex h-full flex-col gap-2 overflow-auto rounded-md border border-slate-800 bg-slate-900 p-2">
       <h3 className="text-sm font-semibold text-white">Actions</h3>
@@ -398,19 +541,22 @@ const ActionPanel = ({
         <button className="rounded bg-teal-400 px-1.5 py-2 text-[0.68rem] font-semibold leading-tight text-slate-950 hover:bg-teal-300 disabled:opacity-50" disabled={pending || active || !isNight} onClick={onTakeControl} type="button">
           Take control
         </button>
-        <button className="rounded border border-slate-600 px-1.5 py-2 text-[0.68rem] leading-tight text-slate-100 hover:bg-slate-800 disabled:opacity-50" disabled={pending || !active || !isNightAction} onClick={onCollect} type="button">
-          Collect AP
+        <button className="rounded border border-slate-600 px-1.5 py-2 text-[0.68rem] leading-tight text-slate-100 hover:bg-slate-800 disabled:opacity-50" disabled={pending || !active || !isNightAction || !canAfford(gainCost)} onClick={onCollect} type="button">
+          Collect AP ({gainCost.ap} AP)
         </button>
         <button
           className={["rounded border px-1.5 py-2 text-[0.68rem] leading-tight text-slate-100 disabled:opacity-50", moveMode ? "border-amber-300 bg-amber-950" : "border-slate-600 hover:bg-slate-800"].join(" ")}
-          disabled={pending || !active || !isNightAction || capability.pa < 1}
+          disabled={pending || !active || !isNightAction || !canAfford(moveCost)}
           onClick={onMoveMode}
           type="button"
         >
-          Move
+          Move ({moveCost.ap} AP)
         </button>
-        <button className="rounded border border-slate-600 px-1.5 py-2 text-[0.68rem] leading-tight text-slate-100 hover:bg-slate-800 disabled:opacity-50" disabled={pending || !active || !isNightAction || capability.pa < 1} onClick={onDraw} type="button">
-          Draw
+        <button className="rounded border border-slate-600 px-1.5 py-2 text-[0.68rem] leading-tight text-slate-100 hover:bg-slate-800 disabled:opacity-50" disabled={pending || !active || !isNightAction || !canAfford(drawCost)} onClick={onDraw} type="button">
+          Draw ({drawCost.ap} AP)
+        </button>
+        <button className="rounded border border-fuchsia-500 px-1.5 py-2 text-[0.68rem] leading-tight text-fuchsia-100 hover:bg-fuchsia-950 disabled:opacity-50" disabled={pending || !active || !isNightAction || !canAfford(specialCost)} onClick={onSpecialPower} type="button">
+          Special ({specialCost.ap} AP, {specialCost.neurons} N)
         </button>
         {projection?.phase === "day" ? (
           <button className="rounded border border-cyan-300 px-1.5 py-2 text-[0.68rem] leading-tight text-cyan-100 hover:bg-cyan-950 disabled:opacity-50" disabled={pending} onClick={onEndDay} type="button">
@@ -500,10 +646,11 @@ const cardInteractionOptions = (card: any) => {
   return options;
 };
 
-const chooseCardInteractionForTile = (card: any, tile: any, alreadyPlayed: string[]) => {
+const chooseCardInteractionForTile = (card: any, tile: any, alreadyPlayed: string[], counterAttackUnlocked = true) => {
   const options = cardInteractionOptions(card);
   if (!options.length) return card?.interaction_id || "";
-  for (const requiredIds of [tile?.interaction_ids || [], tile?.counter_attack_interaction_ids || []]) {
+  const counterRequirements = counterAttackUnlocked ? tile?.counter_attack_interaction_ids || [] : [];
+  for (const requiredIds of [tile?.interaction_ids || [], counterRequirements]) {
     const remaining = [...requiredIds];
     alreadyPlayed.forEach((interactionId) => {
       const index = remaining.indexOf(interactionId);
@@ -621,7 +768,7 @@ const PoulpitaResourcePanel = ({
   const nextSize = sizes[sizeIndex + 1] || null;
   const currentShelter = shelterData(projection?.shelters?.[projection?.poulpita.node_id || ""]);
   const baseNextSizeCost = Number(nextSize?.energy_cost || 0);
-  const nextSizeCost = Math.max(0, baseNextSizeCost - (currentShelter.secure ? 1 : 0));
+  const nextSizeCost = Math.max(0, baseNextSizeCost - Math.max(0, Number(currentShelter.seashells || 0) - 2));
   const energy = Number(projection?.poulpita.energy || 0);
   const canBuySize = projection?.phase === "day" && Boolean(nextSize) && !projection?.poulpita.size_upgraded_today && (nextSizeCost === 0 || energy - nextSizeCost > 0);
   const canMoveShellToShelter = projection?.phase === "day" && currentShelter.count > 0 && Number(projection?.poulpita.seashells || 0) > 0 && !pending;
@@ -704,6 +851,7 @@ const InteractionPanel = ({
   onToggleCard,
   onFailMoveTargetChange,
   onInitiate,
+  onConfirmCards,
   onResolve,
   onFail,
   onClose,
@@ -716,10 +864,11 @@ const InteractionPanel = ({
   visualState: "open" | "success" | "failure" | "closing";
   onToggleCard: (cardId: string) => void;
   onInitiate: () => void;
+  onConfirmCards: () => void;
   onResolve: () => void;
   failMoveTargetNodeId: string;
   onFailMoveTargetChange: (nodeId: string) => void;
-  onFail: () => void;
+  onFail: (spendEnergyToRetry?: boolean) => void;
   onClose: () => void;
 }) => {
   const activeInteraction = projection.interaction;
@@ -743,8 +892,20 @@ const InteractionPanel = ({
   const interactionsById = projection.tile_catalog?.interactions || {};
   const activePlayedCards = activeInteraction?.played_cards || [];
   const selectedCapabilityId = selectedCapability?.id;
-  const activeOwnedPlayedCards = activePlayedCards.filter((card: CardProjection) => card.capability_id === selectedCapabilityId);
-  const lockedPlayedCards = activePlayedCards.filter((card: CardProjection) => card.capability_id !== selectedCapabilityId);
+  const initiatorConfirmationRequired = Boolean(
+    activeInteraction
+    && activeInteraction.initiator_confirmed === false
+    && activeInteraction.initiator_capability_id !== selectedCapabilityId,
+  );
+  const canEditInitiatorCards = Boolean(
+    activeInteraction
+    && activeInteraction.initiator_confirmed === false
+    && activeInteraction.initiator_capability_id === selectedCapabilityId,
+  );
+  const activeOwnedPlayedCards = canEditInitiatorCards
+    ? activePlayedCards.filter((card: CardProjection) => card.capability_id === selectedCapabilityId)
+    : [];
+  const lockedPlayedCards = activePlayedCards.filter((card: CardProjection) => !activeOwnedPlayedCards.some((owned: CardProjection) => owned.card_id === card.card_id));
   const handCards = selectedCapability?.hand || [];
   const selectableCards = [...activeOwnedPlayedCards, ...handCards];
   const selectableCardMap = new Map(selectableCards.map((card: CardProjection) => [card.card_id, card]));
@@ -752,15 +913,17 @@ const InteractionPanel = ({
     .map((cardId) => selectableCardMap.get(cardId))
     .filter(Boolean) as CardProjection[];
   const playedInteractions = [...lockedPlayedCards, ...selectedCards].reduce((selected: string[], card: CardProjection) => {
-    selected.push(chooseCardInteractionForTile(card, tile, selected));
+    selected.push(chooseCardInteractionForTile(card, tile, selected, projection.counter_attack_unlocked !== false));
     return selected;
   }, []);
-  const missingSuccess = [...(tile.interaction_ids || [])];
+  const requiredInteractionIds = activeInteraction?.courtship_card?.interaction_ids || tile.interaction_ids || [];
+  const missingSuccess = [...requiredInteractionIds];
   playedInteractions.forEach((interactionId: string) => {
     const index = missingSuccess.indexOf(interactionId);
     if (index >= 0) missingSuccess.splice(index, 1);
   });
-  const missingCounter = [...(tile.counter_attack_interaction_ids || [])];
+  const counterAttackUnlocked = projection.counter_attack_unlocked !== false;
+  const missingCounter = counterAttackUnlocked ? [...(tile.counter_attack_interaction_ids || [])] : [];
   playedInteractions.forEach((interactionId: string) => {
     const index = missingCounter.indexOf(interactionId);
     if (index >= 0) missingCounter.splice(index, 1);
@@ -769,8 +932,15 @@ const InteractionPanel = ({
   const carriedShells = Math.max(0, Number(projection.poulpita?.seashells || 0));
   const missingShells = Math.max(0, shellRequirementCount - carriedShells);
   const canResolve = missingSuccess.length === 0 && missingShells === 0;
+  const confirmationPending = Boolean(canEditInitiatorCards || selectedCardIds.some((cardId) => !activeOwnedPlayedCards.some((card: CardProjection) => card.card_id === cardId)));
+  const missingCardSymbols = [...missingSuccess, ...missingCounter];
+  const cardCanFillMissing = (card: CardProjection) => {
+    const options = card.interaction_ids?.length ? card.interaction_ids : [card.interaction_id];
+    return options.some((interactionId) => missingCardSymbols.includes(interactionId));
+  };
   const canInitiate = !activeInteraction && projection.active_capability_id === selectedCapability?.id;
   const requiresFreeFailureMove = Boolean(activeInteraction && (tile.failure_effects || []).some((effect: any) => effect.type === "pulpita_move_free"));
+  const isCourtship = Boolean(activeInteraction?.courtship_card);
   const currentNodeId = projection.poulpita?.node_id || "";
   const adjacentNodeIds = currentNodeId ? projection.map?.adjacency?.[currentNodeId] || [] : [];
   const panelTone = visualState === "success"
@@ -816,7 +986,7 @@ const InteractionPanel = ({
             {!activeInteraction ? <button className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-200 hover:bg-slate-800" onClick={onClose} type="button">Close</button> : null}
           </div>
             <div className="mt-3 rounded-md border border-slate-700 bg-slate-950 p-3">
-              <HexTilePreview className="max-w-[15rem]" event={event} interactionsById={interactionsById} tile={tile} />
+              {isCourtship && activeInteraction.courtship_card.image_url ? <img alt={activeInteraction.courtship_card.name || "Courtship card"} className="mx-auto max-h-64 max-w-full rounded object-contain" src={buildApiUrl(activeInteraction.courtship_card.image_url)} /> : <HexTilePreview className="max-w-[15rem]" event={event} interactionsById={interactionsById} tile={tile} />}
             <p className="mt-2 text-center font-semibold text-white">{tile.name || tileInstance.tile_id}</p>
             <p className="mt-1 text-center text-xs text-slate-400">Node {activeInteraction?.node_id || projection.poulpita.node_id || "-"}</p>
           </div>
@@ -824,11 +994,15 @@ const InteractionPanel = ({
             <p className="font-semibold text-slate-200">Missing for success</p>
             <MissingIcons ids={missingSuccess} />
             <MissingShellIcons />
-            {(tile.counter_attack_interaction_ids || []).length ? (
+            {(tile.counter_attack_interaction_ids || []).length && counterAttackUnlocked ? (
               <>
                 <p className="mt-3 font-semibold text-slate-200">Missing for counter-attack</p>
                 <MissingIcons ids={missingCounter} />
               </>
+            ) : (tile.counter_attack_interaction_ids || []).length ? (
+              <p className="mt-3 rounded border border-cyan-800 bg-slate-950 px-2 py-1.5 text-xs text-cyan-200">
+                Counter-attack unlocks at size step {projection.counter_attack_min_size_index}.
+              </p>
             ) : null}
           </div>
         </div>
@@ -854,7 +1028,7 @@ const InteractionPanel = ({
               {handCards.map((card: CardProjection) => (
                 <CardButton
                   card={card}
-                  disabled={pending || projection.active_capability_id !== selectedCapability?.id}
+                  disabled={pending || initiatorConfirmationRequired || (!selectedCardIds.includes(card.card_id) && !cardCanFillMissing(card))}
                   key={card.card_id}
                   onClick={() => onToggleCard(card.card_id)}
                   projection={projection}
@@ -873,8 +1047,16 @@ const InteractionPanel = ({
                     {adjacentNodeIds.map((nodeId: string) => <option key={nodeId} value={nodeId}>{nodeId}</option>)}
                   </select>
                 ) : null}
-                <button className="rounded border border-rose-500 px-3 py-2 text-sm text-rose-100 hover:bg-rose-950 disabled:opacity-50" disabled={pending || (requiresFreeFailureMove && !failMoveTargetNodeId)} onClick={onFail} type="button">Fail</button>
-                <button className="rounded bg-teal-400 px-3 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-300 disabled:opacity-50" disabled={pending} onClick={onResolve} type="button">{canResolve ? "Confirm interaction" : "Confirm cards"}</button>
+                {isCourtship ? <button className="rounded border border-amber-400 px-3 py-2 text-sm text-amber-100 hover:bg-amber-950 disabled:opacity-50" disabled={pending || Number(projection.poulpita.energy || 0) <= 1} onClick={() => onFail(true)} type="button">Spend 1 energy and retry</button> : null}
+                <button className="rounded border border-rose-500 px-3 py-2 text-sm text-rose-100 hover:bg-rose-950 disabled:opacity-50" disabled={pending || (requiresFreeFailureMove && !failMoveTargetNodeId)} onClick={() => onFail(false)} type="button">{isCourtship ? "Leave and move away" : "Fail"}</button>
+                <button
+                  className="rounded bg-teal-400 px-3 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-300 disabled:opacity-50"
+                  disabled={pending || initiatorConfirmationRequired || (!confirmationPending && !canResolve)}
+                  onClick={confirmationPending ? onConfirmCards : onResolve}
+                  type="button"
+                >
+                  {initiatorConfirmationRequired ? "Waiting for initiator" : confirmationPending ? "Confirm cards" : canResolve ? "Resolve interaction" : "Select missing cards"}
+                </button>
               </>
             ) : (
               <button className="rounded bg-teal-400 px-3 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-300 disabled:opacity-50" disabled={pending || !canInitiate} onClick={onInitiate} type="button">Initiate interaction</button>
@@ -1219,6 +1401,7 @@ type BotLogEntry = {
   text: string;
   createdAt: number;
   status?: string;
+  replayIndex?: number;
 };
 
 type PlanTreeOption = {
@@ -1332,7 +1515,9 @@ const actionVisual = (step: PlanChainStep, projection: GameProjection) => {
   const payload = command?.payload || {};
   const actorId = typeof payload.capability_id === "string" ? payload.capability_id : "";
   const type = command?.type || step.command_type || "";
-  const tile = type === "start_interaction" ? tileForInstance(projection, payload.tile_instance_id) : null;
+  const tile = ["start_interaction", "fail_unavailable_compulsory_tile"].includes(type)
+    ? tileForInstance(projection, payload.tile_instance_id)
+    : null;
   const tileImage = tile?.event?.image_url || tile?.image_url;
   if (type === "start_interaction" && tileImage) {
     return { actorId, imageUrl: buildApiUrl(tileImage), text: "", Icon: Swords, title: `Interact ${tileNameForInstance(projection, payload.tile_instance_id)}` };
@@ -1341,9 +1526,11 @@ const actionVisual = (step: PlanChainStep, projection: GameProjection) => {
   if (type === "collect_action_points") return { actorId, text: "AP", Icon: CirclePlus, title: "Collect AP" };
   if (type === "move_poulpita") return { actorId, text: String(payload.target_node_id || ""), Icon: MoveRight, title: `Move ${payload.target_node_id || ""}` };
   if (type === "draw_action_card") return { actorId, text: "Draw", Icon: Sparkles, title: "Draw card" };
+  if (type === "use_special_power") return { actorId, text: "Power", Icon: Sparkles, title: "Use special power" };
   if (type === "start_interaction") return { actorId, text: "Fight", Icon: Swords, title: `Interact ${tileNameForInstance(projection, payload.tile_instance_id)}` };
   if (type === "resolve_interaction") return { actorId, text: "OK", Icon: Check, title: "Commit cards" };
   if (type === "fail_interaction") return { actorId, text: "Fail", Icon: X, title: "Fail interaction" };
+  if (type === "fail_unavailable_compulsory_tile") return { actorId, text: "Fail", Icon: X, title: `Fail ${tileNameForInstance(projection, payload.tile_instance_id)}` };
   if (type === "resolve_surprise_card") return { actorId, text: payload.accept === false ? "Skip" : "Surp", Icon: Sparkles, title: payload.accept === false ? "Skip surprise" : "Resolve surprise" };
   if (type === "end_night") return { actorId, text: "Night", Icon: Moon, title: "End night" };
   if (type === "end_day") return { actorId, text: "Day", Icon: Moon, title: "End day" };
@@ -1366,12 +1553,16 @@ const compactPlanStepLabel = (step: PlanChainStep, projection: GameProjection) =
       return `${actor} Move ${payload.target_node_id || "?"}`;
     case "draw_action_card":
       return `${actor} Draw`;
+    case "use_special_power":
+      return `${actor} Special power`;
     case "start_interaction":
       return `${actor} Interact ${tileNameForInstance(projection, payload.tile_instance_id)}`;
     case "resolve_interaction":
       return `${actor} Commit cards`;
     case "fail_interaction":
       return "Fail interaction";
+    case "fail_unavailable_compulsory_tile":
+      return `Fail ${tileNameForInstance(projection, payload.tile_instance_id)}`;
     case "resolve_surprise_card":
       return payload.accept === false ? "Skip surprise" : payload.capability_id ? `${actor} Resolve surprise` : "Resolve surprise";
     case "end_day":
@@ -1655,7 +1846,7 @@ const BotActionLog = ({
         {entries.length ? (
           entries.map((entry) => (
             <p className="border-b border-slate-800 py-1.5 last:border-b-0" key={entry.id}>
-              {new Date(entry.createdAt).toLocaleTimeString()} - {entry.text}
+              {entry.replayIndex !== undefined ? `Step ${entry.replayIndex}` : new Date(entry.createdAt).toLocaleTimeString()} - {entry.text}
             </p>
           ))
         ) : (
@@ -1666,16 +1857,18 @@ const BotActionLog = ({
   </div>
 );
 
-const GameRoomPage = () => {
-  const { roomId } = useParams();
+const GameRoomPage = ({ replayMode = false }: { replayMode?: boolean }) => {
+  const { roomId, replayId } = useParams();
   const { token, user } = useStore();
   const navigate = useNavigate();
   const socketRef = useRef<WebSocket | null>(null);
+  const orchestratorPendingRef = useRef(false);
   const pendingPlanContinuationRef = useRef<{ expectedCommand: { type: string; payload?: Record<string, unknown> } | null; previousPlanIds: string[] } | null>(null);
   const [projection, setProjection] = useState<GameProjection | null>(null);
   const [levels, setLevels] = useState<Array<any>>([]);
   const [focusedCapabilityId, setFocusedCapabilityId] = useState<string | null>(null);
   const [moveMode, setMoveMode] = useState(false);
+  const [specialTargetMode, setSpecialTargetMode] = useState<"intelligence" | "propulsion" | "camouflage" | null>(null);
   const [feedback, setFeedback] = useState("");
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
@@ -1696,6 +1889,16 @@ const GameRoomPage = () => {
   const [botLogEntries, setBotLogEntries] = useState<BotLogEntry[]>([]);
   const [botLogPopups, setBotLogPopups] = useState<BotLogEntry[]>([]);
   const [botLogOpen, setBotLogOpen] = useState(false);
+  const [botsOnlyPaused, setBotsOnlyPaused] = useState(false);
+  const [orchestratorRunning, setOrchestratorRunning] = useState(false);
+  const [orchestratorElapsedSeconds, setOrchestratorElapsedSeconds] = useState(0);
+  const [replay, setReplay] = useState<BotReplay | null>(null);
+  const [replayFrameIndex, setReplayFrameIndex] = useState(0);
+  const [replayPlaying, setReplayPlaying] = useState(false);
+  const [replaySpeed, setReplaySpeed] = useState(4);
+  const [apRollAnimation, setApRollAnimation] = useState<ApRollAnimation | null>(null);
+  const handledApRollEventsRef = useRef<Set<string>>(new Set());
+  const apRollRunRef = useRef(0);
 
   const capabilityMap = projection?.capabilities || {};
   const capabilities = useMemo(() => {
@@ -1707,14 +1910,30 @@ const GameRoomPage = () => {
   }, [capabilityMap, projection]);
   const selectedCapabilityId = focusedCapabilityId || projection?.focused_capability_id || capabilities[0]?.id || "";
   const selectedCapability = selectedCapabilityId ? capabilityMap[selectedCapabilityId] : null;
-  const otherCapabilities = capabilities.filter((capability) => capability.id !== selectedCapabilityId);
-  const botModeEnabled = projection?.mode === "solo_with_bots" && Boolean(projection?.bot_config);
+  const botsOnlyMode = !replayMode && projection?.mode === "bots_only" && Boolean(projection?.bot_config);
+  const botModeEnabled = !replayMode && projection?.mode === "solo_with_bots" && Boolean(projection?.bot_config);
+  const botLogEnabled = replayMode || botModeEnabled || botsOnlyMode;
+  const inspectionPending = pending || botsOnlyMode;
+  const gameplayPending = inspectionPending || replayMode;
   const activePlanTreePlans = useMemo(() => {
     const proposals = botPlanStatus?.proposals || [];
     if (!activePlanIds.length) return [];
     const activeIds = new Set(activePlanIds);
     return proposals.filter((plan) => activeIds.has(plan.plan_id));
   }, [activePlanIds, botPlanStatus?.proposals]);
+  const replayLogEntries = useMemo<BotLogEntry[]>(() => {
+    if (!replayMode || !replay?.frames?.length) return [];
+    return replay.frames
+      .slice(1, replayFrameIndex + 1)
+      .map((frame) => ({
+        id: `replay-log-${frame.index}`,
+        text: frame.decision?.plan_title || String(frame.command?.type || "action").replaceAll("_", " "),
+        createdAt: frame.index,
+        replayIndex: frame.index,
+        status: "ok",
+      }))
+      .reverse();
+  }, [replay, replayFrameIndex, replayMode]);
 
   const pushBotLog = useCallback((text: string, status: string = "ok") => {
     const entry = { id: makeCommandId(), text, createdAt: Date.now(), status };
@@ -1730,6 +1949,24 @@ const GameRoomPage = () => {
       setFocusedCapabilityId(projection.focused_capability_id || projection.capability_order?.[0] || null);
     }
   }, [focusedCapabilityId, projection]);
+
+  useEffect(() => {
+    setSpecialTargetMode(null);
+  }, [focusedCapabilityId, projection?.version]);
+
+  useEffect(() => {
+    if (!botsOnlyMode || botsOnlyPaused) return;
+    const activeCapabilityId = projection?.active_capability_id;
+    if (!activeCapabilityId || activeCapabilityId === focusedCapabilityId) return;
+    setFocusedCapabilityId(activeCapabilityId);
+    setMoveMode(false);
+  }, [botsOnlyMode, botsOnlyPaused, focusedCapabilityId, projection?.active_capability_id]);
+
+  useEffect(() => {
+    if (!replayMode || !replayPlaying || !projection?.active_capability_id) return;
+    setFocusedCapabilityId(projection.active_capability_id);
+    setMoveMode(false);
+  }, [projection?.active_capability_id, replayMode, replayPlaying]);
 
   useEffect(() => {
     if (!feedback && !error) {
@@ -1749,10 +1986,18 @@ const GameRoomPage = () => {
   }, [feedback, error]);
 
   useEffect(() => {
-    if (projection?.phase !== "game_over" || !roomId) return undefined;
+    if (replayMode || projection?.phase !== "game_over" || !roomId) return undefined;
     const timer = window.setTimeout(() => navigate(`/games/${roomId}/post-game`), 3500);
     return () => window.clearTimeout(timer);
-  }, [navigate, projection?.phase, roomId]);
+  }, [navigate, projection?.phase, replayMode, roomId]);
+
+  useEffect(() => {
+    if (!replayMode || !replay?.frames?.length) return undefined;
+    const lastFrameIndex = replay.frames.length - 1;
+    if (replayFrameIndex < lastFrameIndex) return undefined;
+    const timer = window.setTimeout(() => navigate("/admin/content#bot_simulations"), 3500);
+    return () => window.clearTimeout(timer);
+  }, [navigate, replay, replayFrameIndex, replayMode]);
 
   useEffect(() => {
     if (!selectedCapability) {
@@ -1770,13 +2015,15 @@ const GameRoomPage = () => {
     if (!projection?.interaction) return;
     setSelectedTileInstanceId(projection.interaction.tile_instance_id || null);
     setInteractionPanelState("open");
-    const activeCapabilityId = projection.active_capability_id;
-    const activePlayedCardIds = (projection.interaction.played_cards || [])
-      .filter((card: CardProjection) => card.capability_id === activeCapabilityId)
-      .map((card: CardProjection) => card.card_id);
-    setSelectedCardIds(activePlayedCardIds);
+    const focusedPlayedCardIds = projection.interaction.initiator_confirmed === false
+      && projection.interaction.initiator_capability_id === focusedCapabilityId
+      ? (projection.interaction.played_cards || [])
+        .filter((card: CardProjection) => card.capability_id === focusedCapabilityId)
+        .map((card: CardProjection) => card.card_id)
+      : [];
+    setSelectedCardIds(focusedPlayedCardIds);
     setFailMoveTargetNodeId("");
-  }, [projection?.active_capability_id, projection?.interaction?.tile_instance_id, projection?.version]);
+  }, [focusedCapabilityId, projection?.interaction?.tile_instance_id, projection?.version]);
 
   useEffect(() => {
     if (!projection?.pending_surprise) setSurpriseSelectedCardIds([]);
@@ -1786,10 +2033,60 @@ const GameRoomPage = () => {
     const events = projection?.events || [];
     return events.length ? events[events.length - 1] : null;
   }, [projection?.events]);
+
+  useEffect(() => {
+    const event = latestEvent as any;
+    if (event?.type !== "action_points_collected") return;
+    const eventId = String(event.event_id || `${event.command_id || "collect"}-${event.version || 0}`);
+    if (handledApRollEventsRef.current.has(eventId)) return;
+    if (!replayMode && event.created_at && Date.now() - new Date(event.created_at).getTime() > 10000) {
+      handledApRollEventsRef.current.add(eventId);
+      return;
+    }
+    handledApRollEventsRef.current.add(eventId);
+    const configuredSides = Array.isArray(event.die_sides)
+      ? event.die_sides
+      : projection?.tile_catalog?.poulpita_panel?.ap_die_sides;
+    const sides = (Array.isArray(configuredSides) && configuredSides.length ? configuredSides : [1, 2, 3, 4, 5, 6])
+      .map((value: unknown) => Math.max(0, Number(value || 0)));
+    const finalValue = Math.max(0, Number(event.amount || 0));
+    const capabilityId = String(event.capability_id || "");
+    const runId = apRollRunRef.current + 1;
+    apRollRunRef.current = runId;
+    const wait = (milliseconds: number) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+    const animate = async () => {
+      setApRollAnimation({ capabilityId, displayedValue: sides[0], finalValue, awarded: 0, sides, phase: "rolling" });
+      for (let index = 0; index < 11; index += 1) {
+        await wait(65);
+        if (apRollRunRef.current !== runId) return;
+        setApRollAnimation((current) => current ? { ...current, displayedValue: sides[(index * 3 + 1) % sides.length] } : current);
+      }
+      setApRollAnimation((current) => current ? { ...current, displayedValue: finalValue, phase: "landed" } : current);
+      await wait(240);
+      for (let awarded = 1; awarded <= finalValue; awarded += 1) {
+        if (apRollRunRef.current !== runId) return;
+        setApRollAnimation((current) => current ? { ...current, awarded, phase: "awarding" } : current);
+        await wait(75);
+      }
+      await wait(420);
+      if (apRollRunRef.current === runId) setApRollAnimation(null);
+    };
+    void animate();
+  }, [latestEvent, projection?.tile_catalog?.poulpita_panel?.ap_die_sides, replayMode]);
+
   const gameWon = projection?.phase === "game_over" && (latestEvent?.type === "game_won" || Boolean(projection?.objectives?.length && projection.objectives.every((objective: any) => objective.completed)));
+  const gameOverTitle = gameWon
+    ? "All objectives completed"
+    : ({
+        poulpita_no_energy: "Poulpita has no energy left",
+        maximum_nights_reached: "The final day has ended",
+        size_deadline_missed: "The required size was not reached in time",
+        no_controls_or_actions: "No actions remain",
+      } as Record<string, string>)[projection?.game_over_reason || String(latestEvent?.reason || "")]
+      || "The game is lost";
 
   const loadProjection = useCallback(async () => {
-    if (!token || !roomId) return;
+    if (replayMode || !token || !roomId) return;
     try {
       const response = await fetch(buildApiUrl(`/api/game/rooms/${roomId}/state?t=${Date.now()}`), {
         cache: "no-store",
@@ -1848,7 +2145,91 @@ const GameRoomPage = () => {
     } finally {
       setBotPlansLoading(false);
     }
-  }, [roomId, token]);
+  }, [replayMode, roomId, token]);
+
+  useEffect(() => {
+    if (!replayMode || !token || !replayId) return;
+    let cancelled = false;
+    const loadReplay = async () => {
+      try {
+        const response = await fetch(buildApiUrl(`/api/admin/bot-simulations/${replayId}`), {
+          cache: "no-store",
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.detail || "Failed to load replay.");
+        if (cancelled) return;
+        setReplay(payload);
+        setReplayFrameIndex(0);
+        setError("");
+      } catch (loadError: any) {
+        if (!cancelled) setError(loadError.message || "Failed to load replay.");
+      }
+    };
+    void loadReplay();
+    return () => {
+      cancelled = true;
+    };
+  }, [replayId, replayMode, token]);
+
+  useEffect(() => {
+    if (!replayMode || !replay?.frames?.length) return;
+    const frame = replay.frames[Math.min(replayFrameIndex, replay.frames.length - 1)];
+    if (!frame) return;
+    setProjection({
+      ...frame.projection,
+      map: replay.map,
+      tile_catalog: replay.tile_catalog,
+    } as GameProjection);
+  }, [replay, replayFrameIndex, replayMode]);
+
+  useEffect(() => {
+    if (!replayMode || !replayPlaying || !replay?.frames?.length) return undefined;
+    const timer = window.setInterval(() => {
+      setReplayFrameIndex((current) => {
+        const lastIndex = replay.frames.length - 1;
+        if (current >= lastIndex) {
+          setReplayPlaying(false);
+          return current;
+        }
+        return current + 1;
+      });
+    }, Math.max(40, 1000 / replaySpeed));
+    return () => window.clearInterval(timer);
+  }, [replay, replayMode, replayPlaying, replaySpeed]);
+
+  const runOrchestratorStep = useCallback(async () => {
+    if (!token || !roomId || orchestratorPendingRef.current) return;
+    orchestratorPendingRef.current = true;
+    setOrchestratorRunning(true);
+    try {
+      const response = await fetch(buildApiUrl(`/api/game/rooms/${roomId}/bot-orchestrator/step`), {
+        method: "POST",
+        cache: "no-store",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || "Bot orchestrator failed.");
+      if (payload.projection) setProjection(payload.projection);
+      if (payload.ok) {
+        const commandType = String(payload.decision?.command?.type || "action").replaceAll("_", " ");
+        const title = payload.decision?.plan_title || payload.decision?.plan_id || "plan";
+        pushBotLog(`${title}: ${commandType}`, "ok");
+        setBotPlanStatus(null);
+      } else if (payload.status === "idle") {
+        setBotsOnlyPaused(true);
+        setFeedback(payload.message || "The orchestrator has no executable action. Bots were paused.");
+      } else {
+        setFeedback(payload.message || "The orchestrator action was rejected.");
+      }
+    } catch (orchestratorError: any) {
+      setBotsOnlyPaused(true);
+      setError(orchestratorError.message || "Bot orchestrator failed.");
+    } finally {
+      orchestratorPendingRef.current = false;
+      setOrchestratorRunning(false);
+    }
+  }, [pushBotLog, roomId, token]);
 
   useEffect(() => {
     if (!activePlanIds.length || !botPlanStatus || activePlanTreePlans.length) return;
@@ -1890,12 +2271,32 @@ const GameRoomPage = () => {
   }, [botModeEnabled, botPlanStatus, botPlansLoading, loadBotPlans, projection?.phase]);
 
   useEffect(() => {
+    if (!botsOnlyMode || botsOnlyPaused || !projection || ["setup", "game_over"].includes(projection.phase)) return undefined;
+    const timer = window.setTimeout(() => {
+      void runOrchestratorStep();
+    }, 1000);
+    return () => window.clearTimeout(timer);
+  }, [botsOnlyMode, botsOnlyPaused, projection?.phase, projection?.version, runOrchestratorStep]);
+
+  useEffect(() => {
+    if (!orchestratorRunning) {
+      setOrchestratorElapsedSeconds(0);
+      return undefined;
+    }
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => {
+      setOrchestratorElapsedSeconds(Math.max(1, Math.floor((Date.now() - startedAt) / 1000)));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [orchestratorRunning]);
+
+  useEffect(() => {
     void loadProjection();
   }, [loadProjection]);
 
   useEffect(() => {
     const loadLevels = async () => {
-      if (!token) return;
+      if (replayMode || !token) return;
       try {
         const response = await fetch(buildApiUrl("/api/game/levels"), {
           headers: { Authorization: `Bearer ${token}` },
@@ -1908,10 +2309,10 @@ const GameRoomPage = () => {
       }
     };
     void loadLevels();
-  }, [token]);
+  }, [replayMode, token]);
 
   useEffect(() => {
-    if (!token || !roomId) return undefined;
+    if (replayMode || !token || !roomId) return undefined;
     const socket = new WebSocket(buildWsUrl(`/api/game/rooms/${roomId}/ws`, { token }));
     let disposed = false;
     socketRef.current = socket;
@@ -1950,10 +2351,10 @@ const GameRoomPage = () => {
         socket.close(1000, "leaving room");
       }
     };
-  }, [loadProjection, roomId, token]);
+  }, [loadProjection, replayMode, roomId, token]);
 
   useEffect(() => {
-    if (!token || !roomId) return undefined;
+    if (replayMode || !token || !roomId) return undefined;
     const refreshProjection = () => {
       if (document.visibilityState === "hidden") return;
       void loadProjection();
@@ -1971,7 +2372,7 @@ const GameRoomPage = () => {
       window.removeEventListener("online", refreshProjection);
       document.removeEventListener("visibilitychange", refreshProjection);
     };
-  }, [loadProjection, roomId, token]);
+  }, [loadProjection, replayMode, roomId, token]);
 
   const plannedCommandMatches = (step: PlanChainStep | undefined, type: string, payload: Record<string, unknown>) => {
     const planned = step?.public_command;
@@ -2001,6 +2402,10 @@ const GameRoomPage = () => {
   };
 
   const submitCommand = async (type: string, payload: Record<string, unknown> = {}, source: "manual" | "plan" = "manual") => {
+    if (replayMode) {
+      setFeedback("Replay is read-only. Use the timeline controls to advance the simulation.");
+      return null;
+    }
     if (!token || !roomId || pending) return null;
     setPending(true);
     setFeedback("");
@@ -2124,6 +2529,42 @@ const GameRoomPage = () => {
     });
   };
 
+  const useSpecialPower = () => {
+    if (!selectedCapabilityId || !projection) return;
+    const payload: Record<string, any> = { capability_id: selectedCapabilityId };
+    if (["intelligence", "propulsion", "camouflage"].includes(selectedCapabilityId)) {
+      setMoveMode(false);
+      setSpecialTargetMode(selectedCapabilityId as "intelligence" | "propulsion" | "camouflage");
+      setFeedback(selectedCapabilityId === "intelligence" ? "Select a hidden tile on an adjacent node." : "Select a highlighted destination node.");
+      return;
+    }
+    setMoveMode(false);
+    setSpecialTargetMode(null);
+    void submitCommand("use_special_power", payload);
+  };
+
+  const selectSpecialTile = (tileInstanceId: string) => {
+    if (specialTargetMode !== "intelligence" || !selectedCapabilityId) return;
+    setSpecialTargetMode(null);
+    void submitCommand("use_special_power", { capability_id: selectedCapabilityId, tile_instance_id: tileInstanceId });
+  };
+
+  const selectSpecialNode = (targetNodeId: NodeId) => {
+    if (!projection || !selectedCapabilityId || !specialTargetMode) return;
+    const currentNodeId = projection.poulpita?.node_id || "";
+    if (specialTargetMode === "propulsion") {
+      const middleNodeId = (projection.map?.adjacency?.[currentNodeId] || []).find((nodeId: string) => (projection.map?.adjacency?.[nodeId] || []).includes(targetNodeId));
+      if (!middleNodeId) return;
+      setSpecialTargetMode(null);
+      void submitCommand("use_special_power", { capability_id: selectedCapabilityId, path: [middleNodeId, targetNodeId] });
+      return;
+    }
+    if (specialTargetMode === "camouflage") {
+      setSpecialTargetMode(null);
+      void submitCommand("use_special_power", { capability_id: selectedCapabilityId, target_node_id: targetNodeId });
+    }
+  };
+
   const inspectTile = (tileInstanceId: string) => {
     setMoveMode(false);
     setSelectedTileInstanceId(tileInstanceId);
@@ -2173,11 +2614,19 @@ const GameRoomPage = () => {
     if (result?.ok !== false) setInteractionPanelState("open");
   };
 
-  const confirmInteraction = async () => {
+  const confirmInteractionCards = async () => {
+    if (!selectedCapabilityId) return;
+    await submitCommand("resolve_interaction", {
+      capability_id: selectedCapabilityId,
+      card_ids: selectedCardIds,
+      confirm_only: true,
+    });
+  };
+
+  const resolveInteraction = async () => {
     if (!selectedCapabilityId) return;
     const result = await submitCommand("resolve_interaction", {
       capability_id: selectedCapabilityId,
-      card_ids: selectedCardIds,
     });
     const eventType = result?.events?.[0]?.type;
     if (eventType === "interaction_resolved") {
@@ -2191,8 +2640,8 @@ const GameRoomPage = () => {
     }
   };
 
-  const failInteraction = async () => {
-    const result = await submitCommand("fail_interaction", failMoveTargetNodeId ? { target_node_id: failMoveTargetNodeId } : {});
+  const failInteraction = async (spendEnergyToRetry = false) => {
+    const result = await submitCommand("fail_interaction", { ...(failMoveTargetNodeId ? { target_node_id: failMoveTargetNodeId } : {}), spend_energy_to_retry: spendEnergyToRetry });
     if (result?.ok !== false) {
       setFailMoveTargetNodeId("");
       setInteractionPanelState("failure");
@@ -2261,6 +2710,8 @@ const GameRoomPage = () => {
   };
 
   const hasAvailableBotPlans = Boolean(botModeEnabled && !botPlansOpen && (botPlanStatus?.proposals || []).length);
+  const currentReplayFrame = replay?.frames?.[replayFrameIndex] || null;
+  const replayLastFrameIndex = Math.max(0, Number(replay?.frames?.length || 1) - 1);
 
   return (
     <main className="h-screen overflow-hidden bg-slate-950 text-slate-100">
@@ -2270,7 +2721,41 @@ const GameRoomPage = () => {
           <span className="ml-3 text-slate-400">v{projection?.version ?? "-"} - {phaseLabel(projection)}</span>
         </div>
         <div className="flex items-center gap-2">
-          {projection?.phase === "setup" ? (
+          {replayMode ? (
+            <>
+              <span className="hidden max-w-56 truncate text-xs text-cyan-200 xl:block" title={currentReplayFrame?.decision?.plan_title || currentReplayFrame?.command?.type || "Initial state"}>
+                {currentReplayFrame?.decision?.plan_title || currentReplayFrame?.command?.type?.replaceAll("_", " ") || "Initial state"}
+              </span>
+              <button aria-label="Previous replay step" className="flex h-8 w-8 items-center justify-center rounded border border-slate-600 hover:bg-slate-800 disabled:opacity-40" disabled={replayFrameIndex <= 0} onClick={() => { setReplayPlaying(false); setReplayFrameIndex((current) => Math.max(0, current - 1)); }} title="Previous step" type="button"><ChevronLeft size={16} /></button>
+              <button aria-label={replayPlaying ? "Pause replay" : "Play replay"} className="flex h-8 w-8 items-center justify-center rounded bg-teal-400 text-slate-950 hover:bg-teal-300" onClick={() => setReplayPlaying((playing) => !playing)} title={replayPlaying ? "Pause" : "Play"} type="button">{replayPlaying ? <Pause size={16} /> : <Play size={16} />}</button>
+              <button aria-label="Next replay step" className="flex h-8 w-8 items-center justify-center rounded border border-slate-600 hover:bg-slate-800 disabled:opacity-40" disabled={replayFrameIndex >= replayLastFrameIndex} onClick={() => { setReplayPlaying(false); setReplayFrameIndex((current) => Math.min(replayLastFrameIndex, current + 1)); }} title="Next step" type="button"><ChevronRight size={16} /></button>
+              <span className="min-w-20 text-center text-xs text-slate-300">{replayFrameIndex} / {replayLastFrameIndex}</span>
+              <input aria-label="Replay position" className="w-28 accent-teal-400" max={replayLastFrameIndex} min="0" onChange={(event) => { setReplayPlaying(false); setReplayFrameIndex(Number(event.target.value)); }} type="range" value={replayFrameIndex} />
+              <select aria-label="Replay speed" className="h-8 rounded border border-slate-700 bg-slate-950 px-2 text-xs text-white" onChange={(event) => setReplaySpeed(Number(event.target.value))} value={replaySpeed}>
+                {[0.5, 1, 2, 4, 8, 16].map((speed) => <option key={speed} value={speed}>{speed}x</option>)}
+              </select>
+              <button aria-label="Exit replay" className="flex h-8 w-8 items-center justify-center rounded border border-slate-600 hover:bg-slate-800" onClick={() => navigate("/admin/content#bot_simulations")} title="Exit replay" type="button"><LogOut size={16} /></button>
+            </>
+          ) : null}
+          {!replayMode && botsOnlyMode && projection?.phase !== "setup" && projection?.phase !== "game_over" ? (
+            <>
+              <span className="text-xs text-cyan-200">
+                {orchestratorRunning
+                  ? `Simulating plan${orchestratorElapsedSeconds ? ` ${orchestratorElapsedSeconds}s` : ""}`
+                  : botsOnlyPaused
+                    ? "Bots paused"
+                    : "Bots playing"}
+              </span>
+              <button
+                className="rounded border border-cyan-500 px-3 py-1.5 text-xs text-cyan-100 hover:bg-cyan-950"
+                onClick={() => setBotsOnlyPaused((paused) => !paused)}
+                type="button"
+              >
+                {botsOnlyPaused ? "Resume bots" : "Pause bots"}
+              </button>
+            </>
+          ) : null}
+          {!replayMode && projection?.phase === "setup" ? (
             <>
               <select
                 className="h-8 rounded border border-slate-700 bg-slate-950 px-2 text-xs text-white"
@@ -2289,9 +2774,7 @@ const GameRoomPage = () => {
               </button>
             </>
           ) : null}
-          <button className="rounded border border-slate-700 px-3 py-1.5 text-xs hover:bg-slate-800 disabled:opacity-50" disabled={pending} onClick={endGame} type="button">
-            End game
-          </button>
+          {!replayMode ? <button className="rounded border border-slate-700 px-3 py-1.5 text-xs hover:bg-slate-800 disabled:opacity-50" disabled={pending} onClick={endGame} type="button">End game</button> : null}
         </div>
       </header>
 
@@ -2306,13 +2789,9 @@ const GameRoomPage = () => {
           <div className={["animate-[pulse_1.2s_ease-in-out_2] rounded-lg border px-8 py-5 text-center shadow-2xl", gameWon ? "border-teal-300 bg-teal-950" : "border-rose-300 bg-rose-950"].join(" ")}>
             <p className={["text-sm uppercase tracking-wide", gameWon ? "text-teal-200" : "text-rose-200"].join(" ")}>{gameWon ? "Game won" : "Game lost"}</p>
             <h2 className="mt-1 text-2xl font-semibold text-white">
-              {gameWon
-                ? "All objectives completed"
-                : String(latestEvent?.reason || "") === "poulpita_no_energy"
-                  ? "Poulpita has no energy left"
-                  : "No actions remain"}
+              {gameOverTitle}
             </h2>
-            <p className={["mt-2 text-sm", gameWon ? "text-teal-100" : "text-rose-100"].join(" ")}>Post-game opens in a few seconds.</p>
+            <p className={["mt-2 text-sm", gameWon ? "text-teal-100" : "text-rose-100"].join(" ")}>{replayMode ? "End of recorded simulation." : "Post-game opens in a few seconds."}</p>
           </div>
         </div>
       ) : null}
@@ -2320,52 +2799,37 @@ const GameRoomPage = () => {
       <section className="grid h-[95vh] grid-cols-[17rem_minmax(0,1fr)_minmax(14rem,25%)] grid-rows-[minmax(0,1fr)_minmax(11rem,24vh)] overflow-hidden">
         <aside className="row-span-2 flex min-h-0 flex-col gap-2 overflow-hidden border-r border-slate-800 bg-slate-950 p-2">
           <div className="flex min-h-0 flex-1 flex-col gap-2">
-            {otherCapabilities.map((capability) => (
+            {capabilities.map((capability) => (
               <div className="min-h-0 flex-1" key={capability.id}>
                 <CapabilityBoard
                   active={projection?.active_capability_id === capability.id}
+                  apPulseTick={apRollAnimation?.capabilityId === capability.id && apRollAnimation.phase === "awarding" ? apRollAnimation.awarded : 0}
                   capability={capability}
                   compact
-                  focused={false}
+                  focused={selectedCapabilityId === capability.id}
                   moveMode={moveMode}
                   onFocus={() => {
                     setFocusedCapabilityId(capability.id);
                     setMoveMode(false);
                   }}
-                  pending={pending}
+                  pending={inspectionPending}
                   projection={projection}
                 />
               </div>
             ))}
           </div>
-          <div className="min-h-0 h-[24vh] max-h-[24vh]">
-            {selectedCapability ? (
-              <CapabilityBoard
-                active={projection?.active_capability_id === selectedCapability.id}
-                capability={selectedCapability}
-                compact
-                focused
-                moveMode={moveMode}
-                onFocus={() => {
-                  setFocusedCapabilityId(selectedCapability.id);
-                  setMoveMode(false);
-                }}
-                pending={pending}
-                projection={projection}
-              />
-            ) : null}
-          </div>
         </aside>
         <div className="relative min-w-0 overflow-hidden border-r border-slate-800">
           {projection ? (
             <>
-              <BoardView focusedCapabilityId={selectedCapabilityId} moveMode={moveMode} onInspectTile={inspectTile} onMove={movePoulpita} onMoveShellFromShelter={moveShellFromShelter} pending={pending} projection={projection} />
+              <BoardView focusedCapabilityId={selectedCapabilityId} moveMode={moveMode} onInspectTile={inspectTile} onMove={movePoulpita} onMoveShellFromShelter={moveShellFromShelter} onSpecialNode={selectSpecialNode} onSpecialTile={selectSpecialTile} pending={inspectionPending} projection={projection} specialTargetMode={specialTargetMode} />
+              <ApRollOverlay animation={apRollAnimation} projection={projection} />
               {botModeEnabled ? (
                 <BotPlanTree
                   onExecuteOption={executePlanTreeOption}
                   onSelectOption={selectPlanTreeOption}
                   onToggleCollapsed={() => setBotPlanTreeCollapsed((collapsed) => !collapsed)}
-                  pending={pending}
+                  pending={gameplayPending}
                   activePlanIds={activePlanIds}
                   collapsed={botPlanTreeCollapsed}
                   plans={botPlanStatus?.proposals || []}
@@ -2389,12 +2853,12 @@ const GameRoomPage = () => {
                   {botPlansOpen ? "Close plans" : "Plans"}
                 </button>
               ) : null}
-              {botModeEnabled ? (
+              {botLogEnabled ? (
                 <BotActionLog
-                  entries={botLogEntries}
+                  entries={replayMode ? replayLogEntries : botLogEntries}
                   logOpen={botLogOpen}
                   onToggle={() => setBotLogOpen((open) => !open)}
-                  popups={botLogPopups}
+                  popups={replayMode ? [] : botLogPopups}
                 />
               ) : null}
               {botModeEnabled ? (
@@ -2413,9 +2877,10 @@ const GameRoomPage = () => {
                 onFailMoveTargetChange={setFailMoveTargetNodeId}
                 onClose={closeInteractionPanel}
                 onInitiate={initiateInteraction}
-                onResolve={confirmInteraction}
+                onConfirmCards={confirmInteractionCards}
+                onResolve={resolveInteraction}
                 onToggleCard={toggleDraftCard}
-                pending={pending}
+                pending={gameplayPending}
                 projection={projection}
                 selectedCardIds={selectedCardIds}
                 selectedCapability={selectedCapability}
@@ -2426,7 +2891,7 @@ const GameRoomPage = () => {
                 onResolve={resolveSurpriseCard}
                 onSkip={skipSurpriseCard}
                 onToggleCard={toggleSurpriseCard}
-                pending={pending}
+                pending={gameplayPending}
                 projection={projection}
                 selectedCapability={selectedCapability}
                 selectedCardIds={surpriseSelectedCardIds}
@@ -2443,8 +2908,8 @@ const GameRoomPage = () => {
           </div>
           <ObjectivesPanel projection={projection} />
           <TimeTracker projection={projection} />
-          <EnergyBar energy={Number(projection?.poulpita.energy || 0)} />
-          <PoulpitaResourcePanel onBuySize={buyPoulpitaSize} onMoveShellToShelter={moveShellToShelter} pending={pending} projection={projection} />
+          <EnergyBar energy={Number(projection?.poulpita.energy || 0)} maximum={Number(projection?.poulpita.max_energy || 32)} />
+          <PoulpitaResourcePanel onBuySize={buyPoulpitaSize} onMoveShellToShelter={moveShellToShelter} pending={gameplayPending} projection={projection} />
         </aside>
         <div className="grid min-h-0 grid-cols-[11rem_1fr] gap-2 overflow-hidden border-t border-r border-slate-800 bg-slate-950 p-1">
           <ActionPanel
@@ -2455,14 +2920,18 @@ const GameRoomPage = () => {
             onDraw={drawActionCard}
             onEndDay={endDay}
             onEndNight={endNight}
-            onMoveMode={() => setMoveMode((value) => !value)}
+            onMoveMode={() => { setSpecialTargetMode(null); setMoveMode((value) => !value); }}
+            onSpecialPower={useSpecialPower}
             onTakeControl={takeControl}
-            pending={pending}
+            pending={gameplayPending}
             projection={projection}
           />
           <div className="rounded-md border border-slate-800 bg-slate-900 p-3">
             <div className="flex items-center justify-between gap-3">
-              <h3 className="text-sm font-semibold text-white">{projection?.phase === "day" ? "Day upgrades" : "Player hand"}</h3>
+              <div className="flex items-center gap-2">
+                <h3 className="text-sm font-semibold text-white">{projection?.phase === "day" ? "Day upgrades" : "Player hand"}</h3>
+                {projection?.phase !== "day" ? <SpecialPowerHint capability={selectedCapability || null} projection={projection} /> : null}
+              </div>
               {discardBeforeDraw ? (
                 <button className="text-xs text-slate-400 hover:text-white" onClick={() => setDiscardBeforeDraw(false)} type="button">
                   Cancel discard
@@ -2482,7 +2951,7 @@ const GameRoomPage = () => {
                         "rounded-md border p-3 text-left text-xs transition",
                         bought ? "border-slate-700 bg-slate-950 text-slate-500" : "border-cyan-300 bg-slate-950 text-cyan-100 hover:bg-cyan-950",
                       ].join(" ")}
-                      disabled={pending || bought || Number(projection?.poulpita.neurons || 0) < cost}
+                      disabled={gameplayPending || bought || Number(projection?.poulpita.neurons || 0) < cost}
                       key={index}
                       onClick={() => buyHandSizeUpgrade(index)}
                       type="button"

@@ -64,9 +64,12 @@ TOKEN_TYPES = [
     {"id": "seashell", "name": "Seashell token"},
     {"id": "shelter", "name": "Shelter token"},
     {"id": "octopus", "name": "Octopus token"},
+    {"id": "courtship", "name": "Courtship token"},
 ]
 OCTOPUS_TOKEN_ID = "octopus"
-PLACEABLE_LEVEL_TOKEN_IDS = {"shelter", OCTOPUS_TOKEN_ID}
+COURTSHIP_TOKEN_ID = "courtship"
+COURTSHIP_LEVEL_TILE_ID = "__courtship_token__"
+PLACEABLE_LEVEL_TOKEN_IDS = {"shelter", OCTOPUS_TOKEN_ID, COURTSHIP_TOKEN_ID}
 POULPITA_PANEL_ZONE_IDS = {"neurons", "seashells"}
 SIZE_UNITS = {"mg", "g", "kg"}
 ADMIN_CONTENT_COLLECTION_KEYS = [
@@ -77,25 +80,36 @@ ADMIN_CONTENT_COLLECTION_KEYS = [
     "levels",
     "surprise_cards",
     "surprise_decks",
+    "courtship_cards",
     "player_boards",
     "tokens",
 ]
-ACTION_COST_KEYS = ["gain_ap", "move", "interact", "special_power"]
+ACTION_COST_KEYS = ["gain_ap", "move", "draw", "interact", "special_power"]
 DEFAULT_ACTION_COSTS = {
-    "gain_ap": {"ap_cost": 0, "time_cost": 0},
-    "move": {"ap_cost": 1, "time_cost": 1},
-    "interact": {"ap_cost": 1, "time_cost": 2},
-    "special_power": {"ap_cost": 1, "time_cost": 0},
+    "gain_ap": {"ap_cost": 0, "time_cost": 0, "neuron_cost": 0},
+    "move": {"ap_cost": 1, "time_cost": 1, "neuron_cost": 0},
+    "draw": {"ap_cost": 1, "time_cost": 1, "neuron_cost": 0},
+    "interact": {"ap_cost": 2, "time_cost": 2, "neuron_cost": 0},
+    "special_power": {"ap_cost": 2, "time_cost": 2, "neuron_cost": 1},
 }
 DEFAULT_BOT_SETTINGS = {
     "expected_ap_roll": 3,
     "planning_depth_take_controls": 3,
+    "orchestrator_rollout_take_controls": 3,
+    "orchestrator_rollouts_per_plan": 3,
+    "orchestrator_sampling_temperature": 1.0,
+    "orchestrator_max_candidates": 8,
     "max_plans": 3,
     "min_energy_after_size_upgrade": 4,
+    "special_power_start_night": 4,
     "weights": {
         "efficiency": 35,
         "confidence": 35,
         "expected_gain": 30,
+        "tile_resolution": 14,
+        "compulsory_tile_resolution": 35,
+        "third_ability_penalty": 45,
+        "late_shelter_urgency": 8,
     },
     "resource_weights": {
         "energy": 8,
@@ -130,6 +144,7 @@ def _empty_content() -> dict[str, Any]:
         "levels": [],
         "surprise_cards": [],
         "surprise_decks": [],
+        "courtship_cards": [],
         "player_boards": _default_player_boards(),
         "tokens": _default_tokens(),
         "poulpita_panel": _default_poulpita_panel(),
@@ -204,24 +219,35 @@ def _read_content() -> dict[str, Any]:
     content.setdefault("levels", [])
     content.setdefault("surprise_cards", [])
     content.setdefault("surprise_decks", [])
+    content.setdefault("courtship_cards", [])
     for category in content["categories"]:
         category["compulsory_on_same_node"] = bool(category.get("compulsory_on_same_node") or False)
     content["player_boards"] = _normalize_player_boards(content.get("player_boards") or [])
     content["tokens"] = _normalize_tokens(content.get("tokens") or [])
     content["poulpita_panel"] = _normalize_poulpita_panel(content.get("poulpita_panel") or {})
+    content["action_costs"] = _normalize_action_costs(content.get("action_costs") or {})
     content["bot_settings"] = _normalize_bot_settings(content.get("bot_settings") or {})
     for tile in content["tiles"]:
         tile["priority"] = int(tile.get("priority") or 0)
         tile.setdefault("interaction_ids", [])
+        tile["shell_requirement_count"] = max(0, int(tile.get("shell_requirement_count") or 0))
         tile.setdefault("counter_attack_interaction_ids", [])
         tile.setdefault("success_effects", [])
         tile.setdefault("counter_attack_effects", [])
         tile.setdefault("failure_effects", [])
     for level in content["levels"]:
         level["objectives"] = _normalize_level_objectives(level.get("objectives") or [])
-        level["starting_energy"] = max(0, min(32, int(level.get("starting_energy") or 3)))
+        level["max_energy"] = max(1, min(32, int(level.get("max_energy") or 32)))
+        level["starting_energy"] = max(0, min(level["max_energy"], int(level.get("starting_energy") if level.get("starting_energy") is not None else 8)))
         level["starting_neurons"] = max(0, int(level.get("starting_neurons") or 0))
         level["night_duration_steps"] = max(1, int(level.get("night_duration_steps") or 24))
+        level["max_nights"] = max(1, int(level.get("max_nights") or 5))
+        level["counter_attack_min_size_index"] = max(1, int(level.get("counter_attack_min_size_index") or 1))
+        level["courtship_min_size_index"] = max(0, int(level.get("courtship_min_size_index") if level.get("courtship_min_size_index") is not None else 3))
+        level["courtship_min_energy"] = max(1, int(level.get("courtship_min_energy") or 8))
+        level["win_min_energy"] = max(1, int(level.get("win_min_energy") or 5))
+        level["size_deadline_night"] = max(1, int(level.get("size_deadline_night") or 4))
+        level["tile_sets"] = list(level.get("tile_sets") or [])
         level["surprise_deck_id"] = level.get("surprise_deck_id") or ""
         level["poulpita_starting_node_id"] = str(level.get("poulpita_starting_node_id") or "")
         level["node_tokens"] = level.get("node_tokens") or {}
@@ -279,7 +305,8 @@ def _default_poulpita_panel() -> dict[str, Any]:
         "image_filename": None,
         "image_width": None,
         "image_height": None,
-        "sizes": [{"amount": 1.0, "unit": "kg", "energy_cost": 0}],
+        "ap_die_sides": [1, 2, 3, 4, 5, 6],
+        "sizes": [{"amount": 1.0, "unit": "kg", "energy_cost": 0, "image_filename": None}],
         "zones": {
             "neurons": {"x": 0.08, "y": 0.12, "width": 0.38, "height": 0.76},
             "seashells": {"x": 0.54, "y": 0.12, "width": 0.38, "height": 0.76},
@@ -312,14 +339,29 @@ def _normalize_poulpita_panel(raw_panel: dict[str, Any]) -> dict[str, Any]:
         if unit not in SIZE_UNITS:
             unit = "kg"
         energy_cost = 0 if index == 0 else max(1, int(entry.get("energy_cost") or entry.get("cost") or 1))
-        sizes.append({"amount": amount, "unit": unit, "energy_cost": energy_cost})
+        sizes.append(
+            {
+                "amount": amount,
+                "unit": unit,
+                "energy_cost": energy_cost,
+                "image_filename": entry.get("image_filename"),
+            }
+        )
     if not sizes:
         sizes = deepcopy(default["sizes"])
     sizes[0]["energy_cost"] = 0
+    raw_die_sides = raw_panel.get("ap_die_sides") if isinstance(raw_panel, dict) else None
+    ap_die_sides = [
+        max(0, min(99, int(value)))
+        for value in (raw_die_sides if isinstance(raw_die_sides, list) else default["ap_die_sides"])
+    ][:32]
+    if not ap_die_sides:
+        ap_die_sides = deepcopy(default["ap_die_sides"])
     return {
         "image_filename": raw_panel.get("image_filename") if isinstance(raw_panel, dict) else None,
         "image_width": int(raw_panel.get("image_width")) if isinstance(raw_panel, dict) and raw_panel.get("image_width") else None,
         "image_height": int(raw_panel.get("image_height")) if isinstance(raw_panel, dict) and raw_panel.get("image_height") else None,
+        "ap_die_sides": ap_die_sides,
         "sizes": sizes,
         "zones": {
             zone_id: _normalize_zone((zones or {}).get(zone_id), default["zones"][zone_id])
@@ -339,6 +381,7 @@ def _default_player_boards() -> list[dict[str, Any]]:
             "hand_size_upgrades": [],
             "actions_per_control": 3,
             "control_takes_per_night": 3,
+            "initial_ap": 5,
         }
         for board_id in PLAYER_BOARD_ORDER
     ]
@@ -397,6 +440,7 @@ def _normalize_player_boards(raw_boards: list[dict[str, Any]]) -> list[dict[str,
         current["hand_size_upgrades"] = upgrades
         current["actions_per_control"] = max(1, int(current.get("actions_per_control") or 3))
         current["control_takes_per_night"] = max(1, int(current.get("control_takes_per_night") or 3))
+        current["initial_ap"] = max(0, int(current.get("initial_ap") if current.get("initial_ap") is not None else 5))
         boards.append(current)
     return boards
 
@@ -416,6 +460,13 @@ def _with_urls(entry: dict[str, Any]) -> dict[str, Any]:
 def _poulpita_panel_with_urls(panel: dict[str, Any]) -> dict[str, Any]:
     copy = deepcopy(panel)
     copy["image_url"] = _public_image_url(copy.get("image_filename"))
+    inherited_image_filename = None
+    for size in copy.get("sizes") or []:
+        own_image_filename = size.get("image_filename")
+        if own_image_filename:
+            inherited_image_filename = own_image_filename
+        size["image_url"] = _public_image_url(inherited_image_filename)
+        size["uses_previous_image"] = bool(inherited_image_filename and not own_image_filename)
     return copy
 
 
@@ -570,6 +621,7 @@ def get_content_state() -> dict[str, Any]:
         "levels": [dict(level) for level in content.get("levels", [])],
         "surprise_cards": [_surprise_card_with_urls(card) for card in content.get("surprise_cards", [])],
         "surprise_decks": [dict(deck) for deck in content.get("surprise_decks", [])],
+        "courtship_cards": [_with_urls(card) for card in content.get("courtship_cards", [])],
         "player_boards": [dict(board) for board in content.get("player_boards", [])],
         "tokens": [_with_urls(token) for token in content.get("tokens", [])],
         "poulpita_panel": _poulpita_panel_with_urls(content.get("poulpita_panel") or _default_poulpita_panel()),
@@ -648,6 +700,7 @@ def _read_content_from_value(content: dict[str, Any]) -> dict[str, Any]:
     content.setdefault("levels", [])
     content.setdefault("surprise_cards", [])
     content.setdefault("surprise_decks", [])
+    content.setdefault("courtship_cards", [])
     content["action_costs"] = _normalize_action_costs(content.get("action_costs") or {})
     content["bot_settings"] = _normalize_bot_settings(content.get("bot_settings") or {})
     content["player_boards"] = _normalize_player_boards(content.get("player_boards") or [])
@@ -665,9 +718,17 @@ def _read_content_from_value(content: dict[str, Any]) -> dict[str, Any]:
         tile.setdefault("failure_effects", [])
     for level in content["levels"]:
         level["objectives"] = _normalize_level_objectives(level.get("objectives") or [])
-        level["starting_energy"] = max(0, min(32, int(level.get("starting_energy") or 3)))
+        level["max_energy"] = max(1, min(32, int(level.get("max_energy") or 32)))
+        level["starting_energy"] = max(0, min(level["max_energy"], int(level.get("starting_energy") if level.get("starting_energy") is not None else 8)))
         level["starting_neurons"] = max(0, int(level.get("starting_neurons") or 0))
         level["night_duration_steps"] = max(1, int(level.get("night_duration_steps") or 24))
+        level["max_nights"] = max(1, int(level.get("max_nights") or 5))
+        level["counter_attack_min_size_index"] = max(1, int(level.get("counter_attack_min_size_index") or 1))
+        level["courtship_min_size_index"] = max(0, int(level.get("courtship_min_size_index") if level.get("courtship_min_size_index") is not None else 3))
+        level["courtship_min_energy"] = max(1, int(level.get("courtship_min_energy") or 8))
+        level["win_min_energy"] = max(1, int(level.get("win_min_energy") or 5))
+        level["size_deadline_night"] = max(1, int(level.get("size_deadline_night") or 4))
+        level["tile_sets"] = list(level.get("tile_sets") or [])
         level["surprise_deck_id"] = level.get("surprise_deck_id") or ""
         level["poulpita_starting_node_id"] = str(level.get("poulpita_starting_node_id") or "")
         level["node_tokens"] = level.get("node_tokens") or {}
@@ -685,6 +746,7 @@ def _normalize_action_costs(raw_costs: dict[str, Any]) -> dict[str, dict[str, in
         normalized[action_id] = {
             "ap_cost": max(0, int(raw.get("ap_cost") if raw.get("ap_cost") is not None else normalized[action_id]["ap_cost"])),
             "time_cost": max(0, int(raw.get("time_cost") if raw.get("time_cost") is not None else normalized[action_id]["time_cost"])),
+            "neuron_cost": max(0, int(raw.get("neuron_cost") if raw.get("neuron_cost") is not None else normalized[action_id]["neuron_cost"])),
         }
     return normalized
 
@@ -695,8 +757,13 @@ def _normalize_bot_settings(raw_settings: dict[str, Any]) -> dict[str, Any]:
         return normalized
     normalized["expected_ap_roll"] = max(1, min(6, int(raw_settings.get("expected_ap_roll") if raw_settings.get("expected_ap_roll") is not None else normalized["expected_ap_roll"])))
     normalized["planning_depth_take_controls"] = max(1, min(8, int(raw_settings.get("planning_depth_take_controls") if raw_settings.get("planning_depth_take_controls") is not None else normalized["planning_depth_take_controls"])))
+    normalized["orchestrator_rollout_take_controls"] = max(1, min(8, int(raw_settings.get("orchestrator_rollout_take_controls") if raw_settings.get("orchestrator_rollout_take_controls") is not None else normalized["orchestrator_rollout_take_controls"])))
+    normalized["orchestrator_rollouts_per_plan"] = max(1, min(12, int(raw_settings.get("orchestrator_rollouts_per_plan") if raw_settings.get("orchestrator_rollouts_per_plan") is not None else normalized["orchestrator_rollouts_per_plan"])))
+    normalized["orchestrator_sampling_temperature"] = max(0.1, min(5.0, float(raw_settings.get("orchestrator_sampling_temperature") if raw_settings.get("orchestrator_sampling_temperature") is not None else normalized["orchestrator_sampling_temperature"])))
+    normalized["orchestrator_max_candidates"] = max(2, min(20, int(raw_settings.get("orchestrator_max_candidates") if raw_settings.get("orchestrator_max_candidates") is not None else normalized["orchestrator_max_candidates"])))
     normalized["max_plans"] = max(1, min(16, int(raw_settings.get("max_plans") if raw_settings.get("max_plans") is not None else normalized["max_plans"])))
     normalized["min_energy_after_size_upgrade"] = max(1, min(31, int(raw_settings.get("min_energy_after_size_upgrade") if raw_settings.get("min_energy_after_size_upgrade") is not None else normalized["min_energy_after_size_upgrade"])))
+    normalized["special_power_start_night"] = max(1, min(20, int(raw_settings.get("special_power_start_night") if raw_settings.get("special_power_start_night") is not None else normalized["special_power_start_night"])))
     raw_weights = raw_settings.get("weights") if isinstance(raw_settings.get("weights"), dict) else {}
     for key, fallback in DEFAULT_BOT_SETTINGS["weights"].items():
         normalized["weights"][key] = max(0.0, float(raw_weights.get(key) if raw_weights.get(key) is not None else fallback))
@@ -802,7 +869,9 @@ async def update_token(
 async def update_poulpita_panel(
     *,
     zones: dict[str, Any],
+    ap_die_sides: list[Any] | None = None,
     sizes: list[dict[str, Any]] | None = None,
+    size_images: dict[int, UploadFile] | None = None,
     image: UploadFile | None,
     image_width: int | None = None,
     image_height: int | None = None,
@@ -814,15 +883,36 @@ async def update_poulpita_panel(
     if next_image:
         _delete_image(image_filename)
         image_filename = next_image
+    current_sizes = list(current.get("sizes") or [])
+    requested_sizes = deepcopy(sizes if sizes is not None else current_sizes)
+    for index, size in enumerate(requested_sizes):
+        if not isinstance(size, dict):
+            continue
+        if size.get("image_filename") is None and index < len(current_sizes):
+            size["image_filename"] = current_sizes[index].get("image_filename")
+    for index, uploaded_image in (size_images or {}).items():
+        if index < 0 or index >= len(requested_sizes):
+            raise ValueError("Poulpita size image index is out of range.")
+        previous_filename = requested_sizes[index].get("image_filename")
+        next_size_image = await _save_uploaded_image(f"poulpita-size-{index + 1}", uploaded_image)
+        if next_size_image:
+            _delete_image(previous_filename)
+            requested_sizes[index]["image_filename"] = next_size_image
     next_panel = _normalize_poulpita_panel(
         {
             "image_filename": image_filename,
             "image_width": image_width or current.get("image_width"),
             "image_height": image_height or current.get("image_height"),
-            "sizes": sizes if sizes is not None else current.get("sizes"),
+            "ap_die_sides": ap_die_sides if ap_die_sides is not None else current.get("ap_die_sides"),
+            "sizes": requested_sizes,
             "zones": zones,
         }
     )
+    retained_size_images = {size.get("image_filename") for size in next_panel.get("sizes") or [] if size.get("image_filename")}
+    for old_size in current_sizes:
+        old_filename = old_size.get("image_filename")
+        if old_filename and old_filename not in retained_size_images:
+            _delete_image(old_filename)
     content["poulpita_panel"] = next_panel
     _write_content(content)
     return _poulpita_panel_with_urls(next_panel)
@@ -838,6 +928,7 @@ def get_game_content_catalog() -> dict[str, dict[str, Any]]:
         "cards": {card["id"]: card for card in _generated_cards(content)},
         "surprise_cards": {card["id"]: _surprise_card_with_urls(card) for card in content.get("surprise_cards", [])},
         "surprise_decks": {deck["id"]: dict(deck) for deck in content.get("surprise_decks", [])},
+        "courtship_cards": {card["id"]: _with_urls(card) for card in content.get("courtship_cards", [])},
         "card_categories": [dict(category) for category in content.get("categories", [])] + [dict(COUNTER_ATTACK_CATEGORY)],
         "tokens": {token["id"]: _with_urls(token) for token in content.get("tokens", [])},
         "poulpita_panel": _poulpita_panel_with_urls(content.get("poulpita_panel") or _default_poulpita_panel()),
@@ -1024,6 +1115,50 @@ def delete_surprise_card(card_id: str) -> None:
     index = _find_index(content["surprise_cards"], card_id)
     _delete_image(content["surprise_cards"][index].get("image_filename"))
     del content["surprise_cards"][index]
+    _write_content(content)
+
+
+async def save_courtship_card(
+    *,
+    name: str,
+    interaction_ids: list[str],
+    image: UploadFile | None = None,
+    card_id: str | None = None,
+) -> dict[str, Any]:
+    content = _read_content()
+    known_interactions = {str(interaction.get("id")) for interaction in content.get("interactions", [])}
+    normalized_interactions = [str(interaction_id) for interaction_id in interaction_ids or []]
+    if not normalized_interactions:
+        raise ValueError("A courtship card needs at least one interaction symbol.")
+    if any(interaction_id not in known_interactions for interaction_id in normalized_interactions):
+        raise ValueError("Courtship card references an unknown interaction.")
+    image_filename = None
+    if card_id:
+        current = content["courtship_cards"][_find_index(content["courtship_cards"], card_id)]
+        image_filename = current.get("image_filename")
+    next_image = await _save_uploaded_image(f"courtship-{name}", image)
+    if next_image:
+        _delete_image(image_filename)
+        image_filename = next_image
+    card = {
+        "id": card_id or f"{_slug(name)}-{uuid.uuid4().hex[:8]}",
+        "name": _normalize_name(name),
+        "interaction_ids": normalized_interactions,
+        "image_filename": image_filename,
+    }
+    if card_id:
+        content["courtship_cards"][_find_index(content["courtship_cards"], card_id)] = card
+    else:
+        content["courtship_cards"].append(card)
+    _write_content(content)
+    return _with_urls(card)
+
+
+def delete_courtship_card(card_id: str) -> None:
+    content = _read_content()
+    index = _find_index(content["courtship_cards"], card_id)
+    _delete_image(content["courtship_cards"][index].get("image_filename"))
+    del content["courtship_cards"][index]
     _write_content(content)
 
 
@@ -1239,8 +1374,11 @@ def _normalize_level_objectives(objectives: list[dict[str, Any]]) -> list[dict[s
         if objective_type == "increase_size":
             target = max(1, int(objective.get("target") or objective.get("count") or 1))
             normalized.append({"id": objective_id, "type": objective_type, "target": target})
-        elif objective_type in {"find_shelter", "secure_shelter"}:
+        elif objective_type in {"find_shelter", "secure_shelter", "resolve_courtship"}:
             normalized.append({"id": objective_id, "type": objective_type})
+        elif objective_type == "return_secured_shelter_after_courtship":
+            target = max(1, int(objective.get("target") or objective.get("energy") or 1))
+            normalized.append({"id": objective_id, "type": objective_type, "target": target})
         elif objective_type:
             raise ValueError(f"Unsupported objective type: {objective_type}.")
     return normalized
@@ -1255,8 +1393,16 @@ def save_level(
     groups: list[dict[str, Any]],
     objectives: list[dict[str, Any]] | None = None,
     starting_energy: int | None = None,
+    max_energy: int | None = None,
     starting_neurons: int | None = None,
     night_duration_steps: int | None = None,
+    max_nights: int | None = None,
+    counter_attack_min_size_index: int | None = None,
+    courtship_min_size_index: int | None = None,
+    courtship_min_energy: int | None = None,
+    win_min_energy: int | None = None,
+    size_deadline_night: int | None = None,
+    tile_sets: list[dict[str, Any]] | None = None,
     surprise_deck_id: str | None = None,
     poulpita_starting_node_id: str | None = None,
     node_tokens: dict[str, Any] | None = None,
@@ -1268,6 +1414,7 @@ def save_level(
     if not node_ids:
         raise ValueError("Level map has no nodes.")
     tile_set = {str(tile.get("id")) for tile in content["tiles"]}
+    tile_set.add(COURTSHIP_LEVEL_TILE_ID)
     normalized_groups = _normalize_level_groups(groups, tile_set)
     normalized_surprise_deck_id = str(surprise_deck_id or "")
     if normalized_surprise_deck_id and not any(deck.get("id") == normalized_surprise_deck_id for deck in content.get("surprise_decks", [])):
@@ -1288,6 +1435,28 @@ def save_level(
         assigned = sum(int(count or 0) for count in (group.get("tile_counts") or {}).values())
         if assigned != capacity:
             raise ValueError(f"Group {group['name']} has {assigned} assigned tiles but needs {capacity}.")
+    normalized_max_energy = max(1, min(32, int(max_energy if max_energy is not None else 32)))
+    normalized_tile_sets = []
+    for set_index, raw_set in enumerate(tile_sets or []):
+        if not isinstance(raw_set, dict):
+            raise ValueError("Tile sets must be objects.")
+        replacement_groups = _normalize_level_groups(raw_set.get("groups") or [], tile_set)
+        replacement_by_id = {group["id"]: group for group in replacement_groups}
+        if set(replacement_by_id) != group_ids:
+            raise ValueError("Every replacement tile set must define the same level groups.")
+        for group_id in group_ids:
+            capacity = sum(count for node_id, count in normalized_counts.items() if normalized_node_groups[node_id] == group_id)
+            assigned = sum(int(count or 0) for count in replacement_by_id[group_id].get("tile_counts", {}).values())
+            if assigned != capacity:
+                raise ValueError(f"Replacement set group {replacement_by_id[group_id]['name']} has {assigned} assigned tiles but needs {capacity}.")
+        normalized_tile_sets.append(
+            {
+                "id": str(raw_set.get("id") or f"tile-set-{set_index + 2}"),
+                "size_index": max(1, int(raw_set.get("size_index") or set_index + 1)),
+                "groups": replacement_groups,
+            }
+        )
+    normalized_tile_sets.sort(key=lambda entry: entry["size_index"])
     level = {
         "id": level_id or f"{_slug(name)}-{uuid.uuid4().hex[:8]}",
         "name": _normalize_name(name),
@@ -1296,9 +1465,17 @@ def save_level(
         "node_group_ids": normalized_node_groups,
         "groups": normalized_groups,
         "objectives": _normalize_level_objectives(objectives or []),
-        "starting_energy": max(0, min(32, int(starting_energy if starting_energy is not None else 3))),
+        "starting_energy": max(0, min(normalized_max_energy, int(starting_energy if starting_energy is not None else 8))),
+        "max_energy": normalized_max_energy,
         "starting_neurons": max(0, int(starting_neurons if starting_neurons is not None else 0)),
         "night_duration_steps": max(1, int(night_duration_steps if night_duration_steps is not None else 24)),
+        "max_nights": max(1, int(max_nights if max_nights is not None else 5)),
+        "counter_attack_min_size_index": max(1, int(counter_attack_min_size_index if counter_attack_min_size_index is not None else 1)),
+        "courtship_min_size_index": max(0, int(courtship_min_size_index if courtship_min_size_index is not None else 3)),
+        "courtship_min_energy": max(1, int(courtship_min_energy if courtship_min_energy is not None else 8)),
+        "win_min_energy": max(1, int(win_min_energy if win_min_energy is not None else 5)),
+        "size_deadline_night": max(1, int(size_deadline_night if size_deadline_night is not None else 4)),
+        "tile_sets": normalized_tile_sets,
         "surprise_deck_id": normalized_surprise_deck_id,
         "poulpita_starting_node_id": normalized_starting_node_id,
         "node_tokens": _normalize_level_node_tokens(node_tokens or {}, node_ids),
@@ -1328,6 +1505,7 @@ def save_player_board(
     hand_size_upgrades: list[dict[str, Any]],
     actions_per_control: int,
     control_takes_per_night: int,
+    initial_ap: int = 5,
 ) -> dict[str, Any]:
     content = _read_content()
     if board_id not in PLAYER_BOARD_ORDER:
@@ -1409,6 +1587,7 @@ def save_player_board(
         "hand_size_upgrades": normalized_upgrades,
         "actions_per_control": max(1, int(actions_per_control or 3)),
         "control_takes_per_night": max(1, int(control_takes_per_night or 3)),
+        "initial_ap": max(0, int(initial_ap if initial_ap is not None else 5)),
     }
     content["player_boards"] = [
         next_board if board.get("id") == board_id else board

@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent } from "react";
 import HexTilePreview from "./HexTilePreview.jsx";
 import { buildApiUrl } from "../utils/connection.js";
@@ -8,8 +8,11 @@ type BoardViewProps = {
   projection: GameProjection;
   focusedCapabilityId?: string | null;
   moveMode: boolean;
+  specialTargetMode?: "intelligence" | "propulsion" | "camouflage" | null;
   pending: boolean;
   onMove: (targetNodeId: NodeId) => void;
+  onSpecialNode?: (targetNodeId: NodeId) => void;
+  onSpecialTile?: (tileInstanceId: string) => void;
   onInspectTile?: (tileInstanceId: string) => void;
   onMoveShellFromShelter?: (nodeId: NodeId) => void;
 };
@@ -142,12 +145,50 @@ const normalizeShelter = (entry: any) => {
   };
 };
 
-const BoardView = ({ projection, focusedCapabilityId, moveMode, pending, onMove, onInspectTile, onMoveShellFromShelter }: BoardViewProps) => {
+type AnimatedTile = any & {
+  __animation?: "placing" | "removing";
+  __animationDelayMs?: number;
+};
+
+const TILE_ANIMATION_MS = 280;
+const TILE_STAGGER_MS = 32;
+
+const flattenTiles = (tiles: Record<string, any[]> | undefined) => {
+  const flattened = new Map<string, { nodeId: string; tile: any }>();
+  for (const [nodeId, nodeTiles] of Object.entries(tiles || {})) {
+    for (const tile of nodeTiles || []) {
+      if (tile?.instance_id) flattened.set(String(tile.instance_id), { nodeId, tile });
+    }
+  }
+  return flattened;
+};
+
+const groupTiles = (entries: Array<{ nodeId: string; tile: AnimatedTile }>) => {
+  const grouped: Record<string, AnimatedTile[]> = {};
+  for (const entry of entries) grouped[entry.nodeId] = [...(grouped[entry.nodeId] || []), entry.tile];
+  return grouped;
+};
+
+const sortTileEntries = (
+  entries: Array<{ nodeId: string; tile: any }>,
+  nodeOrder: Map<string, number>,
+) => entries.sort((left, right) => {
+  const nodeDifference = (nodeOrder.get(left.nodeId) ?? Number.MAX_SAFE_INTEGER) - (nodeOrder.get(right.nodeId) ?? Number.MAX_SAFE_INTEGER);
+  if (nodeDifference) return nodeDifference;
+  return String(left.tile?.instance_id || "").localeCompare(String(right.tile?.instance_id || ""), undefined, { numeric: true });
+});
+
+const BoardView = ({ projection, focusedCapabilityId, moveMode, specialTargetMode, pending, onMove, onSpecialNode, onSpecialTile, onInspectTile, onMoveShellFromShelter }: BoardViewProps) => {
   const boardRef = useRef<HTMLElement | null>(null);
   const currentNodeId = projection.poulpita.node_id;
   const focusedCapability = focusedCapabilityId ? projection.capabilities?.[focusedCapabilityId] : null;
   const adjacentNodeIds = currentNodeId ? projection.map.adjacency[currentNodeId] || [] : [];
   const nodes = useMemo(() => Object.values(projection.map.nodes).sort((a, b) => a.x - b.x || a.y - b.y), [projection.map.nodes]);
+  const orderedNodeIds = useMemo(
+    () => Object.keys(projection.map.nodes).sort((left, right) => left.localeCompare(right, undefined, { numeric: true })),
+    [projection.map.nodes],
+  );
+  const nodeOrder = useMemo(() => new Map(orderedNodeIds.map((nodeId, index) => [nodeId, index])), [orderedNodeIds]);
   const imageUrl = projection.map.image_url ? buildApiUrl(projection.map.image_url) : "";
   const imageWidth = Number(projection.map.image_width || 0);
   const imageHeight = Number(projection.map.image_height || 0);
@@ -159,18 +200,110 @@ const BoardView = ({ projection, focusedCapabilityId, moveMode, pending, onMove,
     event: any;
     interactionsById: Record<string, any>;
     token: any;
-    isOctopusToken: boolean;
+    isRoundToken: boolean;
     left: number;
     top: number;
   } | null>(null);
   const dragRef = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
+  const previousTilesRef = useRef<Map<string, { nodeId: string; tile: any }>>(new Map());
+  const animationTimersRef = useRef<number[]>([]);
+  const [displayTiles, setDisplayTiles] = useState<Record<string, AnimatedTile[]>>(() => {
+    const initialEntries = sortTileEntries(Array.from(flattenTiles(projection.tiles).values()), nodeOrder);
+    return groupTiles(initialEntries.map((entry, index) => ({
+      ...entry,
+      tile: { ...entry.tile, __animation: "placing", __animationDelayMs: index * TILE_STAGGER_MS },
+    })));
+  });
 
-  const showTilePreview = (target: HTMLElement, tile: any, event: any, interactionsById: Record<string, any>, token: any, isOctopusToken: boolean) => {
+  useEffect(() => {
+    const previous = previousTilesRef.current;
+    const current = flattenTiles(projection.tiles);
+    const addedIds = new Set(Array.from(current.keys()).filter((instanceId) => !previous.has(instanceId)));
+    const removedIds = new Set(Array.from(previous.keys()).filter((instanceId) => !current.has(instanceId)));
+    const layoutChanged = addedIds.size > 0 || removedIds.size > 0 || Array.from(current.entries()).some(([instanceId, entry]) => previous.get(instanceId)?.nodeId !== entry.nodeId);
+
+    if (!layoutChanged) {
+      setDisplayTiles((displayed) => {
+        const displayedById = flattenTiles(displayed);
+        const synchronized = Array.from(current.entries()).map(([instanceId, entry]) => {
+          const animated = displayedById.get(instanceId)?.tile;
+          return {
+            ...entry,
+            tile: {
+              ...entry.tile,
+              ...(animated?.__animation ? { __animation: animated.__animation } : {}),
+              ...(animated?.__animationDelayMs !== undefined ? { __animationDelayMs: animated.__animationDelayMs } : {}),
+            },
+          };
+        });
+        const removing = Array.from(displayedById.values()).filter((entry) => entry.tile?.__animation === "removing" && !current.has(String(entry.tile.instance_id)));
+        return groupTiles([...synchronized, ...removing]);
+      });
+      previousTilesRef.current = current;
+      return;
+    }
+
+    animationTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    animationTimersRef.current = [];
+    const removed = sortTileEntries(Array.from(previous.entries())
+      .filter(([instanceId]) => !current.has(instanceId))
+      .map(([, entry]) => ({ ...entry })), nodeOrder)
+      .map((entry, index) => ({
+        ...entry,
+        tile: { ...entry.tile, __animation: "removing" as const, __animationDelayMs: index * TILE_STAGGER_MS },
+      }));
+    const removalDuration = removed.length ? TILE_ANIMATION_MS + (removed.length - 1) * TILE_STAGGER_MS : 0;
+
+    const showCurrent = () => {
+      const orderedAdded = sortTileEntries(
+        Array.from(current.entries()).filter(([instanceId]) => addedIds.has(instanceId)).map(([, entry]) => ({ ...entry })),
+        nodeOrder,
+      );
+      const addedOrder = new Map(orderedAdded.map((entry, index) => [String(entry.tile.instance_id), index]));
+      setDisplayTiles(groupTiles(Array.from(current.entries()).map(([instanceId, entry]) => {
+        const animationIndex = addedOrder.get(instanceId);
+        return {
+          ...entry,
+          tile: {
+            ...entry.tile,
+            ...(animationIndex !== undefined
+              ? { __animation: "placing" as const, __animationDelayMs: animationIndex * TILE_STAGGER_MS }
+              : {}),
+          },
+        };
+      })));
+      const placementDuration = orderedAdded.length ? TILE_ANIMATION_MS + (orderedAdded.length - 1) * TILE_STAGGER_MS : 0;
+      animationTimersRef.current.push(window.setTimeout(() => {
+        setDisplayTiles((displayed) => groupTiles(
+          Array.from(flattenTiles(displayed).values())
+            .filter((entry) => entry.tile?.__animation !== "removing")
+            .map((entry) => ({ ...entry, tile: { ...entry.tile, __animation: undefined, __animationDelayMs: undefined } })),
+        ));
+      }, placementDuration + 40));
+    };
+
+    if (removed.length) {
+      const surviving = Array.from(current.entries())
+        .filter(([instanceId]) => !addedIds.has(instanceId))
+        .map(([, entry]) => ({ ...entry, tile: { ...entry.tile } }));
+      setDisplayTiles(groupTiles([...surviving, ...removed]));
+      animationTimersRef.current.push(window.setTimeout(showCurrent, removalDuration));
+    } else {
+      showCurrent();
+    }
+    previousTilesRef.current = current;
+  }, [nodeOrder, projection.tiles]);
+
+  useEffect(() => () => {
+    animationTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+  }, []);
+
+  const showTilePreview = (target: HTMLElement, tile: any, event: any, interactionsById: Record<string, any>, token: any, isRoundToken: boolean) => {
     const boardRect = boardRef.current?.getBoundingClientRect();
     const targetRect = target.getBoundingClientRect();
     if (!boardRect) return;
-    const previewWidth = isOctopusToken ? 128 : 160;
-    const previewHeight = isOctopusToken ? 144 : 156;
+    const previewWidth = isRoundToken ? 128 : 160;
+    const previewHeight = isRoundToken ? 144 : 156;
     const gap = 8;
     const centerX = targetRect.left + targetRect.width / 2 - boardRect.left;
     const topY = targetRect.top - boardRect.top - previewHeight - gap;
@@ -182,7 +315,7 @@ const BoardView = ({ projection, focusedCapabilityId, moveMode, pending, onMove,
       event,
       interactionsById,
       token,
-      isOctopusToken,
+      isRoundToken,
       left,
       top: clamp(top, gap, Math.max(gap, boardRect.height - previewHeight - gap)),
     });
@@ -230,7 +363,15 @@ const BoardView = ({ projection, focusedCapabilityId, moveMode, pending, onMove,
             const isPrevious = node.id === projection.poulpita.previous_node_id;
             const isAdjacent = adjacentNodeIds.includes(node.id);
             const canMove = moveMode && projection.phase === "night_action" && isAdjacent && !pending;
-            const nodeTiles = projection.tiles?.[node.id] || [];
+            const canCamouflage = specialTargetMode === "camouflage" && projection.phase === "night_action" && isAdjacent && !pending;
+            const canPropel = specialTargetMode === "propulsion"
+              && projection.phase === "night_action"
+              && node.id !== currentNodeId
+              && node.id !== projection.poulpita_starting_node_id
+              && adjacentNodeIds.some((middleNodeId) => (projection.map.adjacency[middleNodeId] || []).includes(node.id))
+              && !pending;
+            const canSelectNode = canMove || canCamouflage || canPropel;
+            const nodeTiles = displayTiles[node.id] || [];
             const shelter = normalizeShelter(projection.shelters?.[node.id]);
             const shelterCount = shelter.count;
             const shelterToken = projection.tile_catalog?.tokens?.shelter;
@@ -250,21 +391,22 @@ const BoardView = ({ projection, focusedCapabilityId, moveMode, pending, onMove,
                         : isAdjacent
                           ? "border-teal-700 bg-slate-950/85 text-slate-100"
                           : "border-slate-700 bg-slate-950/75 text-slate-300",
-                    canMove ? "cursor-pointer" : "cursor-default",
+                    canSelectNode ? "cursor-pointer ring-2 ring-fuchsia-300" : "cursor-default",
                   ].join(" ")}
-                  disabled={!canMove}
+                  disabled={!canSelectNode}
                   onClick={(event) => {
                     event.stopPropagation();
                     if (canMove) onMove(node.id);
+                    else if (canCamouflage || canPropel) onSpecialNode?.(node.id);
                   }}
                   onPointerDown={(event) => event.stopPropagation()}
                   type="button"
                 >
-                  <span>{isCurrent ? "P" : node.id}</span>
+                  <span className={isCurrent ? "opacity-0" : ""}>{node.id}</span>
                   {isPrevious && !isCurrent ? <span className="absolute right-0 top-0 h-2 w-2 rounded-full bg-slate-400" /> : null}
                 </button>
                 {shelterCount > 0 ? (
-                  <span className={["absolute right-1/2 top-0 z-20 flex h-10 min-w-10 -translate-y-[50%] items-center justify-center overflow-hidden rounded-full border bg-cyan-100 text-[0.55rem] font-bold text-teal-950 shadow", shelter.secure ? "border-emerald-300 ring-2 ring-emerald-300" : "border-cyan-100"].join(" ")} title={`${shelterCount} shelter token${shelterCount === 1 ? "" : "s"}${shelter.secure ? " - secure" : ""}`}>
+                  <span className={["absolute right-1/2 top-0 z-20 flex h-10 min-w-10 -translate-y-[50%] items-center justify-center overflow-hidden rounded-full border bg-cyan-100 text-[0.55rem] font-bold text-teal-950 shadow", shelter.secure ? "border-emerald-200 bg-emerald-100 ring-4 ring-emerald-300 shadow-[0_0_18px_rgba(52,211,153,0.9)]" : "border-cyan-100"].join(" ")} title={`${shelterCount} shelter token${shelterCount === 1 ? "" : "s"}${shelter.secure ? " - secure" : ""}`}>
                     {shelterImageUrl ? <img alt="" className="h-full w-full object-cover" draggable={false} src={shelterImageUrl} /> : shelterCount > 1 ? shelterCount : "S"}
                     {shelterCount > 1 && shelterImageUrl ? <span className="absolute -bottom-0.5 -right-0.5 rounded-full bg-teal-950 px-1 text-[0.5rem] leading-3 text-cyan-50">{shelterCount}</span> : null}
                   </span>
@@ -292,20 +434,30 @@ const BoardView = ({ projection, focusedCapabilityId, moveMode, pending, onMove,
                 {nodeTiles.length ? (
                   <>
                     {nodeTiles.slice(0, 8).map((tileInstance, tileIndex) => {
+                      const isRemoving = tileInstance.__animation === "removing";
                       const isFaceDown = tileInstance.face_up === false || !tileInstance.tile_id;
                       const tile = projection.tile_catalog?.tiles?.[tileInstance.tile_id];
-                      const octopusToken = projection.tile_catalog?.tokens?.octopus;
-                      const isOctopusToken = Boolean(tileInstance.token_type === "octopus" || tile?.token_type === "octopus");
+                       const octopusToken = projection.tile_catalog?.tokens?.octopus;
+                       const courtshipToken = projection.tile_catalog?.tokens?.courtship;
+                       const isOctopusToken = Boolean(tileInstance.token_type === "octopus" || tile?.token_type === "octopus");
+                       const isCourtshipToken = Boolean(tileInstance.token_type === "courtship" || tile?.token_type === "courtship");
                       const rawEvent = tile?.event || projection.tile_catalog?.events?.[tile?.event_id];
                       const event = isOctopusToken && rawEvent
                         ? { ...rawEvent, image_url: rawEvent.image_url || tile?.image_url || octopusToken?.image_url }
                         : rawEvent;
                       const interactionsById = projection.tile_catalog?.interactions || {};
-                      const canInspect = !isFaceDown && isCurrent && projection.phase === "night_action" && !pending;
+                      const canInspect = !isRemoving && !isFaceDown && isCurrent && projection.phase === "night_action" && !pending;
+                      const canRevealWithIntelligence = Boolean(
+                        specialTargetMode === "intelligence"
+                        && isFaceDown
+                        && isAdjacent
+                        && projection.phase === "night_action"
+                        && !pending,
+                      );
                       const canFocusedCapabilityInitiate =
                         canInspect &&
                         !projection.interaction &&
-                        Boolean(isOctopusToken || (tile?.event_id && (focusedCapability?.initiates_event_ids || []).includes(tile.event_id)));
+                         Boolean(isOctopusToken || isCourtshipToken || (tile?.event_id && (focusedCapability?.initiates_event_ids || []).includes(tile.event_id)));
                       const title = isFaceDown ? "Hidden tile" : tile?.name || event?.name || tileInstance.tile_id;
                       const position = tileOrbitPosition(tileIndex);
                       return (
@@ -313,24 +465,31 @@ const BoardView = ({ projection, focusedCapabilityId, moveMode, pending, onMove,
                           aria-disabled={!canInspect}
                           className={[
                             "group/tile absolute left-1/2 top-1/2 z-10 h-10 w-10 overflow-visible bg-transparent p-0",
-                            canInspect ? "cursor-pointer" : "cursor-default",
+                            canInspect || canRevealWithIntelligence ? "cursor-pointer" : "cursor-default",
+                            canRevealWithIntelligence ? "rounded-full ring-2 ring-fuchsia-300" : "",
+                            tileInstance.__animation === "placing" ? "board-tile-placing" : "",
+                            isRemoving ? "board-tile-removing pointer-events-none" : "",
                           ].join(" ")}
                           key={tileInstance.instance_id}
                           onClick={(event) => {
                             event.stopPropagation();
-                            if (canInspect) onInspectTile?.(tileInstance.instance_id);
+                            if (canRevealWithIntelligence) onSpecialTile?.(tileInstance.instance_id);
+                            else if (canInspect) onInspectTile?.(tileInstance.instance_id);
                           }}
                           onMouseEnter={(mouseEvent) => {
-                            if (!isFaceDown) showTilePreview(mouseEvent.currentTarget, tile, event, interactionsById, octopusToken, isOctopusToken);
+                            if (!isFaceDown) showTilePreview(mouseEvent.currentTarget, tile, event, interactionsById, isCourtshipToken ? courtshipToken : octopusToken, isOctopusToken || isCourtshipToken);
                           }}
                           onMouseLeave={() => setHoveredTile(null)}
                           onPointerDown={(event) => event.stopPropagation()}
-                          style={{ transform: `translate(calc(-50% + ${position.x*1.2}px), calc(-50% + ${position.y*1.2}px))` }}
+                          style={{
+                            animationDelay: tileInstance.__animation ? `${tileInstance.__animationDelayMs || 0}ms` : undefined,
+                            transform: `translate(calc(-50% + ${position.x*1.2}px), calc(-50% + ${position.y*1.2}px))`,
+                          }}
                           title={title}
                           type="button"
                         >
-                          {isOctopusToken && !isFaceDown ? (
-                            <OctopusBoardToken highlighted={canFocusedCapabilityInitiate} interactionsById={interactionsById} tile={tile} title={title} token={octopusToken} />
+                           {(isOctopusToken || isCourtshipToken) && !isFaceDown ? (
+                             <OctopusBoardToken highlighted={canFocusedCapabilityInitiate} interactionsById={interactionsById} tile={tile} title={title} token={isCourtshipToken ? courtshipToken : octopusToken} />
                           ) : (
                             <BoardTileToken event={event} faceDown={isFaceDown} highlighted={canFocusedCapabilityInitiate} title={title} />
                           )}
@@ -343,6 +502,27 @@ const BoardView = ({ projection, focusedCapabilityId, moveMode, pending, onMove,
               </div>
             );
           })}
+          {currentNodeId && projection.map.nodes[currentNodeId] ? (
+            <div
+              aria-label="Poulpita"
+              className="pointer-events-none absolute z-30 flex h-[3.25rem] w-[3.25rem] -translate-x-1/2 -translate-y-1/2 items-center justify-center transition-[left,top] duration-700 ease-in-out"
+              style={{
+                left: `${projection.map.nodes[currentNodeId].x * 100}%`,
+                top: `${projection.map.nodes[currentNodeId].y * 100}%`,
+              }}
+            >
+              {(() => {
+                const sizes = projection.tile_catalog?.poulpita_panel?.sizes || [];
+                const sizeIndex = Math.max(0, Number(projection.poulpita?.size_index || 0));
+                const sizeImage = sizes[sizeIndex]?.image_url;
+                return sizeImage ? (
+                  <img alt="Poulpita" className="h-[3.25rem] w-[3.25rem] select-none object-contain drop-shadow-[0_3px_5px_rgba(8,47,73,0.7)]" draggable={false} src={buildApiUrl(sizeImage)} />
+                ) : (
+                  <span className="flex h-12 w-12 items-center justify-center rounded-full border-2 border-teal-100 bg-teal-300 text-sm font-bold text-teal-950 shadow-lg">P</span>
+                );
+              })()}
+            </div>
+          ) : null}
         </div>
       </div>
       {hoveredTile ? (
@@ -350,7 +530,7 @@ const BoardView = ({ projection, focusedCapabilityId, moveMode, pending, onMove,
           className={["pointer-events-none absolute z-[80]", hoveredTile.isOctopusToken ? "w-32" : "w-40 shadow-2xl"].join(" ")}
           style={{ left: hoveredTile.left, top: hoveredTile.top }}
         >
-          {hoveredTile.isOctopusToken ? (
+          {hoveredTile.isRoundToken ? (
             <OctopusBoardToken interactionsById={hoveredTile.interactionsById} large tile={hoveredTile.tile} title={hoveredTile.tile?.name || hoveredTile.event?.name || "Octopus token"} token={hoveredTile.token} />
           ) : (
             <HexTilePreview

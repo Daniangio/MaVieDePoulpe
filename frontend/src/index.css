@@ -29,6 +29,121 @@ select {
   font: inherit;
 }
 
+@keyframes board-tile-placed {
+  from {
+    opacity: 0;
+    translate: 0 -1.75rem;
+    scale: 0.82;
+  }
+  to {
+    opacity: 1;
+    translate: 0 0;
+    scale: 1;
+  }
+}
+
+@keyframes board-tile-removed {
+  from {
+    opacity: 1;
+    translate: 0 0;
+    scale: 1;
+  }
+  to {
+    opacity: 0;
+    translate: 0 -1.75rem;
+    scale: 0.82;
+  }
+}
+
+.board-tile-placing {
+  animation: board-tile-placed 280ms ease-out both;
+}
+
+.board-tile-removing {
+  animation: board-tile-removed 280ms ease-in both;
+}
+
+@keyframes ap-die-roll {
+  0% { transform: rotate(-10deg) scale(0.82); }
+  28% { transform: rotate(14deg) scale(1.08); }
+  56% { transform: rotate(-18deg) scale(0.94); }
+  82% { transform: rotate(9deg) scale(1.04); }
+  100% { transform: rotate(0deg) scale(1); }
+}
+
+@keyframes ap-die-land {
+  0% { transform: scale(1.35); filter: brightness(1.35); }
+  55% { transform: scale(0.92); }
+  100% { transform: scale(1); filter: brightness(1); }
+}
+
+@keyframes ap-award-pulse {
+  0% { transform: scale(0.65); opacity: 0.35; }
+  55% { transform: scale(1.24); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+.ap-die {
+  position: relative;
+  display: grid;
+  width: 6.5rem;
+  height: 6.5rem;
+  place-items: center;
+  clip-path: polygon(50% 0, 92% 25%, 100% 72%, 50% 100%, 0 72%, 8% 25%);
+  background: linear-gradient(145deg, #22d3ee 0 42%, #0f766e 43% 72%, #164e63 73% 100%);
+  color: white;
+  filter: drop-shadow(0 0.75rem 0.65rem rgb(8 145 178 / 0.24));
+}
+
+.ap-die strong {
+  position: relative;
+  z-index: 2;
+  font-size: 2.4rem;
+  line-height: 1;
+  text-shadow: 0 2px 5px rgb(15 23 42 / 0.45);
+}
+
+.ap-die-facet {
+  position: absolute;
+  inset: 0;
+  opacity: 0.28;
+}
+
+.ap-die-facet-left {
+  clip-path: polygon(0 72%, 50% 0, 50% 100%);
+  background: #cffafe;
+}
+
+.ap-die-facet-right {
+  clip-path: polygon(50% 0, 100% 72%, 50% 100%);
+  background: #134e4a;
+}
+
+.ap-die-rolling {
+  animation: ap-die-roll 260ms ease-in-out infinite;
+}
+
+.ap-die-landed {
+  animation: ap-die-land 360ms ease-out both;
+}
+
+.ap-award-count,
+.ap-counter-pulse {
+  animation: ap-award-pulse 220ms ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .board-tile-placing,
+  .board-tile-removing,
+  .ap-die-rolling,
+  .ap-die-landed,
+  .ap-award-count,
+  .ap-counter-pulse {
+    animation-duration: 1ms;
+    animation-delay: 0ms !important;
+  }
+}
+
 .font-interface {
   font-family:
     Inter,

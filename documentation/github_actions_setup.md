@@ -64,7 +64,7 @@ While still logged into your VM via SSH, let's create the environment directorie
 
 ```bash
 sudo mkdir -p /opt/maviedepoulpe/secrets
-sudo mkdir -p /opt/maviedepoulpe/data/maps
+sudo mkdir -p /opt/maviedepoulpe/data/maps /opt/maviedepoulpe/data/replays
 sudo chown -R opc:opc /opt/maviedepoulpe
 
 ```

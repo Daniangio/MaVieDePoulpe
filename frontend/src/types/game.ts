@@ -25,6 +25,7 @@ export type PoulpitaProjection = {
   seashells?: number;
   size_index?: number;
   size_upgraded_today?: boolean;
+  max_energy?: number;
 };
 
 export type CardProjection = {
@@ -75,9 +76,9 @@ export type PlayerProjection = {
 };
 
 export type BotRoomConfig = {
-  mode: "solo_with_bots";
-  human_ability_id: string;
-  privacy_mode: "solo_faithful" | "omniscient_debug";
+  mode: "solo_with_bots" | "bots_only";
+  human_ability_id: string | null;
+  privacy_mode: "solo_faithful" | "all_bot" | "omniscient_debug";
   controllers: Array<{
     ability_id: string;
     controller_type: "human" | "bot" | "shared";
@@ -167,15 +168,19 @@ export type GameProjection = {
   room_id: string;
   projection_mode: "goldfish";
   privacy_enforced: false;
-  mode: "goldfish" | "solo_with_bots";
+  mode: "goldfish" | "solo_with_bots" | "bots_only";
   bot_config?: BotRoomConfig | null;
   version: number;
   phase: "setup" | "night_idle" | "night_action" | "day" | "game_over";
+  game_outcome?: "won" | "lost" | null;
+  game_over_reason?: string | null;
   level_id: string;
   day_index: number;
   night_time_spent: number;
   night_time_total?: number;
   night_shelter_available_at?: number;
+  max_nights?: number;
+  poulpita_starting_node_id?: string;
   selected_level_id?: string;
   selected_map_id?: string;
   active_capability_id: string | null;
@@ -187,10 +192,13 @@ export type GameProjection = {
   player_boards: CapabilityProjection[];
   map: MapProjection;
   poulpita: PoulpitaProjection;
-  tiles?: Record<NodeId, Array<{ instance_id: string; tile_id: string; face_up?: boolean }>>;
+  tiles?: Record<NodeId, Array<{ instance_id: string; tile_id: string; face_up?: boolean; token_type?: string }>>;
   shelters?: Record<NodeId, number | { count?: number; seashells?: number; secure?: boolean }>;
   objectives?: Array<Record<string, any>>;
   objective_progress?: Record<string, any>;
+  courtship_min_size_index?: number;
+  counter_attack_min_size_index?: number;
+  counter_attack_unlocked?: boolean;
   tile_catalog?: {
     tiles?: Record<string, any>;
     events?: Record<string, any>;
@@ -200,6 +208,8 @@ export type GameProjection = {
     tokens?: Record<string, any>;
     poulpita_panel?: Record<string, any>;
     bot_settings?: Record<string, any>;
+    action_costs?: Record<string, { ap_cost?: number; time_cost?: number; neuron_cost?: number }>;
+    courtship_cards?: Record<string, any>;
   };
   interaction?: any;
   pending_surprise?: any;

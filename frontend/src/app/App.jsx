@@ -253,7 +253,7 @@ function AppContent() {
       <Navigate to="/auth" />
     );
   const inGamePage = (page) => (token ? page : <Navigate to="/auth" />);
-  const isInGameRoom = /^\/games\/[^/]+$/.test(location.pathname);
+  const isInGameRoom = /^\/games\/[^/]+$/.test(location.pathname) || /^\/admin\/replays\/[^/]+$/.test(location.pathname);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
@@ -276,6 +276,7 @@ function AppContent() {
           <Route path="/games/:roomId/post-game" element={authenticatedPage(<PostGamePage />)} />
           <Route path="/admin" element={authenticatedPage(<AdminPage />)} />
           <Route path="/admin/content" element={authenticatedPage(<AdminContentPage />)} />
+          <Route path="/admin/replays/:replayId" element={inGamePage(<GameRoomPage replayMode />)} />
           <Route path="*" element={<Navigate to={token ? "/lobby" : "/auth"} />} />
         </Routes>
       </StateGuard>

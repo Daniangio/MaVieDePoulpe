@@ -122,7 +122,7 @@ sudo ufw enable
 
 ```bash
 sudo mkdir -p /opt/maviedepoulpe/secrets
-sudo mkdir -p /opt/maviedepoulpe/data/maps
+sudo mkdir -p /opt/maviedepoulpe/data/maps /opt/maviedepoulpe/data/replays
 sudo chown -R $USER:$USER /opt/maviedepoulpe
 ```
 

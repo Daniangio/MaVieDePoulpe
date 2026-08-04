@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
+import { BatteryMedium, Brain, CircleCheck, CircleX, Hand, Home, LoaderCircle, MapPin, Moon, Plus, Scale, Shell, Sun, Trash2 } from "lucide-react";
 import AdminLevelEditor from "../components/AdminLevelEditor.jsx";
 import AdminMapEditor from "../components/AdminMapEditor.jsx";
 import HexTilePreview from "../components/HexTilePreview.jsx";
@@ -30,6 +31,7 @@ const emptyTile = {
 };
 const emptySurpriseCard = { id: "", name: "", image_url: "", costs: [], effects: [] };
 const emptySurpriseDeck = { id: "", name: "", card_ids: [] };
+const emptyCourtshipCard = { id: "", name: "", image_url: "", interaction_ids: [] };
 const emptyPlayerBoard = {
   id: "",
   name: "",
@@ -39,6 +41,7 @@ const emptyPlayerBoard = {
   hand_size_upgrades: [],
   actions_per_control: 3,
   control_takes_per_night: 3,
+  initial_ap: 5,
 };
 
 const successEffectOptions = [
@@ -89,8 +92,10 @@ const contentTabs = [
   ["cards", "Cards"],
   ["action_costs", "Action Costs"],
   ["bot_settings", "Bot"],
+  ["bot_simulations", "Bot Simulations"],
   ["surprise_cards", "Surprise Cards"],
   ["surprise_decks", "Surprise Decks"],
+  ["courtship_cards", "Courtship Cards"],
   ["player_boards", "Player Boards"],
   ["tokens", "Tokens"],
   ["poulpita_panel", "Poulpita Panel"],
@@ -111,6 +116,7 @@ const importSummaryLabels = {
   levels: "Levels",
   surprise_cards: "Surprise Cards",
   surprise_decks: "Surprise Decks",
+  courtship_cards: "Courtship Cards",
   player_boards: "Player Boards",
   tokens: "Tokens",
   action_costs: "Action Costs",
@@ -121,15 +127,17 @@ const importSummaryLabels = {
 const actionCostLabels = {
   gain_ap: "Gain AP",
   move: "Move",
+  draw: "Draw action card",
   interact: "Interact",
   special_power: "Use special power",
 };
 
 const defaultActionCosts = {
-  gain_ap: { ap_cost: 0, time_cost: 0 },
-  move: { ap_cost: 1, time_cost: 1 },
-  interact: { ap_cost: 1, time_cost: 2 },
-  special_power: { ap_cost: 1, time_cost: 0 },
+  gain_ap: { ap_cost: 0, time_cost: 0, neuron_cost: 0 },
+  move: { ap_cost: 1, time_cost: 1, neuron_cost: 0 },
+  draw: { ap_cost: 1, time_cost: 1, neuron_cost: 0 },
+  interact: { ap_cost: 2, time_cost: 2, neuron_cost: 0 },
+  special_power: { ap_cost: 2, time_cost: 2, neuron_cost: 1 },
 };
 
 const botAbilityOptions = [
@@ -143,12 +151,21 @@ const botAbilityOptions = [
 const defaultBotSettings = {
   expected_ap_roll: 3,
   planning_depth_take_controls: 3,
+  orchestrator_rollout_take_controls: 3,
+  orchestrator_rollouts_per_plan: 3,
+  orchestrator_sampling_temperature: 1,
+  orchestrator_max_candidates: 8,
   max_plans: 3,
   min_energy_after_size_upgrade: 4,
+  special_power_start_night: 4,
   weights: {
     efficiency: 35,
     confidence: 35,
     expected_gain: 30,
+    tile_resolution: 14,
+    compulsory_tile_resolution: 35,
+    third_ability_penalty: 45,
+    late_shelter_urgency: 8,
   },
   resource_weights: {
     energy: 8,
@@ -172,6 +189,10 @@ const botPlannerWeightLabels = {
   efficiency: "Efficiency",
   confidence: "Confidence",
   expected_gain: "Expected gain",
+  tile_resolution: "Resolve a tile",
+  compulsory_tile_resolution: "Resolve a compulsory tile",
+  third_ability_penalty: "Third ability penalty",
+  late_shelter_urgency: "Late-night shelter urgency",
 };
 
 const botResourceWeightLabels = {
@@ -201,7 +222,7 @@ const formatImportSummary = (result) => {
 
 const AdminContentPage = () => {
   const { token, user } = useStore();
-  const [content, setContent] = useState({ categories: [], card_categories: [], interactions: [], events: [], tiles: [], levels: [], surprise_cards: [], surprise_decks: [], player_boards: [], tokens: [], poulpita_panel: null, action_costs: defaultActionCosts, bot_settings: defaultBotSettings, cards: [] });
+  const [content, setContent] = useState({ categories: [], card_categories: [], interactions: [], events: [], tiles: [], levels: [], surprise_cards: [], surprise_decks: [], courtship_cards: [], player_boards: [], tokens: [], poulpita_panel: null, action_costs: defaultActionCosts, bot_settings: defaultBotSettings, cards: [] });
   const [categoryName, setCategoryName] = useState("");
   const [categoryCompulsory, setCategoryCompulsory] = useState(false);
   const [interactionDraft, setInteractionDraft] = useState(emptyInteraction);
@@ -209,10 +230,14 @@ const AdminContentPage = () => {
   const [tileDraft, setTileDraft] = useState(emptyTile);
   const [surpriseCardDraft, setSurpriseCardDraft] = useState(emptySurpriseCard);
   const [surpriseDeckDraft, setSurpriseDeckDraft] = useState(emptySurpriseDeck);
+  const [courtshipCardDraft, setCourtshipCardDraft] = useState(emptyCourtshipCard);
   const [playerBoardDraft, setPlayerBoardDraft] = useState(emptyPlayerBoard);
   const [poulpitaPanelDraft, setPoulpitaPanelDraft] = useState(null);
   const [poulpitaPanelPreviewUrl, setPoulpitaPanelPreviewUrl] = useState("");
-  const [activeTab, setActiveTab] = useState("map");
+  const [activeTab, setActiveTab] = useState(() => {
+    const requestedTab = window.location.hash.replace(/^#/, "");
+    return contentTabs.some(([id]) => id === requestedTab) ? requestedTab : "map";
+  });
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
@@ -220,6 +245,7 @@ const AdminContentPage = () => {
   const eventImageRef = useRef(null);
   const tokenImageRefs = useRef({});
   const surpriseCardImageRef = useRef(null);
+  const courtshipCardImageRef = useRef(null);
   const poulpitaPanelImageRef = useRef(null);
   const importFileRef = useRef(null);
 
@@ -331,6 +357,10 @@ const AdminContentPage = () => {
     if (surpriseCardImageRef.current) surpriseCardImageRef.current.value = "";
   };
   const resetSurpriseDeck = () => setSurpriseDeckDraft(emptySurpriseDeck);
+  const resetCourtshipCard = () => {
+    setCourtshipCardDraft(emptyCourtshipCard);
+    if (courtshipCardImageRef.current) courtshipCardImageRef.current.value = "";
+  };
 
   const saveCategory = async (category = null) => {
     setBusy(true);
@@ -482,6 +512,28 @@ const AdminContentPage = () => {
     }
   };
 
+  const saveCourtshipCard = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const form = new FormData();
+      form.set("name", courtshipCardDraft.name);
+      form.set("interaction_ids_json", JSON.stringify(courtshipCardDraft.interaction_ids || []));
+      const file = courtshipCardImageRef.current?.files?.[0] || null;
+      if (file) form.set("image", file);
+      await request(courtshipCardDraft.id ? `/api/admin/content/courtship-cards/${courtshipCardDraft.id}` : "/api/admin/content/courtship-cards", {
+        method: courtshipCardDraft.id ? "PUT" : "POST",
+        body: form,
+      });
+      resetCourtshipCard();
+      await loadContent();
+    } catch (saveError) {
+      setError(saveError.message || "Failed to save courtship card.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const savePlayerBoard = async () => {
     if (!playerBoardDraft.id) return;
     setBusy(true);
@@ -495,6 +547,7 @@ const AdminContentPage = () => {
       form.set("hand_size_upgrades_json", JSON.stringify(playerBoardDraft.hand_size_upgrades || []));
       form.set("actions_per_control", String(playerBoardDraft.actions_per_control || 3));
       form.set("control_takes_per_night", String(playerBoardDraft.control_takes_per_night || 3));
+      form.set("initial_ap", String(Math.max(0, Number(playerBoardDraft.initial_ap ?? 5))));
       await request(`/api/admin/content/player-boards/${playerBoardDraft.id}`, { method: "PUT", body: form });
       await loadContent();
     } catch (saveError) {
@@ -569,7 +622,18 @@ const AdminContentPage = () => {
     try {
       const form = new FormData();
       form.set("zones_json", JSON.stringify(poulpitaPanelDraft.zones || {}));
-      form.set("sizes_json", JSON.stringify(poulpitaPanelDraft.sizes || []));
+      form.set("ap_die_sides_json", JSON.stringify(poulpitaPanelDraft.ap_die_sides?.length ? poulpitaPanelDraft.ap_die_sides : [1, 2, 3, 4, 5, 6]));
+      const sizeImageIndices = [];
+      const serializedSizes = (poulpitaPanelDraft.sizes || []).map((size, index) => {
+        const { _image_file, _preview_url, image_url, uses_previous_image, ...persistedSize } = size;
+        if (_image_file) {
+          sizeImageIndices.push(index);
+          form.append("size_images", _image_file);
+        }
+        return persistedSize;
+      });
+      form.set("sizes_json", JSON.stringify(serializedSizes));
+      form.set("size_image_indices_json", JSON.stringify(sizeImageIndices));
       if (poulpitaPanelDraft.image_width) form.set("image_width", String(poulpitaPanelDraft.image_width));
       if (poulpitaPanelDraft.image_height) form.set("image_height", String(poulpitaPanelDraft.image_height));
       const file = poulpitaPanelImageRef.current?.files?.[0] || null;
@@ -577,6 +641,9 @@ const AdminContentPage = () => {
       await request("/api/admin/content/poulpita-panel", { method: "PUT", body: form });
       if (poulpitaPanelImageRef.current) poulpitaPanelImageRef.current.value = "";
       if (poulpitaPanelPreviewUrl) URL.revokeObjectURL(poulpitaPanelPreviewUrl);
+      for (const size of poulpitaPanelDraft.sizes || []) {
+        if (size._preview_url) URL.revokeObjectURL(size._preview_url);
+      }
       setPoulpitaPanelPreviewUrl("");
       await loadContent();
     } catch (saveError) {
@@ -756,7 +823,7 @@ const AdminContentPage = () => {
 
       <nav className="mb-4 flex flex-wrap gap-2">
         {contentTabs.map(([id, label]) => (
-          <button className={`rounded-md px-3 py-2 text-sm font-medium ${activeTab === id ? "bg-teal-500 text-white" : "border border-cyan-300 bg-white text-teal-900 hover:bg-cyan-50"}`} key={id} onClick={() => setActiveTab(id)} type="button">
+          <button className={`rounded-md px-3 py-2 text-sm font-medium ${activeTab === id ? "bg-teal-500 text-white" : "border border-cyan-300 bg-white text-teal-900 hover:bg-cyan-50"}`} key={id} onClick={() => { setActiveTab(id); window.history.replaceState(null, "", `#${id}`); }} type="button">
             {label}
           </button>
         ))}
@@ -862,6 +929,24 @@ const AdminContentPage = () => {
           setDraft={setSurpriseDeckDraft}
           surpriseCards={content.surprise_cards || []}
           surpriseDecks={content.surprise_decks || []}
+        />
+      ) : null}
+
+      {activeTab === "bot_simulations" ? (
+        <BotSimulationsAdmin levels={content.levels || []} request={request} />
+      ) : null}
+
+      {activeTab === "courtship_cards" ? (
+        <CourtshipCardEditor
+          busy={busy}
+          cards={content.courtship_cards || []}
+          deleteItem={deleteItem}
+          draft={courtshipCardDraft}
+          imageRef={courtshipCardImageRef}
+          interactions={content.interactions || []}
+          reset={resetCourtshipCard}
+          save={saveCourtshipCard}
+          setDraft={setCourtshipCardDraft}
         />
       ) : null}
 
@@ -1079,7 +1164,7 @@ const ActionCostEditor = ({ actionCosts, onSave, busy }) => {
         {Object.entries(actionCostLabels).map(([actionId, label]) => (
           <article className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3" key={actionId}>
             <h3 className="text-sm font-semibold text-teal-950">{label}</h3>
-            <div className="mt-3 grid grid-cols-2 gap-2">
+            <div className="mt-3 grid grid-cols-3 gap-2">
               <label className="text-xs text-slate-600">
                 AP cost
                 <input className={`${input} mt-1`} min="0" type="number" value={Number(draft[actionId]?.ap_cost || 0)} onChange={(event) => updateCost(actionId, "ap_cost", event.target.value)} />
@@ -1087,6 +1172,10 @@ const ActionCostEditor = ({ actionCosts, onSave, busy }) => {
               <label className="text-xs text-slate-600">
                 Time steps
                 <input className={`${input} mt-1`} min="0" type="number" value={Number(draft[actionId]?.time_cost || 0)} onChange={(event) => updateCost(actionId, "time_cost", event.target.value)} />
+              </label>
+              <label className="text-xs text-slate-600">
+                Neurons
+                <input className={`${input} mt-1`} min="0" type="number" value={Number(draft[actionId]?.neuron_cost || 0)} onChange={(event) => updateCost(actionId, "neuron_cost", event.target.value)} />
               </label>
             </div>
           </article>
@@ -1126,24 +1215,11 @@ const BotSettingsEditor = ({ botSettings, onSave, busy }) => {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="font-semibold text-teal-950">Bot Planning</h2>
-          <p className="mt-1 text-xs text-slate-500">These values affect bot plan evaluation only. They do not change the real dice roll.</p>
+          <p className="mt-1 text-xs text-slate-500">These values affect bot plan evaluation. Expected AP is derived from the die configured in Poulpita Panel.</p>
         </div>
         <button className={primaryButton} disabled={busy} onClick={() => onSave(draft)} type="button">Save bot settings</button>
       </div>
       <div className="mt-4 grid gap-3 lg:grid-cols-3">
-        <label className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3 text-sm">
-          <span className="font-semibold text-teal-950">Expected AP roll</span>
-          <span className="mt-1 block text-xs text-slate-500">Used by optimistic plans after Collect AP. Default is 3.</span>
-          <input
-            className={`${input} mt-3`}
-            max="6"
-            min="1"
-            step="1"
-            type="number"
-            value={Number(draft.expected_ap_roll || 3)}
-            onChange={(event) => setDraft((current) => ({ ...current, expected_ap_roll: Math.max(1, Math.min(6, Number(event.target.value || 3))) }))}
-          />
-        </label>
         <label className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3 text-sm">
           <span className="font-semibold text-teal-950">Planning depth</span>
           <span className="mt-1 block text-xs text-slate-500">How many take-control windows bots estimate. Default is 3.</span>
@@ -1154,7 +1230,72 @@ const BotSettingsEditor = ({ botSettings, onSave, busy }) => {
             step="1"
             type="number"
             value={Number(draft.planning_depth_take_controls || 3)}
-            onChange={(event) => setDraft((current) => ({ ...current, planning_depth_take_controls: Math.max(1, Math.min(8, Number(event.target.value || 3))) }))}
+            onChange={(event) => setDraft((current) => ({ ...current, planning_depth_take_controls: Math.max(1, Math.min(20, Number(event.target.value || 3))) }))}
+          />
+        </label>
+        <label className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3 text-sm">
+          <span className="font-semibold text-teal-950">Special powers from night</span>
+          <span className="mt-1 block text-xs text-slate-500">Bots consider ability powers from this night onward. Default is 4.</span>
+          <input
+            className={`${input} mt-3`}
+            max="20"
+            min="1"
+            step="1"
+            type="number"
+            value={Number(draft.special_power_start_night || 4)}
+            onChange={(event) => setDraft((current) => ({ ...current, special_power_start_night: Math.max(1, Math.min(20, Number(event.target.value || 4))) }))}
+          />
+        </label>
+        <label className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3 text-sm">
+          <span className="font-semibold text-teal-950">Orchestrator horizon</span>
+          <span className="mt-1 block text-xs text-slate-500">Simulate through this many future initiative windows. Default is 3.</span>
+          <input
+            className={`${input} mt-3`}
+            max="8"
+            min="1"
+            step="1"
+            type="number"
+            value={Number(draft.orchestrator_rollout_take_controls || 3)}
+            onChange={(event) => setDraft((current) => ({ ...current, orchestrator_rollout_take_controls: Math.max(1, Math.min(8, Number(event.target.value || 3))) }))}
+          />
+        </label>
+        <label className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3 text-sm">
+          <span className="font-semibold text-teal-950">Rollouts per plan</span>
+          <span className="mt-1 block text-xs text-slate-500">Number of weighted continuations sampled for every root plan.</span>
+          <input
+            className={`${input} mt-3`}
+            max="12"
+            min="1"
+            step="1"
+            type="number"
+            value={Number(draft.orchestrator_rollouts_per_plan || 3)}
+            onChange={(event) => setDraft((current) => ({ ...current, orchestrator_rollouts_per_plan: Math.max(1, Math.min(12, Number(event.target.value || 3))) }))}
+          />
+        </label>
+        <label className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3 text-sm">
+          <span className="font-semibold text-teal-950">Sampling temperature</span>
+          <span className="mt-1 block text-xs text-slate-500">Lower values are greedier; higher values explore more near-optimal plans.</span>
+          <input
+            className={`${input} mt-3`}
+            max="5"
+            min="0.1"
+            step="0.1"
+            type="number"
+            value={Number(draft.orchestrator_sampling_temperature || 1)}
+            onChange={(event) => setDraft((current) => ({ ...current, orchestrator_sampling_temperature: Math.max(0.1, Math.min(5, Number(event.target.value || 1))) }))}
+          />
+        </label>
+        <label className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3 text-sm">
+          <span className="font-semibold text-teal-950">Max local candidates</span>
+          <span className="mt-1 block text-xs text-slate-500">Bounds the legal actions evaluated at each simulated decision.</span>
+          <input
+            className={`${input} mt-3`}
+            max="20"
+            min="2"
+            step="1"
+            type="number"
+            value={Number(draft.orchestrator_max_candidates || 8)}
+            onChange={(event) => setDraft((current) => ({ ...current, orchestrator_max_candidates: Math.max(2, Math.min(20, Number(event.target.value || 8))) }))}
           />
         </label>
         <label className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3 text-sm">
@@ -1442,6 +1583,40 @@ const SurpriseDeckEditor = ({ busy, deleteItem, draft, onSetCardCount, reset, sa
   );
 };
 
+const CourtshipCardEditor = ({ busy, cards, deleteItem, draft, imageRef, interactions, reset, save, setDraft }) => {
+  const addSymbol = () => {
+    const interactionId = interactions[0]?.id || "";
+    if (interactionId) setDraft((current) => ({ ...current, interaction_ids: [...(current.interaction_ids || []), interactionId] }));
+  };
+  return (
+    <section className="grid gap-4 lg:grid-cols-[24rem_1fr]">
+      <div className={panel}>
+        <div className="flex items-center justify-between gap-2"><h2 className="font-semibold text-teal-950">Courtship card</h2><button className={subtleButton} onClick={reset} type="button">New</button></div>
+        <label className="mt-4 block text-sm text-slate-600">Name<input className={`${input} mt-1`} value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} /></label>
+        <label className="mt-3 block text-sm text-slate-600">Image<input accept="image/*" className="mt-1 block w-full text-sm" ref={imageRef} type="file" /></label>
+        <div className="mt-4">
+          <div className="flex items-center justify-between"><h3 className="text-sm font-semibold text-teal-950">Required symbols</h3><button className={subtleButton} onClick={addSymbol} type="button">Add symbol</button></div>
+          <div className="mt-2 space-y-2">
+            {(draft.interaction_ids || []).map((interactionId, index) => (
+              <div className="flex gap-2" key={`${index}-${interactionId}`}>
+                <select className={input} value={interactionId} onChange={(event) => setDraft((current) => ({ ...current, interaction_ids: (current.interaction_ids || []).map((value, itemIndex) => itemIndex === index ? event.target.value : value) }))}>{interactions.map((interaction) => <option key={interaction.id} value={interaction.id}>{interaction.name}</option>)}</select>
+                <button className={dangerButton} onClick={() => setDraft((current) => ({ ...current, interaction_ids: (current.interaction_ids || []).filter((_value, itemIndex) => itemIndex !== index) }))} type="button">Remove</button>
+              </div>
+            ))}
+          </div>
+        </div>
+        <button className={`${primaryButton} mt-4 w-full`} disabled={busy || !draft.name || !(draft.interaction_ids || []).length} onClick={save} type="button">{draft.id ? "Update" : "Create"} card</button>
+      </div>
+      <div className={panel}>
+        <h2 className="font-semibold text-teal-950">Courtship cards</h2>
+        <div className="mt-4 grid gap-3 md:grid-cols-2">
+          {cards.map((card) => <article className="rounded-md border border-cyan-100 bg-cyan-50/60 p-3" key={card.id}><div className="flex gap-3">{imageUrl(card) ? <img alt="" className="h-20 w-14 rounded object-cover" src={imageUrl(card)} /> : <div className="h-20 w-14 rounded bg-slate-100" />}<div className="min-w-0 flex-1"><h3 className="font-semibold text-teal-950">{card.name}</h3><p className="mt-1 text-xs text-slate-600">{(card.interaction_ids || []).map((id) => interactions.find((entry) => entry.id === id)?.name || id).join(", ")}</p></div></div><div className="mt-3 flex gap-2"><button className={subtleButton} onClick={() => setDraft(card)} type="button">Edit</button><button className={dangerButton} onClick={() => deleteItem(`/api/admin/content/courtship-cards/${card.id}`, card.name)} type="button">Delete</button></div></article>)}
+        </div>
+      </div>
+    </section>
+  );
+};
+
 const PlayerBoardEditor = ({
   boards,
   events,
@@ -1506,6 +1681,10 @@ const PlayerBoardEditor = ({
               <label className="block text-sm">
                 <span className="text-slate-600">Control takes per night</span>
                 <input className={`${input} mt-1`} min="1" type="number" value={draft.control_takes_per_night || 3} onChange={(event) => setDraft((current) => ({ ...current, control_takes_per_night: Number(event.target.value) }))} />
+              </label>
+              <label className="block text-sm">
+                <span className="text-slate-600">Initial AP</span>
+                <input className={`${input} mt-1`} min="0" type="number" value={Number(draft.initial_ap ?? 5)} onChange={(event) => setDraft((current) => ({ ...current, initial_ap: Math.max(0, Number(event.target.value || 0)) }))} />
               </label>
               <button className={primaryButton} disabled={busy} onClick={onSave} type="button">Save player board</button>
             </div>
@@ -1865,6 +2044,24 @@ const PoulpitaPanelEditor = ({ draft, setDraft, imageRef, previewUrl, setPreview
   };
 
   const sampleCounts = { neurons: 6, seashells: 4 };
+  const dieSides = draft.ap_die_sides?.length ? draft.ap_die_sides : [1, 2, 3, 4, 5, 6];
+  const updateDieSide = (index, value) => {
+    setDraft((current) => ({
+      ...current,
+      ap_die_sides: (current.ap_die_sides?.length ? current.ap_die_sides : [1, 2, 3, 4, 5, 6])
+        .map((side, sideIndex) => sideIndex === index ? Math.max(0, Math.min(99, Number(value || 0))) : side),
+    }));
+  };
+  const addDieSide = () => {
+    setDraft((current) => ({
+      ...current,
+      ap_die_sides: [...(current.ap_die_sides?.length ? current.ap_die_sides : [1, 2, 3, 4, 5, 6]), 1].slice(0, 32),
+    }));
+  };
+  const removeDieSide = (index) => {
+    if (dieSides.length <= 1) return;
+    setDraft((current) => ({ ...current, ap_die_sides: (current.ap_die_sides || []).filter((_side, sideIndex) => sideIndex !== index) }));
+  };
   const sizes = draft.sizes?.length ? draft.sizes : [{ amount: 1, unit: "kg", energy_cost: 0 }];
   const updateSize = (index, patch) => {
     setDraft((current) => ({
@@ -1873,11 +2070,36 @@ const PoulpitaPanelEditor = ({ draft, setDraft, imageRef, previewUrl, setPreview
     }));
   };
   const addSize = () => {
-    setDraft((current) => ({ ...current, sizes: [...(current.sizes || [{ amount: 1, unit: "kg", energy_cost: 0 }]), { amount: 1, unit: "kg", energy_cost: 1 }] }));
+    setDraft((current) => ({ ...current, sizes: [...(current.sizes || [{ amount: 1, unit: "kg", energy_cost: 0 }]), { amount: 1, unit: "kg", energy_cost: 1, image_filename: null }] }));
   };
   const removeSize = (index) => {
     if (index === 0) return;
-    setDraft((current) => ({ ...current, sizes: (current.sizes || []).filter((_entry, entryIndex) => entryIndex !== index) }));
+    setDraft((current) => {
+      const removed = (current.sizes || [])[index];
+      if (removed?._preview_url) URL.revokeObjectURL(removed._preview_url);
+      return { ...current, sizes: (current.sizes || []).filter((_entry, entryIndex) => entryIndex !== index) };
+    });
+  };
+  const updateSizeImage = (index, file) => {
+    setDraft((current) => {
+      const nextSizes = [...(current.sizes || [])];
+      const previousPreview = nextSizes[index]?._preview_url;
+      if (previousPreview) URL.revokeObjectURL(previousPreview);
+      nextSizes[index] = {
+        ...nextSizes[index],
+        _image_file: file || null,
+        _preview_url: file ? URL.createObjectURL(file) : "",
+      };
+      return { ...current, sizes: nextSizes };
+    });
+  };
+  const sizePreviewUrl = (index) => {
+    for (let candidate = index; candidate >= 0; candidate -= 1) {
+      const size = sizes[candidate];
+      const url = size?._preview_url || imageUrl(size);
+      if (url) return url;
+    }
+    return "";
   };
   return (
     <section className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
@@ -1923,6 +2145,28 @@ const PoulpitaPanelEditor = ({ draft, setDraft, imageRef, previewUrl, setPreview
       <aside className={panel}>
         <h2 className="font-semibold text-teal-950">Container Image</h2>
         <input ref={imageRef} className={`${input} mt-3 text-sm`} type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => onImageChange(event.target.files?.[0] || null)} />
+        <div className="mt-5 border-t border-cyan-100 pt-4">
+          <div className="flex items-center justify-between gap-2">
+            <div>
+              <h3 className="text-sm font-semibold text-teal-950">AP die sides</h3>
+              <p className="mt-0.5 text-[0.65rem] text-slate-500">Each entry is one equally likely side. Repeat a value to make it more likely.</p>
+            </div>
+            <button aria-label="Add die side" className={subtleButton} disabled={dieSides.length >= 32} onClick={addDieSide} title="Add die side" type="button">
+              <Plus size={15} />
+            </button>
+          </div>
+          <div className="mt-2 grid grid-cols-2 gap-2">
+            {dieSides.map((side, index) => (
+              <div className="flex items-center gap-1 rounded border border-cyan-100 bg-cyan-50 p-1.5" key={index}>
+                <span className="w-10 text-[0.65rem] font-semibold text-slate-500">Side {index + 1}</span>
+                <input aria-label={`Die side ${index + 1} value`} className={`${input} min-w-0 py-1 text-xs`} max="99" min="0" onChange={(event) => updateDieSide(index, event.target.value)} step="1" type="number" value={side} />
+                <button aria-label={`Remove die side ${index + 1}`} className="rounded p-1 text-rose-600 hover:bg-rose-50 disabled:opacity-30" disabled={dieSides.length <= 1} onClick={() => removeDieSide(index)} title="Remove die side" type="button">
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
         <div className="mt-5">
           <div className="flex items-center justify-between gap-2">
             <h3 className="text-sm font-semibold text-teal-950">Size ladder</h3>
@@ -1931,6 +2175,16 @@ const PoulpitaPanelEditor = ({ draft, setDraft, imageRef, previewUrl, setPreview
           <div className="mt-2 space-y-2">
             {sizes.map((size, index) => (
               <div className="rounded border border-cyan-100 bg-cyan-50 p-2" key={index}>
+                <div className="mb-2 flex items-center gap-2">
+                  <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded border border-cyan-200 bg-white">
+                    {sizePreviewUrl(index) ? <img alt={`Poulpita size ${index + 1}`} className="h-full w-full object-contain" src={sizePreviewUrl(index)} /> : <span className="text-[0.65rem] text-rose-600">Image required</span>}
+                  </div>
+                  <label className="min-w-0 flex-1 text-xs text-slate-600">
+                    Poulpita image
+                    <input className={`${input} mt-1 py-1 text-xs`} accept="image/png,image/jpeg,image/webp" onChange={(event) => updateSizeImage(index, event.target.files?.[0] || null)} type="file" />
+                    <span className="mt-1 block text-[0.62rem] text-slate-500">{index === 0 ? "Required for the initial size." : "Leave empty to use the previous size image."}</span>
+                  </label>
+                </div>
                 <div className="grid grid-cols-2 gap-2">
                   <label className="text-xs text-slate-600">
                     Amount
@@ -1962,8 +2216,199 @@ const PoulpitaPanelEditor = ({ draft, setDraft, imageRef, previewUrl, setPreview
             </div>
           ))}
         </div>
-        <button className={`${primaryButton} mt-4 w-full`} disabled={busy} onClick={save} type="button">Save panel layout</button>
+        <button className={`${primaryButton} mt-4 w-full`} disabled={busy || !sizePreviewUrl(0)} onClick={save} type="button">Save panel layout</button>
       </aside>
+    </section>
+  );
+};
+
+const BotSimulationsAdmin = ({ levels, request }) => {
+  const [replays, setReplays] = useState([]);
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [draft, setDraft] = useState({
+    level_id: "",
+    game_count: 1,
+    max_steps: 2000,
+    seed: "",
+    simulation_mode: "fast",
+  });
+
+  useEffect(() => {
+    if (!draft.level_id && levels.length) {
+      setDraft((current) => ({ ...current, level_id: levels[0].id }));
+    }
+  }, [draft.level_id, levels]);
+
+  const loadReplays = async () => {
+    try {
+      const payload = await request("/api/admin/bot-simulations");
+      setReplays(payload.replays || []);
+      setError("");
+    } catch (loadError) {
+      setError(loadError.message || "Failed to load bot simulations.");
+    }
+  };
+
+  useEffect(() => {
+    void loadReplays();
+  }, []);
+
+  const hasActiveSimulations = replays.some((replay) => ["queued", "running"].includes(replay.status));
+
+  useEffect(() => {
+    if (!hasActiveSimulations) return undefined;
+    const timer = window.setInterval(() => void loadReplays(), 1000);
+    return () => window.clearInterval(timer);
+  }, [hasActiveSimulations]);
+
+  const runBatch = async () => {
+    if (!draft.level_id) return;
+    setRunning(true);
+    setError("");
+    setNotice("");
+    try {
+      const payload = await request("/api/admin/bot-simulations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...draft,
+          game_count: Number(draft.game_count || 1),
+          max_steps: Number(draft.max_steps || 2000),
+          seed: draft.seed === "" ? null : Number(draft.seed),
+        }),
+      });
+      const started = payload.replays || [];
+      setReplays((current) => {
+        const startedIds = new Set(started.map((entry) => entry.id));
+        return [...started, ...current.filter((entry) => !startedIds.has(entry.id))];
+      });
+      setNotice(`${started.length} simulation${started.length === 1 ? "" : "s"} started.`);
+    } catch (runError) {
+      setError(runError.message || "Bot simulation failed.");
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const deleteReplay = async (replay) => {
+    if (!window.confirm(`Delete replay ${replay.id}?`)) return;
+    try {
+      await request(`/api/admin/bot-simulations/${replay.id}`, { method: "DELETE" });
+      setReplays((current) => current.filter((entry) => entry.id !== replay.id));
+    } catch (deleteError) {
+      setError(deleteError.message || "Failed to delete replay.");
+    }
+  };
+
+  return (
+    <section className="grid gap-4 xl:grid-cols-[22rem_1fr]">
+      <aside className={panel}>
+        <h2 className="font-semibold text-teal-950">Run backend simulations</h2>
+        <div className="mt-4 space-y-3">
+          <label className="block text-sm text-slate-600">
+            Level
+            <select className={`${input} mt-1`} disabled={running} value={draft.level_id} onChange={(event) => setDraft((current) => ({ ...current, level_id: event.target.value }))}>
+              {levels.map((level) => <option key={level.id} value={level.id}>{level.name}</option>)}
+            </select>
+          </label>
+          <label className="block text-sm text-slate-600">
+            Number of games
+            <input className={`${input} mt-1`} disabled={running} max="100" min="1" type="number" value={draft.game_count} onChange={(event) => setDraft((current) => ({ ...current, game_count: Math.max(1, Math.min(100, Number(event.target.value || 1))) }))} />
+          </label>
+          <label className="block text-sm text-slate-600">
+            Maximum steps per game
+            <input className={`${input} mt-1`} disabled={running} max="10000" min="10" type="number" value={draft.max_steps} onChange={(event) => setDraft((current) => ({ ...current, max_steps: Math.max(10, Math.min(10000, Number(event.target.value || 2000))) }))} />
+          </label>
+          <label className="block text-sm text-slate-600">
+            Decision mode
+            <select className={`${input} mt-1`} disabled={running} value={draft.simulation_mode} onChange={(event) => setDraft((current) => ({ ...current, simulation_mode: event.target.value }))}>
+              <option value="fast">Fast immediate heuristic</option>
+              <option value="full">Full orchestrator rollouts</option>
+            </select>
+          </label>
+          <label className="block text-sm text-slate-600">
+            Base seed (optional)
+            <input className={`${input} mt-1`} disabled={running} min="0" type="number" value={draft.seed} onChange={(event) => setDraft((current) => ({ ...current, seed: event.target.value }))} />
+          </label>
+        </div>
+        <button className={`${primaryButton} mt-4 w-full`} disabled={running || !draft.level_id} onClick={() => void runBatch()} type="button">
+          {running ? "Simulating..." : "Run simulations"}
+        </button>
+        {notice ? <p className="mt-3 rounded border border-teal-200 bg-teal-50 p-2 text-sm text-teal-800">{notice}</p> : null}
+        {error ? <p className="mt-3 rounded border border-rose-200 bg-rose-50 p-2 text-sm text-rose-700">{error}</p> : null}
+      </aside>
+
+      <div className={panel}>
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="font-semibold text-teal-950">Saved replays</h2>
+          <button className={subtleButton} disabled={running} onClick={() => void loadReplays()} type="button">Refresh</button>
+        </div>
+        <div className="mt-4 overflow-x-auto">
+          <table className="w-full min-w-[58rem] text-left text-sm">
+            <thead className="border-b border-cyan-200 text-xs uppercase text-slate-500">
+              <tr><th className="p-2">Created</th><th className="p-2">Level</th><th className="p-2">Status</th><th className="p-2">Progress</th><th className="p-2">State</th><th className="p-2">Seed</th><th className="p-2" /></tr>
+            </thead>
+            <tbody>
+              {replays.map((replay) => {
+                const progress = replay.progress || {};
+                const active = ["queued", "running"].includes(replay.status);
+                const statusClasses = replay.status === "completed"
+                  ? (replay.outcome === "won" ? "bg-emerald-100 text-emerald-800" : replay.outcome === "lost" ? "bg-rose-100 text-rose-800" : "bg-amber-100 text-amber-800")
+                  : replay.status === "failed" ? "bg-rose-100 text-rose-800" : "bg-cyan-100 text-cyan-800";
+                const StatusIcon = replay.status === "completed" ? CircleCheck : replay.status === "failed" ? CircleX : LoaderCircle;
+                const PhaseIcon = progress.phase === "day" ? Sun : Moon;
+                return (
+                  <tr className="border-b border-cyan-100 align-middle" key={replay.id}>
+                    <td className="p-2 text-xs text-slate-500">{new Date(replay.created_at).toLocaleString()}</td>
+                    <td className="p-2 font-medium text-teal-950">{replay.level_name}</td>
+                    <td className="p-2">
+                      <span className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs font-semibold ${statusClasses}`}>
+                        <StatusIcon className={active ? "animate-spin" : ""} size={13} />
+                        {replay.status === "completed" ? replay.outcome : replay.status}
+                      </span>
+                    </td>
+                    <td className="p-2">
+                      <div className="min-w-40">
+                        <div className="flex items-center justify-between gap-2 text-xs text-slate-600">
+                          <span className="inline-flex items-center gap-1"><PhaseIcon size={13} />{progress.phase_label || "Waiting"}</span>
+                          <span>{Number(progress.step ?? replay.steps ?? 0)} / {Number(progress.max_steps || replay.steps || 0)}</span>
+                        </div>
+                        <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-cyan-100">
+                          <div className={`h-full rounded-full ${replay.status === "failed" ? "bg-rose-400" : "bg-teal-500"}`} style={{ width: `${Number(progress.percent ?? (replay.status === "completed" ? 100 : 0))}%` }} />
+                        </div>
+                        {progress.phase?.startsWith("night") ? <p className="mt-1 text-[11px] text-slate-500">Clock {Number(progress.night_time_spent || 0)} / {Number(progress.night_time_total || 24)}</p> : null}
+                        {progress.last_action ? <p className="mt-1 max-w-52 truncate text-[11px] capitalize text-slate-500" title={progress.last_action}>{progress.last_action}</p> : null}
+                      </div>
+                    </td>
+                    <td className="p-2">
+                      <div className="flex max-w-64 flex-wrap gap-1 text-xs text-slate-700">
+                        <span className="inline-flex items-center gap-1 rounded bg-rose-50 px-1.5 py-1" title="Energy"><BatteryMedium size={13} />{Number(progress.energy ?? replay.final_energy ?? 0)}</span>
+                        <span className="inline-flex items-center gap-1 rounded bg-violet-50 px-1.5 py-1" title="Neurons"><Brain size={13} />{Number(progress.neurons || 0)}</span>
+                        <span className="inline-flex items-center gap-1 rounded bg-amber-50 px-1.5 py-1" title="Shells carried by Poulpita"><Shell size={13} />{Number(progress.seashells || 0)}</span>
+                        <span className="inline-flex items-center gap-0.5 rounded bg-emerald-50 px-1.5 py-1" title="Shells stored in shelters"><Home size={13} /><Shell size={10} />{Number(progress.shelter_seashells || 0)}</span>
+                        <span className="inline-flex items-center gap-1 rounded bg-sky-50 px-1.5 py-1" title="Poulpita size"><Scale size={13} />{progress.size_label || `Size ${Number(progress.size_index || 0) + 1}`}</span>
+                        <span className="inline-flex items-center gap-1 rounded bg-fuchsia-50 px-1.5 py-1" title="Remaining initiatives"><Hand size={13} />{Number(progress.remaining_initiatives || 0)}/{Number(progress.total_initiatives || 0)}</span>
+                        <span className="inline-flex items-center gap-1 rounded bg-emerald-50 px-1.5 py-1" title="Secured shelters / shelters"><Home size={13} />{Number(progress.secured_shelters || 0)}/{Number(progress.shelter_tokens || 0)}</span>
+                        <span className="inline-flex items-center gap-1 rounded bg-cyan-50 px-1.5 py-1" title="Current node"><MapPin size={13} />{progress.node_id || "-"}</span>
+                      </div>
+                    </td>
+                    <td className="p-2 text-xs text-slate-600">{replay.seed}</td>
+                    <td className="p-2">
+                      <div className="flex justify-end gap-2">
+                        {replay.status === "completed" ? <Link className={primaryButton} to={`/admin/replays/${replay.id}`}>Replay</Link> : null}
+                        <button className={dangerButton} disabled={active} onClick={() => void deleteReplay(replay)} type="button">Delete</button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {!replays.length ? <p className="py-8 text-center text-sm text-slate-500">No simulations saved.</p> : null}
+        </div>
+      </div>
     </section>
   );
 };
