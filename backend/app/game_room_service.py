@@ -2304,6 +2304,7 @@ class GameRoomService:
             next_state = deepcopy(state)
             next_state["phase"] = PHASE_DAY
             next_state["last_active_capability_id"] = capability_id
+            next_state["night_shell_prepared"] = False
             _reset_night_runtime(next_state)
             next_state["version"] = int(state["version"]) + 1
             event = {
@@ -2334,14 +2335,18 @@ class GameRoomService:
                 shelter["seashells"] = previous_shells + 1
                 if previous_shells < 3 <= int(shelter.get("seashells") or 0):
                     next_state.setdefault("objective_progress", {})["secured_shelter"] = True
+                next_state["night_shell_prepared"] = False
                 event_type = "seashell_moved_to_shelter"
             else:
                 if int(shelter.get("seashells") or 0) <= 0:
                     self._reject(state, command_id, "no_shelter_shells", "This shelter has no seashells.")
                 shelter["seashells"] = int(shelter.get("seashells") or 0) - 1
                 poulpita["seashells"] = int(poulpita.get("seashells") or 0) + 1
+                next_state["night_shell_prepared"] = True
                 event_type = "seashell_moved_to_poulpita"
             shelter["secure"] = int(shelter.get("seashells") or 0) >= 3
+            if command_type == "move_seashell_to_shelter":
+                _record_shelter_arrival(next_state, current_node_id)
             next_state["version"] = int(state["version"]) + 1
             _mark_game_won_if_needed(next_state)
             event = {
@@ -2533,6 +2538,7 @@ class GameRoomService:
                 event["version"] = int(next_state["version"])
                 return next_state, [event]
             next_state["phase"] = PHASE_NIGHT_IDLE
+            next_state["night_shell_prepared"] = False
             next_state["day_index"] = int(state.get("day_index") or 1) + 1
             next_state["night_time_spent"] = 0
             next_state["active_capability_id"] = None

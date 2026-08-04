@@ -2117,6 +2117,15 @@ def _simulate_public_command(state: dict[str, Any], command: dict[str, Any]) -> 
                 poulpita["seashells"] = int(poulpita.get("seashells") or 0) - 1
                 shelter["seashells"] = int(shelter.get("seashells") or 0) + 1
                 shelter["secure"] = int(shelter.get("seashells") or 0) >= 3
+                state["night_shell_prepared"] = False
+                progress = state.setdefault("objective_progress", {})
+                if shelter["secure"]:
+                    progress["secured_shelter"] = True
+                    if state.get("courtship_completed"):
+                        progress["secured_shelter_return_energy_after_courtship"] = max(
+                            int(poulpita.get("energy") or 0),
+                            int(progress.get("secured_shelter_return_energy_after_courtship") or 0),
+                        )
     elif command_type == "move_seashell_from_shelter":
         current_node_id = str((state.get("poulpita") or {}).get("node_id") or "")
         shelter = (state.get("shelters") or {}).get(current_node_id)
@@ -2124,6 +2133,7 @@ def _simulate_public_command(state: dict[str, Any], command: dict[str, Any]) -> 
             shelter["seashells"] = int(shelter.get("seashells") or 0) - 1
             shelter["secure"] = int(shelter.get("seashells") or 0) >= 3
             state.setdefault("poulpita", {})["seashells"] = int(state.setdefault("poulpita", {}).get("seashells") or 0) + 1
+            state["night_shell_prepared"] = True
     elif command_type == "buy_hand_size_upgrade" and ability_id:
         upgrade_index = int(payload.get("upgrade_index") or 0)
         upgrades = capability.get("hand_size_upgrades") or []
@@ -2152,6 +2162,7 @@ def _simulate_public_command(state: dict[str, Any], command: dict[str, Any]) -> 
         if not _state_has_shelter(state, current_node_id):
             state.setdefault("poulpita", {})["energy"] = max(0, int(state.get("poulpita", {}).get("energy") or 0) - 1)
         state["phase"] = "day"
+        state["night_shell_prepared"] = False
         state["night_time_spent"] = 0
         state["active_capability_id"] = None
         for next_capability in (state.get("capabilities") or {}).values():
@@ -2165,6 +2176,7 @@ def _simulate_public_command(state: dict[str, Any], command: dict[str, Any]) -> 
             state["game_over_reason"] = "maximum_nights_reached"
             return
         state["phase"] = "night_idle"
+        state["night_shell_prepared"] = False
         state["day_index"] = int(state.get("day_index") or 1) + 1
         state["night_time_spent"] = 0
         state["active_capability_id"] = None
@@ -4116,19 +4128,19 @@ def _day_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
     shelter_count = int(raw_shelter.get("count") or 0) if isinstance(raw_shelter, dict) else int(raw_shelter or 0)
     shelter_shells = int(raw_shelter.get("seashells") or 0) if isinstance(raw_shelter, dict) else 0
     carried_shells = int((state.get("poulpita") or {}).get("seashells") or 0)
-    if carried_shells > 1 and shelter_count > 0 and shelter_shells < 3:
-        shell_moves = min(carried_shells - 1, 3 - shelter_shells)
+    if carried_shells > 0 and shelter_count > 0 and not state.get("night_shell_prepared"):
+        shell_moves = carried_shells
         commands = [{"type": "move_seashell_to_shelter", "payload": {}} for _ in range(shell_moves)]
         proposals.append(
             _public_plan(
                 plan_id="day_store_shells",
                 proposer_ability_id=None,
                 title=f"Store {shell_moves} seashell{'s' if shell_moves != 1 else ''} in the shelter",
-                rationale="During day, shells carried by Poulpita can be moved into the current shelter. This can secure the shelter.",
+                rationale="During day, store every carried shell before growth so shelter security and the energy discount use the full shell supply.",
                 risk_label="low",
                 step_preview=["Move shells to the current shelter", "Recalculate shelter security"],
                 expected_resources=_resource_estimate(),
-                score=140,
+                score=180,
                 objective_effect="Can progress secure-shelter objectives.",
                 commands=commands,
                 plan_chain=_plan_chain(["Move shell to shelter"] * len(commands), commands),
@@ -4209,6 +4221,34 @@ def _day_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
                     statistics=statistics,
                 )
             )
+    has_day_purchase = any(
+        any(str(command.get("type") or "").startswith("buy_") for command in proposal.get("commands") or [])
+        for proposal in proposals
+    )
+    if (
+        not has_day_purchase
+        and shelter_count > 0
+        and carried_shells == 0
+        and shelter_shells > 0
+        and not state.get("night_shell_prepared")
+        and int(state.get("day_index") or 1) < int(state.get("max_nights") or 5)
+    ):
+        commands = [{"type": "move_seashell_from_shelter", "payload": {}}]
+        proposals.append(
+            _public_plan(
+                plan_id="day_take_night_shell",
+                proposer_ability_id=None,
+                title="Carry one seashell into the night",
+                rationale="Day purchases are complete. Take one shell back only now, immediately before beginning the next night.",
+                risk_label="low",
+                step_preview=["Move one shell from the shelter to Poulpita"],
+                expected_resources=_resource_estimate(),
+                score=25,
+                commands=commands,
+                plan_chain=_plan_chain(["Take one shell from shelter"], commands),
+                statistics=_plan_statistics(state, commands=commands),
+            )
+        )
     commands = [{"type": "end_day", "payload": {}}]
     proposals.append(
         _public_plan(
@@ -4417,14 +4457,14 @@ def _local_orchestrator_day_candidates(state: dict[str, Any]) -> list[dict[str, 
     shelter_count = int(shelter.get("count") or 0) if isinstance(shelter, dict) else int(shelter or 0)
     shelter_shells = int(shelter.get("seashells") or 0) if isinstance(shelter, dict) else 0
     carried_shells = int((state.get("poulpita") or {}).get("seashells") or 0)
-    if shelter_count and shelter_shells < 3 and carried_shells > 1:
+    if shelter_count and carried_shells > 0 and not state.get("night_shell_prepared"):
         return [
             _local_orchestrator_candidate(
                 state,
                 plan_id="local_day_store_shell",
                 title="Store a shell",
                 command={"type": "move_seashell_to_shelter", "payload": {}},
-                base_score=140,
+                base_score=180,
             )
         ]
     cost, next_size = _poulpita_size_upgrade_cost(state)
@@ -4472,6 +4512,23 @@ def _local_orchestrator_day_candidates(state: dict[str, Any]) -> list[dict[str, 
                     expected_gain=10,
                 )
             )
+    if (
+        not candidates
+        and shelter_count
+        and carried_shells == 0
+        and shelter_shells > 0
+        and not state.get("night_shell_prepared")
+        and int(state.get("day_index") or 1) < int(state.get("max_nights") or 5)
+    ):
+        candidates.append(
+            _local_orchestrator_candidate(
+                state,
+                plan_id="local_day_take_night_shell",
+                title="Carry one shell into the night",
+                command={"type": "move_seashell_from_shelter", "payload": {}},
+                base_score=140,
+            )
+        )
     candidates.append(
         _local_orchestrator_candidate(
             state,

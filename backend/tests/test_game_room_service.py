@@ -3528,23 +3528,34 @@ def test_end_night_is_blocked_by_compulsory_tiles_and_octopus_tokens():
     run(scenario())
 
 
-def test_bot_stores_shells_until_shelter_is_secure_but_keeps_one_carried():
+def test_bot_stores_all_shells_during_day_then_takes_one_before_next_night():
     state = _goldfish_state("room_bot_secure_shelter", level_id="test-level", mode="bots_only")
     state["phase"] = "day"
     current_node_id = state["poulpita"]["node_id"]
     state["poulpita"]["seashells"] = 4
+    state["poulpita"]["size_upgraded_today"] = True
     state["shelters"] = {current_node_id: {"count": 1, "seashells": 0, "secure": False}}
+    for capability in state["capabilities"].values():
+        capability["purchased_hand_size_upgrade_indices"] = list(range(len(capability.get("hand_size_upgrades") or [])))
 
-    for _index in range(3):
+    for _index in range(4):
         candidates = bot_planner._local_orchestrator_day_candidates(state)
         assert candidates[0]["commands"][0]["type"] == "move_seashell_to_shelter"
         bot_planner._simulate_public_command(state, candidates[0]["commands"][0])
+
+    assert state["poulpita"]["seashells"] == 0
+    assert state["shelters"][current_node_id]["seashells"] == 4
+    assert state["shelters"][current_node_id]["secure"] is True
+
+    candidates = bot_planner._local_orchestrator_day_candidates(state)
+    assert candidates[0]["commands"][0]["type"] == "move_seashell_from_shelter"
+    bot_planner._simulate_public_command(state, candidates[0]["commands"][0])
 
     assert state["poulpita"]["seashells"] == 1
     assert state["shelters"][current_node_id]["seashells"] == 3
     assert state["shelters"][current_node_id]["secure"] is True
     assert all(
-        candidate["commands"][0]["type"] != "move_seashell_to_shelter"
+        candidate["commands"][0]["type"] not in {"move_seashell_to_shelter", "move_seashell_from_shelter"}
         for candidate in bot_planner._local_orchestrator_day_candidates(state)
     )
 
@@ -4229,6 +4240,45 @@ def test_day_shell_transfer_secures_shelter_and_completes_objective():
         assert third["projection"]["shelters"]["1A"]["secure"] is True
         assert third["projection"]["objectives"][0]["completed"] is True
         assert third["projection"]["phase"] == "game_over"
+        assert service._memory_results[room["id"]]["outcome"] == "won"
+
+    run(scenario())
+
+
+def test_third_shell_deposit_after_courtship_completes_secured_return_objective():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "day"
+        state["courtship_completed"] = True
+        state["poulpita"]["node_id"] = "1A"
+        state["poulpita"]["energy"] = 9
+        state["poulpita"]["seashells"] = 1
+        state["shelters"] = {"1A": {"count": 1, "seashells": 2, "secure": False}}
+        state["objectives"] = [
+            {"id": "secure", "type": "secure_shelter"},
+            {"id": "eggs", "type": "return_secured_shelter_after_courtship", "target": 5},
+        ]
+        state["objective_progress"] = {
+            "size_increases": 0,
+            "found_shelter": True,
+            "secured_shelter": False,
+        }
+
+        result = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_winning_shell",
+            expected_version=1,
+            command_type="move_seashell_to_shelter",
+        )
+
+        assert result["ok"] is True
+        assert result["projection"]["poulpita"]["seashells"] == 0
+        assert result["projection"]["shelters"]["1A"]["seashells"] == 3
+        assert all(objective["completed"] for objective in result["projection"]["objectives"])
+        assert result["projection"]["phase"] == "game_over"
         assert service._memory_results[room["id"]]["outcome"] == "won"
 
     run(scenario())
