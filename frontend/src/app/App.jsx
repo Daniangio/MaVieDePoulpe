@@ -16,6 +16,7 @@ import {
 } from "../lib/firebase.js";
 import AdminPage from "../pages/AdminPage.jsx";
 import AdminContentPage from "../pages/AdminContentPage.jsx";
+import AdminAnalyticsPage from "../pages/AdminAnalyticsPage.jsx";
 import AuthPage from "../pages/AuthPage.jsx";
 import FriendsPage from "../pages/FriendsPage.jsx";
 import GameHistoryPage from "../pages/GameHistoryPage.jsx";
@@ -276,6 +277,7 @@ function AppContent() {
           <Route path="/games/:roomId/post-game" element={authenticatedPage(<PostGamePage />)} />
           <Route path="/admin" element={authenticatedPage(<AdminPage />)} />
           <Route path="/admin/content" element={authenticatedPage(<AdminContentPage />)} />
+          <Route path="/admin/analytics" element={authenticatedPage(<AdminAnalyticsPage />)} />
           <Route path="/admin/replays/:replayId" element={inGamePage(<GameRoomPage replayMode />)} />
           <Route path="*" element={<Navigate to={token ? "/lobby" : "/auth"} />} />
         </Routes>

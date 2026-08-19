@@ -89,6 +89,10 @@ def _history_key(user_id: str) -> str:
     return f"game:user:{user_id}:history"
 
 
+def _completed_games_key() -> str:
+    return "game:analytics:completed-games"
+
+
 def _room_key(room_id: str) -> str:
     return f"game:room:{room_id}"
 
@@ -107,6 +111,40 @@ def _command_result_key(command_id: str) -> str:
 
 def _projection_channel(room_id: str) -> str:
     return f"game:room:{room_id}:projection"
+
+
+def _analytics_checkpoint(state: dict[str, Any], command: dict[str, Any], events: list[dict[str, Any]]) -> None:
+    """Keep a compact, replay-like timeline for completed human/admin games."""
+    poulpita = state.get("poulpita") or {}
+    capabilities = state.get("capabilities") or {}
+    payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
+    capability_id = str(payload.get("capability_id") or "")
+    if not capability_id:
+        capability_id = str(next((event.get("capability_id") for event in events if event.get("capability_id")), "") or "")
+    timeline = state.setdefault("analytics_timeline", [])
+    timeline.append(
+        {
+            "day_index": max(1, int(state.get("day_index") or 1)),
+            "phase": str(state.get("phase") or ""),
+            "command_type": str(command.get("type") or ""),
+            "capability_id": capability_id,
+            "node_id": str(poulpita.get("node_id") or ""),
+            "energy": max(0, int(poulpita.get("energy") or 0)),
+            "neurons": max(0, int(poulpita.get("neurons") or 0)),
+            "seashells": max(0, int(poulpita.get("seashells") or 0)),
+            "size_index": max(0, int(poulpita.get("size_index") or 0)),
+            "event_types": [str(event.get("type") or "") for event in events if event.get("type")],
+            "event_capabilities": [str(event.get("capability_id") or "") for event in events if event.get("capability_id")],
+            "capability_ap": {
+                str(ability_id): max(0, int(capability.get("pa") or 0))
+                for ability_id, capability in capabilities.items()
+                if isinstance(capability, dict)
+            },
+        }
+    )
+    # This is analytics, not a replay archive. Keep the retained state bounded for unusually long rooms.
+    if len(timeline) > 5000:
+        del timeline[:-5000]
 
 
 def _iso_to_epoch(value: Any) -> float:
@@ -1998,12 +2036,15 @@ class GameRoomService:
                     events = [*events, loss_event]
             if next_state["phase"] != PHASE_SETUP:
                 room.update({"state": ROOM_STATE_IN_GAME, "started_at": room.get("started_at") or _now_iso()})
+            _analytics_checkpoint(next_state, command, events)
             if next_state.get("phase") == PHASE_FINISHED:
                 result = self._result_from_state(room=room, state=next_state, user_id=user.id)
                 room.update({"state": ROOM_STATE_FINISHED, "ended_at": result["created_at"], "result_id": room_id})
                 await self._save_result(result)
             await self._save_room(room)
             await self._save_state(room_id, next_state)
+            if next_state.get("phase") == PHASE_FINISHED:
+                await self._index_completed_game(room_id)
             projection = _project_state(next_state)
         await self.broadcast_projection(room_id)
         return {
@@ -2304,6 +2345,7 @@ class GameRoomService:
             next_state = deepcopy(state)
             next_state["phase"] = PHASE_DAY
             next_state["last_active_capability_id"] = capability_id
+            next_state["night_shell_prepared"] = False
             _reset_night_runtime(next_state)
             next_state["version"] = int(state["version"]) + 1
             event = {
@@ -2334,14 +2376,18 @@ class GameRoomService:
                 shelter["seashells"] = previous_shells + 1
                 if previous_shells < 3 <= int(shelter.get("seashells") or 0):
                     next_state.setdefault("objective_progress", {})["secured_shelter"] = True
+                next_state["night_shell_prepared"] = False
                 event_type = "seashell_moved_to_shelter"
             else:
                 if int(shelter.get("seashells") or 0) <= 0:
                     self._reject(state, command_id, "no_shelter_shells", "This shelter has no seashells.")
                 shelter["seashells"] = int(shelter.get("seashells") or 0) - 1
                 poulpita["seashells"] = int(poulpita.get("seashells") or 0) + 1
+                next_state["night_shell_prepared"] = True
                 event_type = "seashell_moved_to_poulpita"
             shelter["secure"] = int(shelter.get("seashells") or 0) >= 3
+            if command_type == "move_seashell_to_shelter":
+                _record_shelter_arrival(next_state, current_node_id)
             next_state["version"] = int(state["version"]) + 1
             _mark_game_won_if_needed(next_state)
             event = {
@@ -2533,6 +2579,7 @@ class GameRoomService:
                 event["version"] = int(next_state["version"])
                 return next_state, [event]
             next_state["phase"] = PHASE_NIGHT_IDLE
+            next_state["night_shell_prepared"] = False
             next_state["day_index"] = int(state.get("day_index") or 1) + 1
             next_state["night_time_spent"] = 0
             next_state["active_capability_id"] = None
@@ -3316,16 +3363,83 @@ class GameRoomService:
         next_state = deepcopy(state)
         next_state["phase"] = PHASE_FINISHED
         next_state["version"] = int(next_state.get("version") or 0) + 1
+        _analytics_checkpoint(next_state, {"type": "end_room", "payload": {}}, [])
         room.update({"state": ROOM_STATE_FINISHED, "ended_at": now, "result_id": room_id})
         await self._save_room(room)
         await self._save_state(room_id, next_state)
         await self._save_result(result)
+        await self._index_completed_game(room_id)
         self._memory_history.setdefault(user_id, [])
         if room_id not in self._memory_history[user_id]:
             self._memory_history[user_id].append(room_id)
         if self.redis is not None:
             await self.redis.zadd(_history_key(user_id), {room_id: time.time()})
         return self._public_result(result)
+
+    async def _index_completed_game(self, room_id: str) -> None:
+        if self.redis is not None:
+            await self.redis.zadd(_completed_games_key(), {room_id: time.time()})
+
+    async def list_admin_analytics_games(self, *, level_id: str | None = None, limit: int = 500) -> list[dict[str, Any]]:
+        """Return completed non-simulation rooms with the compact timeline needed for admin analysis."""
+        normalized_limit = max(1, min(1000, int(limit or 500)))
+        room_ids = {
+            str(room_id)
+            for room_id, room in self._memory_rooms.items()
+            if room.get("state") == ROOM_STATE_FINISHED
+        }
+        if self.redis is not None:
+            try:
+                room_ids.update(str(value) for value in await self.redis.zrevrange(_completed_games_key(), 0, normalized_limit - 1))
+            except Exception:
+                pass
+            scan_iter = getattr(self.redis, "scan_iter", None)
+            if scan_iter is not None:
+                try:
+                    async for raw_key in scan_iter(match="game:room:*"):
+                        key = raw_key.decode("utf-8") if isinstance(raw_key, bytes) else str(raw_key)
+                        room_id = key.removeprefix("game:room:")
+                        if room_id and ":" not in room_id:
+                            room_ids.add(room_id)
+                            if len(room_ids) >= normalized_limit:
+                                break
+                except Exception:
+                    pass
+
+        records: list[dict[str, Any]] = []
+        for room_id in list(room_ids)[:normalized_limit]:
+            try:
+                room = await self._load_room(room_id)
+            except Exception:
+                # The shared Redis namespace also contains room projections and other runtime keys.
+                # They are not persisted room documents and must not break admin analytics.
+                continue
+            if not room or room.get("state") != ROOM_STATE_FINISHED:
+                continue
+            if level_id and str(room.get("level_id") or "") != str(level_id):
+                continue
+            try:
+                state = await self._load_state(room_id)
+            except Exception:
+                continue
+            if state is None:
+                continue
+            result = self._memory_results.get(room_id)
+            if self.redis is not None:
+                result = await self._redis_get_json(_result_key(room_id)) or result
+            records.append(
+                {
+                    "id": room_id,
+                    "source": "saved_game",
+                    "created_at": str((result or {}).get("created_at") or room.get("ended_at") or room.get("created_at") or ""),
+                    "level_id": str(room.get("level_id") or state.get("level_id") or ""),
+                    "mode": str(room.get("mode") or state.get("mode") or "goldfish"),
+                    "outcome": str((result or {}).get("outcome") or state.get("game_outcome") or "completed"),
+                    "game_over_reason": str((result or {}).get("game_over_reason") or state.get("game_over_reason") or ""),
+                    "state": deepcopy(state),
+                }
+            )
+        return sorted(records, key=lambda record: record["created_at"], reverse=True)
 
     async def get_result(self, *, room_id: str, user_id: str) -> dict[str, Any] | None:
         result = self._memory_results.get(room_id)

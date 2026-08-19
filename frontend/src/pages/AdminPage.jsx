@@ -7,6 +7,7 @@ import { buildApiUrl } from "../utils/connection.js";
 const adminSubnavItems = [
   { label: "Backoffice", to: "/admin" },
   { label: "Game content", to: "/admin/content" },
+  { label: "Game analytics", to: "/admin/analytics" },
 ];
 
 const emptyMapDraft = () => ({
