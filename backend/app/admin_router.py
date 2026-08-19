@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from .database import get_db
 from .bot_simulation_service import delete_bot_replay, get_bot_replay, list_bot_replays, start_bot_simulation_batch
+from .game_analytics_service import build_level_analytics, list_games_for_level
 from .db_models import AdminAuditLogRecord, UserProfileRecord
 from .friend_service import list_friends_summary
 from .game_content_service import (
@@ -43,7 +44,7 @@ from .game_content_service import (
     update_interaction,
 )
 from .map_service import create_map, delete_map, export_maps_data, get_map, import_maps_data, list_maps, update_map
-from .runtime_state import get_presence_service
+from .runtime_state import get_game_room_service, get_presence_service
 from .schemas import (
     AdminAuditLogEntry,
     AdminMutationStatus,
@@ -64,6 +65,35 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
     if not current_user.is_admin:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
     return current_user
+
+
+@router.post("/admin/game-analytics")
+async def admin_game_analytics(
+    payload: dict = Body(...),
+    _admin: User = Depends(require_admin),
+):
+    level_id = str(payload.get("level_id") or "").strip()
+    if not level_id:
+        raise HTTPException(status_code=422, detail="level_id is required.")
+    service = get_game_room_service()
+    saved_games = await service.list_admin_analytics_games(level_id=level_id) if service is not None else []
+    games = await asyncio.to_thread(list_games_for_level, level_id=level_id, saved_games=saved_games)
+    requested_ids = {str(game_id) for game_id in (payload.get("game_ids") or []) if game_id}
+    if requested_ids:
+        games = [game for game in games if game.get("id") in requested_ids]
+    raw_nights = payload.get("night_indices")
+    selected_nights = None
+    if isinstance(raw_nights, list):
+        try:
+            selected_nights = {max(1, int(value)) for value in raw_nights if str(value).strip()} or None
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="night_indices must contain whole numbers.") from exc
+    return await asyncio.to_thread(
+        build_level_analytics,
+        level_id=level_id,
+        games=games,
+        selected_nights=selected_nights,
+    )
 
 
 @router.get("/admin/bot-simulations")
