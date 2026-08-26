@@ -2198,7 +2198,7 @@ def test_late_shelter_return_uses_blocked_route_instead_of_optional_interaction(
     }
     state["poulpita"]["node_id"] = "start"
     state["shelters"] = {"shelter": {"count": 1, "seashells": 0, "secure": False}}
-    state["night_time_spent"] = 12
+    state["night_time_spent"] = 20
     state["night_shelter_available_at"] = 16
     state["capabilities"]["force"]["pa"] = 5
     state["capabilities"]["force"]["initiates_event_ids"] = ["optional-event"]
@@ -2233,14 +2233,14 @@ def test_late_shelter_return_uses_blocked_route_instead_of_optional_interaction(
     ]
 
 
-def test_local_orchestrator_returns_toward_safe_shelter_before_end_night_threshold():
+def test_local_orchestrator_returns_toward_safe_shelter_before_penalty_threshold():
     state = _goldfish_state("room_shelter_return_window", level_id="test-level", mode="bots_only")
     state["phase"] = "night_action"
     state["active_capability_id"] = "force"
     state["poulpita"]["node_id"] = "1A"
     state["shelters"] = {"1D": {"count": 1, "seashells": 0, "secure": False}}
     state["tiles"] = {}
-    state["night_time_spent"] = 12
+    state["night_time_spent"] = 17
     state["night_shelter_available_at"] = 16
     state["capabilities"]["force"]["pa"] = 5
     state["capabilities"]["force"]["actions_taken_this_control"] = 0
@@ -2256,13 +2256,27 @@ def test_local_orchestrator_returns_toward_safe_shelter_before_end_night_thresho
     ]
 
 
+def test_shelter_return_does_not_use_earliest_legal_end_as_deadline():
+    state = _goldfish_state("room_full_safe_night", level_id="test-level", mode="bots_only")
+    state["poulpita"]["node_id"] = "1A"
+    state["shelters"] = {"1D": {"count": 1, "seashells": 0, "secure": False}}
+    state["night_time_spent"] = int(state.get("night_shelter_available_at") or 16)
+    state["night_time_total"] = 24
+
+    context = bot_planner._shelter_return_context(state)
+
+    assert context["earliest_end"] == 16
+    assert context["return_start"] == 17
+    assert context["should_return"] is False
+
+
 def test_local_orchestrator_does_not_start_optional_interaction_inside_return_margin():
     state = _goldfish_state("room_optional_at_return_margin", level_id="test-level", mode="bots_only")
     state["phase"] = "night_action"
     state["active_capability_id"] = "force"
     state["poulpita"]["node_id"] = "1C"
     state["shelters"] = {"1D": {"count": 1, "seashells": 0, "secure": False}}
-    state["night_time_spent"] = 13
+    state["night_time_spent"] = 19
     state["night_shelter_available_at"] = 16
     state["capabilities"]["force"]["pa"] = 5
     state["capabilities"]["force"]["initiates_event_ids"] = ["optional-event"]
@@ -2286,8 +2300,9 @@ def test_local_orchestrator_does_not_start_optional_interaction_inside_return_ma
     candidates = bot_planner._local_orchestrator_night_candidates(state)
     commands = [bot_planner._orchestrator_command(candidate) for candidate in candidates]
 
-    assert context["return_start"] == 13
-    assert context["safety_margin"] == 2
+    assert context["earliest_end"] == 16
+    assert context["return_start"] == 19
+    assert context["safety_margin"] == 4
     assert commands == [
         {"type": "move_poulpita", "payload": {"capability_id": "force", "target_node_id": "1D"}}
     ]
@@ -2299,7 +2314,7 @@ def test_optimistic_rollout_does_not_stop_for_optional_tile_during_shelter_retur
     state["active_capability_id"] = "force"
     state["poulpita"]["node_id"] = "1A"
     state["shelters"] = {"1D": {"count": 1, "seashells": 0, "secure": False}}
-    state["night_time_spent"] = 12
+    state["night_time_spent"] = 17
     state["night_shelter_available_at"] = 16
     state["capabilities"]["force"]["pa"] = 5
     state["capabilities"]["force"]["initiates_event_ids"] = ["optional-event"]
@@ -3640,6 +3655,83 @@ def test_bot_prioritizes_shell_node_over_equivalent_empty_node():
     empty_score = bot_planner._node_followup_score(state, "1C", "force")[0]
 
     assert shell_score > empty_score
+
+
+def test_bot_prioritizes_energy_node_over_equivalent_empty_node():
+    state = _goldfish_state("room_bot_energy_route", level_id="test-level", mode="bots_only")
+    state["map"] = deepcopy(TEST_MAP)
+    state["poulpita"]["node_id"] = "1A"
+    state["capabilities"]["force"]["initiates_event_ids"] = ["energy-event"]
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "categories": {"prey": {"id": "prey", "name": "Prey", "compulsory_on_same_node": False}},
+        "events": {"energy-event": {"id": "energy-event", "name": "Energy prey", "category_id": "prey"}},
+        "tiles": {
+            "energy-tile": {
+                "id": "energy-tile",
+                "event_id": "energy-event",
+                "interaction_ids": [],
+                "success_effects": [{"type": "gain_energy", "amount": 2}],
+            }
+        },
+    }
+    state["tiles"] = {
+        "1B": [{"instance_id": "energy-instance", "tile_id": "energy-tile", "face_up": True}],
+        "1C": [],
+    }
+
+    energy_score = bot_planner._node_followup_score(state, "1B", "force")[0]
+    empty_score = bot_planner._node_followup_score(state, "1C", "force")[0]
+
+    assert energy_score > empty_score
+
+
+def test_bot_penalizes_late_compulsory_node_when_clearance_and_return_do_not_fit():
+    state = _goldfish_state("room_bot_late_compulsory_route", level_id="test-level", mode="bots_only")
+    state["map"] = {
+        **deepcopy(TEST_MAP),
+        "adjacency": {
+            "start": ["risk", "shelter"],
+            "risk": ["start"],
+            "shelter": ["start"],
+        },
+    }
+    state["poulpita"]["node_id"] = "start"
+    state["shelters"] = {"shelter": {"count": 1, "seashells": 0, "secure": False}}
+    state["active_capability_id"] = "force"
+    state["capabilities"]["force"]["initiates_event_ids"] = ["danger-event"]
+    state["capabilities"]["force"]["hand"] = []
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "bot_settings": {
+            "shelter_return_safety_steps": 4,
+            "weights": {"late_forced_node_penalty": 60},
+        },
+        "categories": {"threat": {"id": "threat", "compulsory_on_same_node": True}},
+        "events": {"danger-event": {"id": "danger-event", "category_id": "threat"}},
+        "interactions": {
+            interaction_id: {"id": interaction_id, "name": interaction_id.title()}
+            for interaction_id in ["charge", "hide", "analyse"]
+        },
+        "tiles": {
+            "danger-tile": {
+                "id": "danger-tile",
+                "event_id": "danger-event",
+                "interaction_ids": ["charge", "hide", "analyse"],
+                "success_effects": [{"type": "gain_energy", "amount": 2}],
+            }
+        },
+    }
+    state["tiles"] = {
+        "risk": [{"instance_id": "danger-instance", "tile_id": "danger-tile", "face_up": True}]
+    }
+
+    state["night_time_spent"] = 0
+    early_score = bot_planner._node_followup_score(state, "risk", "force")[0]
+    state["night_time_spent"] = 18
+    late_score = bot_planner._node_followup_score(state, "risk", "force")[0]
+
+    assert early_score > late_score + 300
 
 
 def test_bot_secures_required_shelter_before_pursuing_courtship():

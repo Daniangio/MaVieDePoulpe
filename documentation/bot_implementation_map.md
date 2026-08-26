@@ -126,6 +126,12 @@ shelter-return or objective routes:
 - `unavailable_compulsory_penalty` prices entry into a node whose compulsory tile has
   no available initiator. The reducer can apply that tile's configured failure once
   for the night, so this is deliberately finite rather than a hard route exclusion.
+- Shelter return timing uses `night_time_total`, the overrun/energy-penalty boundary.
+  `night_shelter_available_at` is only the earliest legal end and must not make bots
+  abandon the remaining safe interaction window. `shelter_return_safety_steps`
+  reserves configurable travel slack before that boundary.
+- Visible optional destinations are valued from every positive configured effect,
+  including energy needed for growth deadlines, rather than only seashell rewards.
 
 These weights live under `bot_settings.weights` and are editable with the other bot
 planner settings in the admin content UI.

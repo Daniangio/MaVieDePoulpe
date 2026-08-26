@@ -1100,19 +1100,21 @@ def _shelter_return_context(state: dict[str, Any], start_node_id: str | None = N
     total = max(1, int(state.get("night_time_total") or 24))
     shelter_at = min(total, max(0, int(state.get("night_shelter_available_at") or 16)))
     move_time = max(1, int(_action_cost(state, "move").get("time_cost") or 0))
-    interact_time = max(0, int(_action_cost(state, "interact").get("time_cost") or 0))
     distance = int(route.get("distance") or 0) if route else None
     travel_time = distance * move_time if distance is not None else total
     configured_margin = _bot_settings(state).get("shelter_return_safety_steps")
     try:
-        requested_margin = int(configured_margin) if configured_margin is not None else max(move_time, interact_time)
+        requested_margin = int(configured_margin) if configured_margin is not None else 4
     except (TypeError, ValueError):
-        requested_margin = max(move_time, interact_time)
+        requested_margin = 4
     safety_margin = max(
         1,
         requested_margin,
     )
-    return_start = max(0, shelter_at - travel_time - safety_margin)
+    # `night_shelter_available_at` is only the earliest legal time to end a
+    # night. Returning against that threshold wastes the safe interval between
+    # it and `night_time_total`, which is the actual overrun boundary.
+    return_start = max(0, total - travel_time - safety_margin)
     per_step = _planner_weight(state, "late_shelter_urgency", 8.0)
     urgency = 0.0
     objective_return = bool(objective_route and objective_energy_target is not None)
@@ -1120,8 +1122,9 @@ def _shelter_return_context(state: dict[str, Any], start_node_id: str | None = N
         urgency = 220.0
     elif route and spent >= return_start:
         urgency = (spent - return_start + 1) * per_step
-        if spent >= shelter_at:
-            urgency += (spent - shelter_at + 1) * per_step
+        latest_safe_departure = max(0, total - travel_time)
+        if spent >= latest_safe_departure:
+            urgency += (spent - latest_safe_departure + 1) * per_step * 2
         if spent >= total - max(2, travel_time):
             urgency += per_step * 4
     elif not route and spent >= shelter_at:
@@ -1134,6 +1137,7 @@ def _shelter_return_context(state: dict[str, Any], start_node_id: str | None = N
         "distance": distance,
         "travel_time": travel_time,
         "safety_margin": safety_margin,
+        "earliest_end": shelter_at,
         "return_start": return_start,
         "urgency": min(240.0, urgency),
         "should_return": bool(route and distance and urgency > 0),
@@ -1202,6 +1206,7 @@ def _node_followup_score(state: dict[str, Any], node_id: str, ability_id: str) -
     entries = _compulsory_choices_on_node(state, node_id, highest_only=False)
     summaries = [_interaction_resolution_summary(state, entry, preferred_ability_id=ability_id) for entry in entries]
     score = 0.0
+    forced_clearance_time = 0
     for entry, summary in zip(entries, summaries):
         actor_candidates = summary.get("actor_candidates") or []
         available_actors = [candidate for candidate in actor_candidates if candidate.get("has_control_available")]
@@ -1218,6 +1223,12 @@ def _node_followup_score(state: dict[str, Any], node_id: str, ability_id: str) -
             )
             score -= _planner_weight(state, "unavailable_compulsory_penalty", 20.0)
             continue
+        missing_cards = min(
+            max(0, int(candidate.get("missing_card_count_after_hand") or 0))
+            for candidate in available_actors
+        )
+        forced_clearance_time += max(0, int(_action_cost(state, "interact").get("time_cost") or 0))
+        forced_clearance_time += missing_cards * max(0, int(_action_cost(state, "draw").get("time_cost") or 0))
         score += float(summary.get("success_probability") or 0) * 30
         score += _weighted_expected_gain(state, summary.get("expected_delta") or {})
         if summary.get("compulsory"):
@@ -1238,7 +1249,8 @@ def _node_followup_score(state: dict[str, Any], node_id: str, ability_id: str) -
             continue
         summary = _interaction_resolution_summary(state, entry, preferred_ability_id=ability_id)
         expected_delta = summary.get("expected_delta") or {}
-        if float(expected_delta.get("seashells") or 0) <= 0:
+        expected_gain = _weighted_expected_gain(state, expected_delta)
+        if expected_gain <= 0:
             continue
         available_actors = [
             candidate
@@ -1247,7 +1259,7 @@ def _node_followup_score(state: dict[str, Any], node_id: str, ability_id: str) -
         ]
         if not available_actors:
             continue
-        score += _weighted_expected_gain(state, expected_delta)
+        score += expected_gain
         score += _shell_acquisition_bonus(state, expected_delta)
         score += float(summary.get("success_probability") or 0) * _planner_weight(state, "tile_resolution", 14.0)
         if any(candidate.get("ability_id") == ability_id for candidate in available_actors):
@@ -1265,6 +1277,23 @@ def _node_followup_score(state: dict[str, Any], node_id: str, ability_id: str) -
     if shelter_distance is not None:
         score += max(0, 10 - shelter_distance * 2)
         score += _night_lateness_score(state) * max(0.0, (5.0 - min(5, shelter_distance)) / 5.0)
+        if forced_clearance_time > 0:
+            remaining_time = max(
+                0,
+                int(state.get("night_time_total") or 24) - int(state.get("night_time_spent") or 0),
+            )
+            move_time = max(1, int(_action_cost(state, "move").get("time_cost") or 0))
+            try:
+                safety_margin = max(1, int(_bot_settings(state).get("shelter_return_safety_steps") or 4))
+            except (TypeError, ValueError):
+                safety_margin = 4
+            required_time = move_time + shelter_distance * move_time + forced_clearance_time + safety_margin
+            if required_time > remaining_time:
+                score -= (required_time - remaining_time) * _planner_weight(
+                    state,
+                    "late_forced_node_penalty",
+                    60.0,
+                )
     courtship = _courtship_pursuit_context(state)
     if courtship["should_seek"]:
         if str(node_id) == str(courtship.get("next_node_id") or ""):

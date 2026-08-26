@@ -158,6 +158,7 @@ const defaultBotSettings = {
   orchestrator_max_candidates: 8,
   max_plans: 3,
   min_energy_after_size_upgrade: 4,
+  shelter_return_safety_steps: 4,
   special_power_start_night: 4,
   weights: {
     efficiency: 35,
@@ -170,6 +171,7 @@ const defaultBotSettings = {
     information_gain: 6,
     immediate_backtrack_penalty: 24,
     unavailable_compulsory_penalty: 20,
+    late_forced_node_penalty: 60,
   },
   resource_weights: {
     energy: 8,
@@ -200,6 +202,7 @@ const botPlannerWeightLabels = {
   information_gain: "Unrevealed tile information gain",
   immediate_backtrack_penalty: "Immediate backtrack penalty",
   unavailable_compulsory_penalty: "Unavailable compulsory failure penalty",
+  late_forced_node_penalty: "Late compulsory-node risk",
 };
 
 const botResourceWeightLabels = {
@@ -1095,7 +1098,7 @@ const TileEditor = ({ addEffect, busy, categoriesById, content, deleteItem, even
           <span className="text-slate-600">Priority</span>
           <input
             className={`${input} mt-1`}
-            min="0"
+            min="1"
             step="1"
             type="number"
             value={tileDraft.priority ?? 0}
@@ -1329,6 +1332,19 @@ const BotSettingsEditor = ({ botSettings, onSave, busy }) => {
             type="number"
             value={Number(draft.min_energy_after_size_upgrade || 4)}
             onChange={(event) => setDraft((current) => ({ ...current, min_energy_after_size_upgrade: Math.max(1, Math.min(31, Number(event.target.value || 4))) }))}
+          />
+        </label>
+        <label className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3 text-sm">
+          <span className="font-semibold text-teal-950">Shelter return margin</span>
+          <span className="mt-1 block text-xs text-slate-500">Safe time steps reserved after the estimated trip home. Return timing uses the night penalty boundary, not the earliest legal end.</span>
+          <input
+            className={`${input} mt-3`}
+            max="12"
+            min="0"
+            step="1"
+            type="number"
+            value={Number(draft.shelter_return_safety_steps ?? 4)}
+            onChange={(event) => setDraft((current) => ({ ...current, shelter_return_safety_steps: Math.max(1, Math.min(12, Number(event.target.value || 4))) }))}
           />
         </label>
       </div>
