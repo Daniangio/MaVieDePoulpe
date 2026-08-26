@@ -1202,15 +1202,21 @@ def _node_followup_score(state: dict[str, Any], node_id: str, ability_id: str) -
     entries = _compulsory_choices_on_node(state, node_id, highest_only=False)
     summaries = [_interaction_resolution_summary(state, entry, preferred_ability_id=ability_id) for entry in entries]
     score = 0.0
-    for summary in summaries:
+    for entry, summary in zip(entries, summaries):
         actor_candidates = summary.get("actor_candidates") or []
         available_actors = [candidate for candidate in actor_candidates if candidate.get("has_control_available")]
         preferred_can_act = any(candidate.get("ability_id") == ability_id for candidate in available_actors)
         any_actor = bool(available_actors)
         if not any_actor:
-            # Entering this node deterministically fails the compulsory tile.
-            # Keep this below any ordinary resource heuristic so routes avoid it.
-            score -= 500
+            # The reducer can legally apply this compulsory tile's failure once
+            # for the night. Price that deterministic outcome instead of making
+            # the node effectively unreachable: a hard exclusion can disconnect
+            # the exploration graph and trap bots in an A-B-A movement loop.
+            score += _weighted_expected_gain(
+                state,
+                _effect_delta((entry.get("tile") or {}).get("failure_effects") or []),
+            )
+            score -= _planner_weight(state, "unavailable_compulsory_penalty", 20.0)
             continue
         score += float(summary.get("success_probability") or 0) * 30
         score += _weighted_expected_gain(state, summary.get("expected_delta") or {})
@@ -1246,6 +1252,15 @@ def _node_followup_score(state: dict[str, Any], node_id: str, ability_id: str) -
         score += float(summary.get("success_probability") or 0) * _planner_weight(state, "tile_resolution", 14.0)
         if any(candidate.get("ability_id") == ability_id for candidate in available_actors):
             score += 12
+    hidden_count = sum(
+        1
+        for instance in (state.get("tiles") or {}).get(str(node_id), []) or []
+        if not instance.get("face_up")
+    )
+    score += hidden_count * _planner_weight(state, "information_gain", 6.0)
+    previous_node_id = str((state.get("poulpita") or {}).get("previous_node_id") or "")
+    if previous_node_id and str(node_id) == previous_node_id:
+        score -= _planner_weight(state, "immediate_backtrack_penalty", 24.0)
     shelter_distance = _distance_to_closest_shelter(state, node_id)
     if shelter_distance is not None:
         score += max(0, 10 - shelter_distance * 2)

@@ -110,6 +110,9 @@ DEFAULT_BOT_SETTINGS = {
         "compulsory_tile_resolution": 35,
         "third_ability_penalty": 45,
         "late_shelter_urgency": 8,
+        "information_gain": 6,
+        "immediate_backtrack_penalty": 24,
+        "unavailable_compulsory_penalty": 20,
     },
     "resource_weights": {
         "energy": 8,

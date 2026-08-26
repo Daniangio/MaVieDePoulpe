@@ -167,6 +167,9 @@ const defaultBotSettings = {
     compulsory_tile_resolution: 35,
     third_ability_penalty: 45,
     late_shelter_urgency: 8,
+    information_gain: 6,
+    immediate_backtrack_penalty: 24,
+    unavailable_compulsory_penalty: 20,
   },
   resource_weights: {
     energy: 8,
@@ -194,6 +197,9 @@ const botPlannerWeightLabels = {
   compulsory_tile_resolution: "Resolve a compulsory tile",
   third_ability_penalty: "Third ability penalty",
   late_shelter_urgency: "Late-night shelter urgency",
+  information_gain: "Unrevealed tile information gain",
+  immediate_backtrack_penalty: "Immediate backtrack penalty",
+  unavailable_compulsory_penalty: "Unavailable compulsory failure penalty",
 };
 
 const botResourceWeightLabels = {

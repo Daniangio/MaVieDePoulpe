@@ -1217,7 +1217,7 @@ def test_optional_tile_is_excluded_when_its_only_initiator_has_no_initiative():
     assert {command.get("payload", {}).get("capability_id") for command in commands} <= {"intelligence"}
 
 
-def test_destination_with_unavailable_compulsory_initiator_has_extreme_route_penalty():
+def test_destination_with_unavailable_compulsory_initiator_uses_finite_failure_penalty():
     state = _goldfish_state("room_exhausted_route", level_id="test-level", mode="bots_only")
     for ability_id, capability in state["capabilities"].items():
         capability["initiates_event_ids"] = ["moray"] if ability_id == "force" else []
@@ -1227,7 +1227,14 @@ def test_destination_with_unavailable_compulsory_initiator_has_extreme_route_pen
         **state["tile_catalog"],
         "categories": {"threat": {"id": "threat", "compulsory_on_same_node": True}},
         "events": {"moray": {"id": "moray", "category_id": "threat"}},
-        "tiles": {"moray-tile": {"id": "moray-tile", "event_id": "moray", "interaction_ids": []}},
+        "tiles": {
+            "moray-tile": {
+                "id": "moray-tile",
+                "event_id": "moray",
+                "interaction_ids": [],
+                "failure_effects": [{"type": "remove_tile"}],
+            }
+        },
     }
     state["tiles"] = {
         "1B": [{"instance_id": "moray-instance", "tile_id": "moray-tile", "face_up": True}]
@@ -1236,7 +1243,39 @@ def test_destination_with_unavailable_compulsory_initiator_has_extreme_route_pen
     blocked_score, _entries, _distance = bot_planner._node_followup_score(state, "1B", "intelligence")
     safe_score, _entries, _distance = bot_planner._node_followup_score(state, "1C", "intelligence")
 
-    assert blocked_score < safe_score - 400
+    assert safe_score - 100 < blocked_score < safe_score
+
+
+def test_node_scoring_prefers_finite_compulsory_failure_over_immediate_backtrack():
+    state = _goldfish_state("room_avoid_backtrack_loop", level_id="test-level", mode="bots_only")
+    state["poulpita"]["node_id"] = "1B"
+    state["poulpita"]["previous_node_id"] = "1A"
+    state["shelters"] = {}
+    for ability_id, capability in state["capabilities"].items():
+        capability["initiates_event_ids"] = ["moray"] if ability_id == "force" else []
+    force = state["capabilities"]["force"]
+    force["control_takes_this_night"] = force["max_control_takes_per_night"]
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "categories": {"threat": {"id": "threat", "compulsory_on_same_node": True}},
+        "events": {"moray": {"id": "moray", "category_id": "threat"}},
+        "tiles": {
+            "moray-tile": {
+                "id": "moray-tile",
+                "event_id": "moray",
+                "interaction_ids": [],
+                "failure_effects": [{"type": "remove_tile"}],
+            }
+        },
+    }
+    state["tiles"] = {
+        "1C": [{"instance_id": "moray-instance", "tile_id": "moray-tile", "face_up": True}]
+    }
+
+    backtrack_score = bot_planner._node_followup_score(state, "1A", "intelligence")[0]
+    progress_score = bot_planner._node_followup_score(state, "1C", "intelligence")[0]
+
+    assert progress_score > backtrack_score
 
 
 def test_local_orchestrator_ignores_gain_only_control_when_productive_control_exists():

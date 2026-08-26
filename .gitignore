@@ -3,6 +3,7 @@ secrets/
 backend/data/maps/
 backend/data/content/
 backend/data/replays/
+graphify-out/
 *.pdf
 
 # Byte-compiled / optimized / DLL files

@@ -114,6 +114,22 @@ Future deterministic bot tests should either monkeypatch `random` as current tes
 - The frontend setup page lets the user choose manual goldfish or solo-with-bots and choose their ability.
 - The game UI shows controller chips and a Phase 1 mocked Plans overlay.
 
+## Current Bot Navigation Safeguards
+
+The node follow-up heuristic keeps movement exploratory without overriding explicit
+shelter-return or objective routes:
+
+- `information_gain` rewards destinations that still contain unrevealed tiles.
+- `immediate_backtrack_penalty` discourages moving straight back to the node Poulpita
+  just left. It is a score penalty, not a legality rule, so forced and safety routes
+  can still backtrack.
+- `unavailable_compulsory_penalty` prices entry into a node whose compulsory tile has
+  no available initiator. The reducer can apply that tile's configured failure once
+  for the night, so this is deliberately finite rather than a hard route exclusion.
+
+These weights live under `bot_settings.weights` and are editable with the other bot
+planner settings in the admin content UI.
+
 ## Next Backend Reuse Points
 
 Phase 2 should add a dedicated `backend/app/bots/` package that depends on these existing functions:
