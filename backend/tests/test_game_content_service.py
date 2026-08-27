@@ -205,6 +205,7 @@ def test_bot_settings_include_efficiency_weights_and_ability_colors(tmp_path, mo
             "max_plans": 12,
             "min_energy_after_size_upgrade": 6,
             "shelter_return_safety_steps": 3,
+            "hidden_node_clearance_steps": 5,
             "special_power_start_night": 5,
             "weights": {
                 "efficiency": 50,
@@ -229,6 +230,7 @@ def test_bot_settings_include_efficiency_weights_and_ability_colors(tmp_path, mo
     assert settings["max_plans"] == 12
     assert settings["min_energy_after_size_upgrade"] == 6
     assert settings["shelter_return_safety_steps"] == 3
+    assert settings["hidden_node_clearance_steps"] == 5
     assert settings["special_power_start_night"] == 5
     assert settings["weights"]["efficiency"] == 50
     assert settings["weights"]["tile_resolution"] == 18

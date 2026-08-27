@@ -159,6 +159,7 @@ const defaultBotSettings = {
   max_plans: 3,
   min_energy_after_size_upgrade: 4,
   shelter_return_safety_steps: 4,
+  hidden_node_clearance_steps: 4,
   special_power_start_night: 4,
   weights: {
     efficiency: 35,
@@ -172,6 +173,8 @@ const defaultBotSettings = {
     immediate_backtrack_penalty: 24,
     unavailable_compulsory_penalty: 20,
     late_forced_node_penalty: 60,
+    growth_energy_shortfall_bonus: 24,
+    growth_energy_route: 110,
   },
   resource_weights: {
     energy: 8,
@@ -203,6 +206,8 @@ const botPlannerWeightLabels = {
   immediate_backtrack_penalty: "Immediate backtrack penalty",
   unavailable_compulsory_penalty: "Unavailable compulsory failure penalty",
   late_forced_node_penalty: "Late compulsory-node risk",
+  growth_energy_shortfall_bonus: "Growth energy shortfall",
+  growth_energy_route: "Route toward growth energy",
 };
 
 const botResourceWeightLabels = {
@@ -1345,6 +1350,19 @@ const BotSettingsEditor = ({ botSettings, onSave, busy }) => {
             type="number"
             value={Number(draft.shelter_return_safety_steps ?? 4)}
             onChange={(event) => setDraft((current) => ({ ...current, shelter_return_safety_steps: Math.max(1, Math.min(12, Number(event.target.value || 4))) }))}
+          />
+        </label>
+        <label className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3 text-sm">
+          <span className="font-semibold text-teal-950">Hidden-node clearance reserve</span>
+          <span className="mt-1 block text-xs text-slate-500">Estimated time reserved per hidden tile before entering a node late at night.</span>
+          <input
+            className={`${input} mt-3`}
+            max="12"
+            min="0"
+            step="1"
+            type="number"
+            value={Number(draft.hidden_node_clearance_steps ?? 4)}
+            onChange={(event) => setDraft((current) => ({ ...current, hidden_node_clearance_steps: Math.max(0, Math.min(12, Number(event.target.value || 0))) }))}
           />
         </label>
       </div>

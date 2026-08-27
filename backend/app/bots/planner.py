@@ -260,6 +260,32 @@ def _resource_weight(state: dict[str, Any], key: str, fallback: float) -> float:
         return fallback
 
 
+def _growth_energy_deadline_pressure(state: dict[str, Any]) -> float:
+    """Increase energy value while the next mandatory growth is unaffordable."""
+    current_size = max(0, int((state.get("poulpita") or {}).get("size_index") or 0))
+    required_size = max(
+        0,
+        int(state.get("courtship_min_size_index") if state.get("courtship_min_size_index") is not None else 3),
+    )
+    deadline = max(1, int(state.get("size_deadline_night") or 4))
+    current_night = max(1, int(state.get("day_index") or 1))
+    if current_size >= required_size or current_night > deadline:
+        return 0.0
+    cost, next_size = _poulpita_size_upgrade_cost(state)
+    if cost is None or not next_size:
+        return 0.0
+    reserve = max(1, int(_bot_settings(state).get("min_energy_after_size_upgrade") or 4))
+    current_energy = max(0, int((state.get("poulpita") or {}).get("energy") or 0))
+    target_energy = int(cost) + reserve
+    if current_energy >= target_energy:
+        return 0.0
+    remaining_growths = max(0, required_size - current_size)
+    remaining_growth_days = max(1, deadline - current_night)
+    schedule_pressure = 0.5 if remaining_growths >= remaining_growth_days else 0.0
+    shortfall_ratio = min(1.0, (target_energy - current_energy) / max(1, target_energy))
+    return round(0.75 + shortfall_ratio * 0.25 + schedule_pressure + (current_night - 1) * 0.15, 3)
+
+
 def _weighted_expected_gain(state: dict[str, Any], delta: dict[str, Any]) -> float:
     defaults = {
         "energy": 8.0,
@@ -272,7 +298,15 @@ def _weighted_expected_gain(state: dict[str, Any], delta: dict[str, Any]) -> flo
     }
     score = 0.0
     for key, fallback in defaults.items():
-        if key == "seashells":
+        if key == "energy":
+            energy_delta = float(delta.get(key) or 0)
+            score += energy_delta * _resource_weight(state, key, fallback)
+            score += (
+                energy_delta
+                * _planner_weight(state, "growth_energy_shortfall_bonus", 24.0)
+                * _growth_energy_deadline_pressure(state)
+            )
+        elif key == "seashells":
             current_shells = _total_team_shells(state)
             shell_delta = float(delta.get(key) or 0)
             score += (_shell_progress_value(current_shells + shell_delta) - _shell_progress_value(current_shells)) * _resource_weight(state, key, fallback)
@@ -1081,6 +1115,65 @@ def _distance_to_closest_shelter(state: dict[str, Any], start_node_id: str) -> i
     return int(route["distance"]) if route else None
 
 
+def _growth_energy_pursuit_context(state: dict[str, Any], start_node_id: str | None = None) -> dict[str, Any]:
+    pressure = _growth_energy_deadline_pressure(state)
+    current_node_id = str(start_node_id or (state.get("poulpita") or {}).get("node_id") or "")
+    if pressure <= 0 or not current_node_id:
+        return {"should_seek": False, "pressure": pressure, "route": None, "next_node_id": None}
+
+    energy_by_node: dict[str, float] = {}
+    for raw_node_id in (state.get("tiles") or {}):
+        node_id = str(raw_node_id)
+        if node_id == current_node_id or _node_has_known_compulsory_blocker(state, node_id):
+            continue
+        for entry in _visible_tiles_on_node(state, node_id):
+            summary = _interaction_resolution_summary(state, entry)
+            if not any(candidate.get("has_control_available") for candidate in summary.get("actor_candidates") or []):
+                continue
+            expected_energy = max(0.0, float((summary.get("expected_delta") or {}).get("energy") or 0))
+            energy_by_node[node_id] = max(energy_by_node.get(node_id, 0.0), expected_energy)
+    energy_by_node = {node_id: amount for node_id, amount in energy_by_node.items() if amount > 0}
+    if not energy_by_node:
+        return {"should_seek": False, "pressure": pressure, "route": None, "next_node_id": None}
+
+    adjacency = (state.get("map") or {}).get("adjacency") or {}
+    frontier = [current_node_id]
+    previous: dict[str, str | None] = {current_node_id: None}
+    distance: dict[str, int] = {current_node_id: 0}
+    while frontier:
+        node_id = frontier.pop(0)
+        for raw_next_node_id in adjacency.get(node_id, []) or []:
+            next_node_id = str(raw_next_node_id)
+            if next_node_id in previous or _node_has_known_compulsory_blocker(state, next_node_id):
+                continue
+            previous[next_node_id] = node_id
+            distance[next_node_id] = distance[node_id] + 1
+            frontier.append(next_node_id)
+    reachable_targets = [node_id for node_id in energy_by_node if node_id in previous]
+    if not reachable_targets:
+        return {"should_seek": False, "pressure": pressure, "route": None, "next_node_id": None}
+    target_node_id = max(
+        reachable_targets,
+        key=lambda node_id: (energy_by_node[node_id] * 10 - distance[node_id], -distance[node_id], node_id),
+    )
+    path = [target_node_id]
+    while previous[path[-1]] is not None:
+        path.append(str(previous[path[-1]]))
+    path.reverse()
+    route = {
+        "target_node_id": target_node_id,
+        "path": path,
+        "distance": len(path) - 1,
+        "expected_energy": energy_by_node[target_node_id],
+    }
+    return {
+        "should_seek": len(path) > 1,
+        "pressure": pressure,
+        "route": route,
+        "next_node_id": path[1] if len(path) > 1 else None,
+    }
+
+
 def _shelter_return_context(state: dict[str, Any], start_node_id: str | None = None) -> dict[str, Any]:
     current_node_id = str(start_node_id or (state.get("poulpita") or {}).get("node_id") or "")
     safe_route = _safe_route_to_closest_shelter(state, current_node_id)
@@ -1202,6 +1295,59 @@ def _interaction_step_labels(state: dict[str, Any], entries: list[dict[str, Any]
     return labels
 
 
+def _node_entry_time_budget(state: dict[str, Any], node_id: str, ability_id: str) -> dict[str, Any]:
+    forced_clearance_time = 0
+    for entry in _compulsory_choices_on_node(state, node_id, highest_only=False):
+        summary = _interaction_resolution_summary(state, entry, preferred_ability_id=ability_id)
+        available_actors = [
+            candidate
+            for candidate in summary.get("actor_candidates") or []
+            if candidate.get("has_control_available")
+        ]
+        if not available_actors:
+            continue
+        missing_cards = min(
+            max(0, int(candidate.get("missing_card_count_after_hand") or 0))
+            for candidate in available_actors
+        )
+        forced_clearance_time += max(0, int(_action_cost(state, "interact").get("time_cost") or 0))
+        forced_clearance_time += missing_cards * max(0, int(_action_cost(state, "draw").get("time_cost") or 0))
+    hidden_count = sum(
+        1
+        for instance in (state.get("tiles") or {}).get(str(node_id), []) or []
+        if not instance.get("face_up")
+    )
+    try:
+        configured_hidden_steps = _bot_settings(state).get("hidden_node_clearance_steps")
+        hidden_clearance_steps = max(0, int(configured_hidden_steps if configured_hidden_steps is not None else 4))
+    except (TypeError, ValueError):
+        hidden_clearance_steps = 4
+    uncertain_clearance_time = hidden_count * hidden_clearance_steps
+    shelter_distance = _distance_to_closest_shelter(state, node_id)
+    remaining_time = max(
+        0,
+        int(state.get("night_time_total") or 24) - int(state.get("night_time_spent") or 0),
+    )
+    move_time = max(1, int(_action_cost(state, "move").get("time_cost") or 0))
+    try:
+        safety_margin = max(1, int(_bot_settings(state).get("shelter_return_safety_steps") or 4))
+    except (TypeError, ValueError):
+        safety_margin = 4
+    risk_time = forced_clearance_time + uncertain_clearance_time
+    required_time = None
+    if shelter_distance is not None:
+        required_time = move_time + shelter_distance * move_time + risk_time + safety_margin
+    return {
+        "fits": required_time is not None and required_time <= remaining_time,
+        "remaining_time": remaining_time,
+        "required_time": required_time,
+        "risk_time": risk_time,
+        "forced_clearance_time": forced_clearance_time,
+        "uncertain_clearance_time": uncertain_clearance_time,
+        "shelter_distance": shelter_distance,
+    }
+
+
 def _node_followup_score(state: dict[str, Any], node_id: str, ability_id: str) -> tuple[float, list[dict[str, Any]], int | None]:
     entries = _compulsory_choices_on_node(state, node_id, highest_only=False)
     summaries = [_interaction_resolution_summary(state, entry, preferred_ability_id=ability_id) for entry in entries]
@@ -1273,11 +1419,20 @@ def _node_followup_score(state: dict[str, Any], node_id: str, ability_id: str) -
     previous_node_id = str((state.get("poulpita") or {}).get("previous_node_id") or "")
     if previous_node_id and str(node_id) == previous_node_id:
         score -= _planner_weight(state, "immediate_backtrack_penalty", 24.0)
+    energy_pursuit = _growth_energy_pursuit_context(state)
+    if energy_pursuit["should_seek"] and str(node_id) == str(energy_pursuit.get("next_node_id") or ""):
+        score += _planner_weight(state, "growth_energy_route", 110.0) * float(energy_pursuit["pressure"])
     shelter_distance = _distance_to_closest_shelter(state, node_id)
     if shelter_distance is not None:
         score += max(0, 10 - shelter_distance * 2)
         score += _night_lateness_score(state) * max(0.0, (5.0 - min(5, shelter_distance)) / 5.0)
-        if forced_clearance_time > 0:
+        try:
+            configured_hidden_steps = _bot_settings(state).get("hidden_node_clearance_steps")
+            hidden_clearance_steps = max(0, int(configured_hidden_steps if configured_hidden_steps is not None else 4))
+        except (TypeError, ValueError):
+            hidden_clearance_steps = 4
+        uncertain_clearance_time = hidden_count * hidden_clearance_steps
+        if forced_clearance_time > 0 or uncertain_clearance_time > 0:
             remaining_time = max(
                 0,
                 int(state.get("night_time_total") or 24) - int(state.get("night_time_spent") or 0),
@@ -1287,7 +1442,13 @@ def _node_followup_score(state: dict[str, Any], node_id: str, ability_id: str) -
                 safety_margin = max(1, int(_bot_settings(state).get("shelter_return_safety_steps") or 4))
             except (TypeError, ValueError):
                 safety_margin = 4
-            required_time = move_time + shelter_distance * move_time + forced_clearance_time + safety_margin
+            required_time = (
+                move_time
+                + shelter_distance * move_time
+                + forced_clearance_time
+                + uncertain_clearance_time
+                + safety_margin
+            )
             if required_time > remaining_time:
                 score -= (required_time - remaining_time) * _planner_weight(
                     state,
@@ -4910,10 +5071,8 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
     pursuing_courtship = bool(
         courtship_pursuit["should_seek"]
         and not compulsory
-        and (not returning_to_shelter or final_objective_push)
+        and not returning_to_shelter
     )
-    if pursuing_courtship and final_objective_push:
-        returning_to_shelter = False
     if phase == "night_idle":
         active_id = ""
     unavailable_compulsory = _unavailable_compulsory_entries(state, compulsory)
@@ -5021,7 +5180,10 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
 
     capability = _capability(state, active_id)
     action_slot = _action_slots_left(capability) > 0
-    if _can_end_night_now(state) and not final_objective_push:
+    if _can_end_night_now(state) and (
+        not final_objective_push
+        or int(state.get("night_time_spent") or 0) >= int(state.get("night_time_total") or 24)
+    ):
         return [
             _local_orchestrator_candidate(
                 state,
@@ -5167,6 +5329,9 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
                 )
             )
             for target_node_id in target_nodes:
+                entry_budget = _node_entry_time_budget(state, str(target_node_id), active_id)
+                if not returning_to_shelter and entry_budget["risk_time"] > 0 and not entry_budget["fits"]:
+                    continue
                 node_score, _entries, _distance = _node_followup_score(state, str(target_node_id), active_id)
                 candidate = _local_orchestrator_candidate(
                     state,

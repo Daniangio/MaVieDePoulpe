@@ -102,6 +102,7 @@ DEFAULT_BOT_SETTINGS = {
     "max_plans": 3,
     "min_energy_after_size_upgrade": 4,
     "shelter_return_safety_steps": 4,
+    "hidden_node_clearance_steps": 4,
     "special_power_start_night": 4,
     "weights": {
         "efficiency": 35,
@@ -115,6 +116,8 @@ DEFAULT_BOT_SETTINGS = {
         "immediate_backtrack_penalty": 24,
         "unavailable_compulsory_penalty": 20,
         "late_forced_node_penalty": 60,
+        "growth_energy_shortfall_bonus": 24,
+        "growth_energy_route": 110,
     },
     "resource_weights": {
         "energy": 8,
@@ -769,6 +772,7 @@ def _normalize_bot_settings(raw_settings: dict[str, Any]) -> dict[str, Any]:
     normalized["max_plans"] = max(1, min(16, int(raw_settings.get("max_plans") if raw_settings.get("max_plans") is not None else normalized["max_plans"])))
     normalized["min_energy_after_size_upgrade"] = max(1, min(31, int(raw_settings.get("min_energy_after_size_upgrade") if raw_settings.get("min_energy_after_size_upgrade") is not None else normalized["min_energy_after_size_upgrade"])))
     normalized["shelter_return_safety_steps"] = max(1, min(12, int(raw_settings.get("shelter_return_safety_steps") if raw_settings.get("shelter_return_safety_steps") is not None else normalized["shelter_return_safety_steps"])))
+    normalized["hidden_node_clearance_steps"] = max(0, min(12, int(raw_settings.get("hidden_node_clearance_steps") if raw_settings.get("hidden_node_clearance_steps") is not None else normalized["hidden_node_clearance_steps"])))
     normalized["special_power_start_night"] = max(1, min(20, int(raw_settings.get("special_power_start_night") if raw_settings.get("special_power_start_night") is not None else normalized["special_power_start_night"])))
     raw_weights = raw_settings.get("weights") if isinstance(raw_settings.get("weights"), dict) else {}
     for key, fallback in DEFAULT_BOT_SETTINGS["weights"].items():
