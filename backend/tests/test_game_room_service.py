@@ -2297,6 +2297,132 @@ def test_final_night_ends_at_shelter_before_overrun_even_with_pending_objective(
     ]
 
 
+def _sheltered_optional_interaction_state(room_id: str, *, time_spent: int) -> dict:
+    state = _goldfish_state(room_id, level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "force"
+    state["night_time_spent"] = time_spent
+    state["poulpita"]["node_id"] = "1A"
+    state["shelters"] = {"1A": {"count": 1, "seashells": 0, "secure": False}}
+    state["capabilities"]["force"]["pa"] = 5
+    state["capabilities"]["force"]["actions_taken_this_control"] = 0
+    state["capabilities"]["force"]["initiates_event_ids"] = ["optional-event"]
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "categories": {"prey": {"id": "prey", "compulsory_on_same_node": False}},
+        "events": {"optional-event": {"id": "optional-event", "category_id": "prey"}},
+        "tiles": {
+            "optional-tile": {
+                "id": "optional-tile",
+                "event_id": "optional-event",
+                "interaction_ids": [],
+            }
+        },
+    }
+    state["tiles"] = {
+        "1A": [{"instance_id": "optional-instance", "tile_id": "optional-tile", "face_up": True}]
+    }
+    return state
+
+
+def test_bot_uses_remaining_shelter_time_for_a_partial_interaction():
+    state = _sheltered_optional_interaction_state("room_shelter_partial_interaction", time_spent=16)
+
+    candidates = bot_planner._local_orchestrator_night_candidates(state)
+    commands = [bot_planner._orchestrator_command(candidate) for candidate in candidates]
+    decision = bot_planner.choose_fast_bot_orchestrator_action(state)
+
+    assert {command["type"] for command in commands if command} == {"start_interaction"}
+    assert decision["command"] == {
+        "type": "start_interaction",
+        "payload": {
+            "capability_id": "force",
+            "tile_instance_id": "optional-instance",
+            "auto_select_cards": True,
+        },
+    }
+
+
+def test_bot_ends_at_shelter_when_optional_interaction_cannot_fit():
+    state = _sheltered_optional_interaction_state("room_shelter_interaction_overrun", time_spent=23)
+
+    decision = bot_planner.choose_fast_bot_orchestrator_action(state)
+
+    assert decision["command"] == {
+        "type": "end_night",
+        "payload": {"capability_id": "force"},
+    }
+
+
+def test_bot_switches_to_zero_ap_initiator_instead_of_ending_with_tile_remaining():
+    state = _sheltered_optional_interaction_state("room_shelter_switch_for_partial_tile", time_spent=16)
+    state["capabilities"]["force"]["actions_taken_this_control"] = state["capabilities"]["force"]["max_actions_per_control"]
+    for ability_id, capability in state["capabilities"].items():
+        capability["initiates_event_ids"] = ["optional-event"] if ability_id == "agility" else []
+    state["capabilities"]["agility"]["pa"] = 0
+
+    decision = bot_planner.choose_fast_bot_orchestrator_action(state)
+
+    assert decision["command"] == {
+        "type": "take_control",
+        "payload": {"capability_id": "agility"},
+    }
+
+
+def _sheltered_hidden_adjacent_state(room_id: str, *, active_id: str) -> dict:
+    state = _goldfish_state(room_id, level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["day_index"] = 1
+    state["active_capability_id"] = active_id
+    state["night_time_spent"] = 16
+    state["poulpita"]["node_id"] = "1A"
+    state["poulpita"]["neurons"] = 3
+    state["shelters"] = {"1A": {"count": 1, "seashells": 0, "secure": False}}
+    state["map"]["adjacency"] = {"1A": ["1B"], "1B": ["1A"]}
+    state["tiles"] = {
+        "1B": [
+            {"instance_id": "hidden-a", "tile_id": "unknown-a", "face_up": False},
+        ]
+    }
+    state["tile_catalog"]["bot_settings"] = {
+        "special_power_start_night": 4,
+        "hidden_node_clearance_steps": 4,
+        "shelter_return_safety_steps": 4,
+    }
+    state["tile_catalog"]["action_costs"] = {
+        "special_power": {"ap_cost": 2, "time_cost": 2, "neuron_cost": 1}
+    }
+    for capability in state["capabilities"].values():
+        capability["pa"] = 5
+        capability["actions_taken_this_control"] = 0
+        capability["hand"] = []
+        capability["draw_pile"] = []
+        capability["discard"] = []
+    return state
+
+
+def test_intelligence_reveals_risky_adjacent_tile_before_ending_sheltered_night():
+    state = _sheltered_hidden_adjacent_state("room_intelligence_risk_reveal", active_id="intelligence")
+
+    assert bot_planner._node_entry_time_budget(state, "1B", "intelligence")["fits"] is False
+    decision = bot_planner.choose_fast_bot_orchestrator_action(state)
+
+    assert decision["command"]["type"] == "use_special_power"
+    assert decision["command"]["payload"]["capability_id"] == "intelligence"
+    assert decision["command"]["payload"]["tile_instance_id"] == "hidden-a"
+
+
+def test_bot_switches_to_intelligence_to_inspect_risky_adjacent_node():
+    state = _sheltered_hidden_adjacent_state("room_switch_intelligence_risk_reveal", active_id="force")
+
+    decision = bot_planner.choose_fast_bot_orchestrator_action(state)
+
+    assert decision["command"] == {
+        "type": "take_control",
+        "payload": {"capability_id": "intelligence"},
+    }
+
+
 def test_shelter_return_does_not_use_earliest_legal_end_as_deadline():
     state = _goldfish_state("room_full_safe_night", level_id="test-level", mode="bots_only")
     state["poulpita"]["node_id"] = "1A"
@@ -3886,6 +4012,7 @@ def test_bot_secures_required_shelter_before_pursuing_courtship():
     state["map"] = deepcopy(TEST_MAP)
     state["poulpita"]["node_id"] = "1A"
     state["poulpita"]["size_index"] = 2
+    state["poulpita"]["energy"] = 8
     state["courtship_min_size_index"] = 2
     state["objectives"] = [
         {"id": "secure", "type": "secure_shelter"},
@@ -3976,6 +4103,7 @@ def test_final_night_continues_toward_pending_courtship_instead_of_ending():
     state["active_capability_id"] = "force"
     state["poulpita"]["node_id"] = "1A"
     state["poulpita"]["size_index"] = 2
+    state["poulpita"]["energy"] = 8
     state["courtship_min_size_index"] = 2
     state["shelters"] = {"1A": {"count": 1, "seashells": 3, "secure": True}}
     state["objectives"] = [{"id": "courtship", "type": "resolve_courtship"}]
@@ -4035,6 +4163,28 @@ def test_bot_special_power_unlock_night_and_force_simulation():
     assert state["capabilities"]["force"]["pa"] == 3
 
 
+def test_propulsion_special_power_never_returns_to_its_current_node():
+    state = _goldfish_state("room_propulsion_no_self_loop", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["day_index"] = 4
+    state["active_capability_id"] = "propulsion"
+    state["poulpita"]["node_id"] = "current"
+    state["poulpita_starting_node_id"] = "origin"
+    state["poulpita"]["neurons"] = 3
+    state["capabilities"]["propulsion"]["pa"] = 5
+    state["map"]["adjacency"] = {
+        "current": ["middle"],
+        "middle": ["current", "target"],
+        "target": ["middle"],
+    }
+    state["tiles"] = {}
+
+    candidates = bot_planner._local_special_power_candidates(state, "propulsion")
+    paths = [candidate["commands"][0]["payload"]["path"] for candidate in candidates]
+
+    assert paths == [["middle", "target"]]
+
+
 def test_neuron_value_declines_as_upgrades_are_purchased():
     state = _goldfish_state("room_bot_neuron_value", level_id="test-level", mode="bots_only")
     state["day_index"] = 4
@@ -4057,6 +4207,7 @@ def test_bot_pursues_visible_courtship_after_size_unlock():
     state["map"] = deepcopy(TEST_MAP)
     state["poulpita"]["node_id"] = "1A"
     state["poulpita"]["size_index"] = 2
+    state["poulpita"]["energy"] = 8
     state["courtship_min_size_index"] = 2
     state["objectives"] = [{"id": "courtship", "type": "resolve_courtship"}]
     state["tiles"] = {
@@ -4092,11 +4243,92 @@ def test_bot_pursues_visible_courtship_after_size_unlock():
     )
 
 
+def test_bot_funds_unlocked_courtship_before_following_its_route():
+    state = _goldfish_state("room_bot_funds_courtship", level_id="test-level", mode="bots_only")
+    state["map"] = {
+        **deepcopy(TEST_MAP),
+        "adjacency": {
+            "start": ["energy-path", "courtship-path"],
+            "energy-path": ["start", "energy-target"],
+            "energy-target": ["energy-path"],
+            "courtship-path": ["start", "courtship-target"],
+            "courtship-target": ["courtship-path"],
+        },
+    }
+    state["phase"] = "night_action"
+    state["day_index"] = 5
+    state["active_capability_id"] = "force"
+    state["poulpita"]["node_id"] = "start"
+    state["poulpita"]["previous_node_id"] = None
+    state["poulpita"]["size_index"] = 3
+    state["poulpita"]["energy"] = 2
+    state["courtship_min_size_index"] = 3
+    state["courtship_min_energy"] = 8
+    state["objectives"] = [{"id": "courtship", "type": "resolve_courtship"}]
+    state["shelters"] = {}
+    state["capabilities"]["force"]["pa"] = 5
+    state["capabilities"]["force"]["actions_taken_this_control"] = 0
+    state["capabilities"]["force"]["initiates_event_ids"] = ["energy-event"]
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "categories": {"prey": {"id": "prey", "compulsory_on_same_node": False}},
+        "events": {"energy-event": {"id": "energy-event", "category_id": "prey"}},
+        "tiles": {
+            "energy-tile": {
+                "id": "energy-tile",
+                "event_id": "energy-event",
+                "interaction_ids": [],
+                "success_effects": [{"type": "gain_energy", "amount": 2}],
+            },
+            "__courtship_token__": {"id": "__courtship_token__", "token_type": "courtship"},
+        },
+    }
+    state["tiles"] = {
+        "energy-target": [{"instance_id": "energy-instance", "tile_id": "energy-tile", "face_up": True}],
+        "courtship-target": [
+            {
+                "instance_id": "courtship-instance",
+                "tile_id": "__courtship_token__",
+                "token_type": "courtship",
+                "face_up": True,
+            }
+        ],
+    }
+
+    courtship = bot_planner._courtship_pursuit_context(state)
+    energy_pursuit = bot_planner._growth_energy_pursuit_context(state)
+    energy_value = bot_planner._weighted_expected_gain(state, {"energy": 1})
+    neuron_value = bot_planner._weighted_expected_gain(state, {"neurons": 1})
+    decision = bot_planner.choose_fast_bot_orchestrator_action(state)
+
+    assert courtship["energy_ready"] is False
+    assert courtship["should_seek"] is False
+    assert energy_pursuit["reason"] == "courtship"
+    assert energy_pursuit["route"]["path"] == ["start", "energy-path", "energy-target"]
+    assert energy_value > neuron_value + 100
+    assert decision["command"] == {
+        "type": "move_poulpita",
+        "payload": {"capability_id": "force", "target_node_id": "energy-path"},
+    }
+
+    state["poulpita"]["energy"] = 8
+    funded = bot_planner._courtship_pursuit_context(state)
+    funded_decision = bot_planner.choose_fast_bot_orchestrator_action(state)
+
+    assert funded["energy_ready"] is True
+    assert funded["should_seek"] is True
+    assert funded_decision["command"] == {
+        "type": "move_poulpita",
+        "payload": {"capability_id": "force", "target_node_id": "courtship-path"},
+    }
+
+
 def test_bot_explores_tile_rich_nodes_when_unlocked_courtship_is_not_visible():
     state = _goldfish_state("room_bot_courtship_explore", level_id="test-level", mode="bots_only")
     state["map"] = deepcopy(TEST_MAP)
     state["poulpita"]["node_id"] = "1B"
     state["poulpita"]["size_index"] = 2
+    state["poulpita"]["energy"] = 8
     state["courtship_min_size_index"] = 2
     state["objectives"] = [{"id": "courtship", "type": "resolve_courtship"}]
     state["shelters"] = {}

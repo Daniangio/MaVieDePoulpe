@@ -170,11 +170,15 @@ const defaultBotSettings = {
     third_ability_penalty: 45,
     late_shelter_urgency: 8,
     information_gain: 6,
+    intelligence_risk_reveal: 90,
     immediate_backtrack_penalty: 24,
     unavailable_compulsory_penalty: 20,
     late_forced_node_penalty: 60,
     growth_energy_shortfall_bonus: 24,
     growth_energy_route: 110,
+    courtship_energy_shortfall_bonus: 70,
+    courtship_energy_route: 180,
+    underfunded_courtship_node_penalty: 600,
   },
   resource_weights: {
     energy: 8,
@@ -203,11 +207,15 @@ const botPlannerWeightLabels = {
   third_ability_penalty: "Third ability penalty",
   late_shelter_urgency: "Late-night shelter urgency",
   information_gain: "Unrevealed tile information gain",
+  intelligence_risk_reveal: "Intelligence risk-reveal priority",
   immediate_backtrack_penalty: "Immediate backtrack penalty",
   unavailable_compulsory_penalty: "Unavailable compulsory failure penalty",
   late_forced_node_penalty: "Late compulsory-node risk",
   growth_energy_shortfall_bonus: "Growth energy shortfall",
   growth_energy_route: "Route toward growth energy",
+  courtship_energy_shortfall_bonus: "Courtship energy shortfall",
+  courtship_energy_route: "Route toward courtship energy",
+  underfunded_courtship_node_penalty: "Underfunded courtship node penalty",
 };
 
 const botResourceWeightLabels = {
