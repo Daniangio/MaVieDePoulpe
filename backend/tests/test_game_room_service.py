@@ -3859,8 +3859,7 @@ def test_bot_values_energy_more_when_required_growth_is_not_affordable():
         "sizes": [{"energy_cost": 0}, {"energy_cost": 8}, {"energy_cost": 10}, {"energy_cost": 10}]
     }
     state["day_index"] = 2
-    state["size_deadline_night"] = 4
-    state["courtship_min_size_index"] = 3
+    state["size_requirements"] = [{"size_index": 3, "night": 4}]
     state["poulpita"]["size_index"] = 0
     state["poulpita"]["energy"] = 1
 
@@ -3886,8 +3885,7 @@ def test_bot_routes_toward_revealed_energy_needed_for_growth():
     state["poulpita"]["node_id"] = "start"
     state["poulpita"]["previous_node_id"] = None
     state["poulpita"]["energy"] = 1
-    state["size_deadline_night"] = 4
-    state["courtship_min_size_index"] = 3
+    state["size_requirements"] = [{"size_index": 3, "night": 4}]
     state["capabilities"]["force"]["initiates_event_ids"] = ["energy-event"]
     state["tile_catalog"] = {
         **state["tile_catalog"],
@@ -5048,6 +5046,77 @@ def test_ap_persists_and_final_day_ends_in_loss():
         assert lost["projection"]["phase"] == "game_over"
         assert lost["projection"]["game_outcome"] == "lost"
         assert lost["events"][0]["reason"] == "maximum_nights_reached"
+
+    run(scenario())
+
+
+def test_size_requirements_are_checked_when_the_deadline_night_starts():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "day"
+        state["day_index"] = 3
+        state["max_nights"] = 5
+        state["size_requirements"] = [
+            {"size_index": 1, "night": 2},
+            {"size_index": 2, "night": 4},
+        ]
+        state["poulpita"]["size_index"] = 1
+
+        result = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_missed_size_deadline",
+            expected_version=1,
+            command_type="end_day",
+        )
+
+        assert result["ok"] is True
+        assert result["projection"]["phase"] == "game_over"
+        assert result["projection"]["day_index"] == 3
+        assert result["projection"]["game_over_reason"] == "size_deadline_missed"
+        assert result["events"][0]["deadline_night"] == 4
+        assert result["events"][0]["required_size_index"] == 2
+        assert result["events"][0]["current_size_index"] == 1
+
+    run(scenario())
+
+
+def test_size_requirement_does_not_end_game_before_its_boundary_or_when_met():
+    async def scenario():
+        service, user, room, _start = await create_started_room()
+        state = service._memory_states[room["id"]]
+        state["phase"] = "day"
+        state["day_index"] = 2
+        state["max_nights"] = 5
+        state["size_requirements"] = [{"size_index": 2, "night": 4}]
+        state["poulpita"]["size_index"] = 1
+
+        before_deadline = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_before_size_deadline",
+            expected_version=1,
+            command_type="end_day",
+        )
+        assert before_deadline["projection"]["phase"] == "night_idle"
+        assert before_deadline["projection"]["day_index"] == 3
+
+        state = service._memory_states[room["id"]]
+        state["phase"] = "day"
+        state["poulpita"]["size_index"] = 2
+        met = await send_command(
+            service,
+            user,
+            room,
+            command_id="cmd_met_size_deadline",
+            expected_version=2,
+            command_type="end_day",
+        )
+        assert met["projection"]["phase"] == "night_idle"
+        assert met["projection"]["day_index"] == 4
 
     run(scenario())
 

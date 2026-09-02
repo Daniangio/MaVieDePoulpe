@@ -259,6 +259,11 @@ def _read_content() -> dict[str, Any]:
         level["courtship_min_energy"] = max(1, int(level.get("courtship_min_energy") or 8))
         level["win_min_energy"] = max(1, int(level.get("win_min_energy") or 5))
         level["size_deadline_night"] = max(1, int(level.get("size_deadline_night") or 4))
+        level["size_requirements"] = _normalize_size_requirements(
+            level.get("size_requirements") if "size_requirements" in level else None,
+            legacy_size_index=level["courtship_min_size_index"],
+            legacy_night=level["size_deadline_night"],
+        )
         level["tile_sets"] = list(level.get("tile_sets") or [])
         level["surprise_deck_id"] = level.get("surprise_deck_id") or ""
         level["poulpita_starting_node_id"] = str(level.get("poulpita_starting_node_id") or "")
@@ -740,6 +745,11 @@ def _read_content_from_value(content: dict[str, Any]) -> dict[str, Any]:
         level["courtship_min_energy"] = max(1, int(level.get("courtship_min_energy") or 8))
         level["win_min_energy"] = max(1, int(level.get("win_min_energy") or 5))
         level["size_deadline_night"] = max(1, int(level.get("size_deadline_night") or 4))
+        level["size_requirements"] = _normalize_size_requirements(
+            level.get("size_requirements") if "size_requirements" in level else None,
+            legacy_size_index=level["courtship_min_size_index"],
+            legacy_night=level["size_deadline_night"],
+        )
         level["tile_sets"] = list(level.get("tile_sets") or [])
         level["surprise_deck_id"] = level.get("surprise_deck_id") or ""
         level["poulpita_starting_node_id"] = str(level.get("poulpita_starting_node_id") or "")
@@ -1398,6 +1408,57 @@ def _normalize_level_objectives(objectives: list[dict[str, Any]]) -> list[dict[s
     return normalized
 
 
+def _normalize_size_requirements(
+    requirements: list[dict[str, Any]] | None,
+    *,
+    legacy_size_index: int | None = None,
+    legacy_night: int | None = None,
+    max_size_index: int | None = None,
+    max_nights: int | None = None,
+    require_nonempty: bool = False,
+) -> list[dict[str, int]]:
+    """Normalize cumulative size requirements evaluated when a night starts."""
+    raw_requirements: Any = requirements
+    if raw_requirements is None:
+        raw_requirements = [
+            {
+                "size_index": max(0, int(legacy_size_index if legacy_size_index is not None else 3)),
+                "night": max(1, int(legacy_night if legacy_night is not None else 4)),
+            }
+        ]
+    if not isinstance(raw_requirements, list):
+        raise ValueError("Size requirements must be a list.")
+    if require_nonempty and not raw_requirements:
+        raise ValueError("A level must define at least one size requirement.")
+
+    normalized: list[dict[str, int]] = []
+    for requirement in raw_requirements:
+        if not isinstance(requirement, dict):
+            raise ValueError("Size requirements must be objects.")
+        try:
+            size_index = int(requirement.get("size_index"))
+            night = int(requirement.get("night"))
+        except (TypeError, ValueError):
+            raise ValueError("Each size requirement needs a valid size and night.") from None
+        if size_index < 0 or (max_size_index is not None and size_index > max_size_index):
+            raise ValueError("A size requirement refers to an unavailable Pouplita size.")
+        if night < 1 or (max_nights is not None and night > max_nights):
+            raise ValueError("A size requirement night must be within the level's maximum nights.")
+        normalized.append({"size_index": size_index, "night": night})
+
+    normalized.sort(key=lambda entry: entry["night"])
+    previous_night = 0
+    previous_size = -1
+    for requirement in normalized:
+        if requirement["night"] <= previous_night:
+            raise ValueError("Each size requirement must use a different night.")
+        if requirement["size_index"] <= previous_size:
+            raise ValueError("Size requirements must increase as their nights increase.")
+        previous_night = requirement["night"]
+        previous_size = requirement["size_index"]
+    return normalized
+
+
 def save_level(
     *,
     name: str,
@@ -1416,6 +1477,7 @@ def save_level(
     courtship_min_energy: int | None = None,
     win_min_energy: int | None = None,
     size_deadline_night: int | None = None,
+    size_requirements: list[dict[str, Any]] | None = None,
     tile_sets: list[dict[str, Any]] | None = None,
     surprise_deck_id: str | None = None,
     poulpita_starting_node_id: str | None = None,
@@ -1450,6 +1512,16 @@ def save_level(
         if assigned != capacity:
             raise ValueError(f"Group {group['name']} has {assigned} assigned tiles but needs {capacity}.")
     normalized_max_energy = max(1, min(32, int(max_energy if max_energy is not None else 32)))
+    normalized_max_nights = max(1, int(max_nights if max_nights is not None else 5))
+    panel_sizes = (content.get("poulpita_panel") or {}).get("sizes") or []
+    normalized_size_requirements = _normalize_size_requirements(
+        size_requirements,
+        legacy_size_index=courtship_min_size_index,
+        legacy_night=size_deadline_night,
+        max_size_index=len(panel_sizes) - 1 if size_requirements is not None and panel_sizes else None,
+        max_nights=normalized_max_nights,
+        require_nonempty=True,
+    )
     normalized_tile_sets = []
     for set_index, raw_set in enumerate(tile_sets or []):
         if not isinstance(raw_set, dict):
@@ -1483,12 +1555,14 @@ def save_level(
         "max_energy": normalized_max_energy,
         "starting_neurons": max(0, int(starting_neurons if starting_neurons is not None else 0)),
         "night_duration_steps": max(1, int(night_duration_steps if night_duration_steps is not None else 24)),
-        "max_nights": max(1, int(max_nights if max_nights is not None else 5)),
+        "max_nights": normalized_max_nights,
         "counter_attack_min_size_index": max(1, int(counter_attack_min_size_index if counter_attack_min_size_index is not None else 1)),
         "courtship_min_size_index": max(0, int(courtship_min_size_index if courtship_min_size_index is not None else 3)),
         "courtship_min_energy": max(1, int(courtship_min_energy if courtship_min_energy is not None else 8)),
         "win_min_energy": max(1, int(win_min_energy if win_min_energy is not None else 5)),
-        "size_deadline_night": max(1, int(size_deadline_night if size_deadline_night is not None else 4)),
+        # Compatibility projection for old clients; gameplay uses the list.
+        "size_deadline_night": normalized_size_requirements[-1]["night"],
+        "size_requirements": normalized_size_requirements,
         "tile_sets": normalized_tile_sets,
         "surprise_deck_id": normalized_surprise_deck_id,
         "poulpita_starting_node_id": normalized_starting_node_id,

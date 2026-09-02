@@ -658,6 +658,40 @@ def _apply_tile_visibility(state: dict[str, Any]) -> None:
                 revealed += 1
 
 
+def _state_size_requirements(state: dict[str, Any]) -> list[dict[str, int]]:
+    raw_requirements = state.get("size_requirements")
+    if raw_requirements is None:
+        raw_requirements = [
+            {
+                "size_index": int(state.get("courtship_min_size_index") if state.get("courtship_min_size_index") is not None else 3),
+                "night": int(state.get("size_deadline_night") or 4),
+            }
+        ]
+    normalized = []
+    for requirement in raw_requirements or []:
+        if not isinstance(requirement, dict):
+            continue
+        try:
+            normalized.append(
+                {
+                    "size_index": max(0, int(requirement.get("size_index"))),
+                    "night": max(1, int(requirement.get("night"))),
+                }
+            )
+        except (TypeError, ValueError):
+            continue
+    return sorted(normalized, key=lambda entry: (entry["night"], entry["size_index"]))
+
+
+def _missed_size_requirement(state: dict[str, Any], starting_night: int) -> dict[str, int] | None:
+    due = [requirement for requirement in _state_size_requirements(state) if requirement["night"] <= starting_night]
+    if not due:
+        return None
+    requirement = max(due, key=lambda entry: entry["size_index"])
+    current_size = max(0, int((state.get("poulpita") or {}).get("size_index") or 0))
+    return requirement if current_size < requirement["size_index"] else None
+
+
 def _goldfish_state(room_id: str, *, level_id: str | None = None, mode: str = "goldfish", bot_config: dict[str, Any] | None = None) -> dict[str, Any]:
     level_config = get_level_config(level_id)
     map_config = get_map(level_config["map_id"])
@@ -686,6 +720,12 @@ def _goldfish_state(room_id: str, *, level_id: str | None = None, mode: str = "g
         "courtship_min_energy": max(1, int(level_config.get("courtship_min_energy") or 8)),
         "win_min_energy": max(1, int(level_config.get("win_min_energy") or 5)),
         "size_deadline_night": max(1, int(level_config.get("size_deadline_night") or 4)),
+        "size_requirements": deepcopy(level_config.get("size_requirements")) if level_config.get("size_requirements") is not None else [
+            {
+                "size_index": max(0, int(level_config.get("courtship_min_size_index") if level_config.get("courtship_min_size_index") is not None else 3)),
+                "night": max(1, int(level_config.get("size_deadline_night") or 4)),
+            }
+        ],
         "level_tile_sets": deepcopy(level_config.get("tile_sets") or []),
         "active_tile_set_id": "base",
         "level_layout": {
@@ -742,6 +782,16 @@ def _goldfish_state(room_id: str, *, level_id: str | None = None, mode: str = "g
         ],
     }
     _apply_tile_visibility(state)
+    missed_initial_requirement = _missed_size_requirement(state, 1)
+    if missed_initial_requirement:
+        _mark_game_lost_if_needed(state, reason="size_deadline_missed")
+        state["event_log"][-1].update(
+            {
+                "deadline_night": missed_initial_requirement["night"],
+                "required_size_index": missed_initial_requirement["size_index"],
+                "current_size_index": int(state["poulpita"]["size_index"]),
+            }
+        )
     return state
 
 
@@ -847,6 +897,8 @@ def _project_state(state: dict[str, Any]) -> dict[str, Any]:
         "courtship_completed": bool(state.get("courtship_completed")),
         "courtship_blocked_node_id": state.get("courtship_blocked_node_id"),
         "courtship_min_size_index": int(state.get("courtship_min_size_index") or 0),
+        "courtship_min_energy": int(state.get("courtship_min_energy") or 1),
+        "size_requirements": deepcopy(_state_size_requirements(state)),
         "counter_attack_min_size_index": int(state.get("counter_attack_min_size_index") or 1),
         "counter_attack_unlocked": _counter_attack_unlocked(state),
         "objectives": _objective_status(state),
@@ -2571,6 +2623,22 @@ class GameRoomService:
             if state["phase"] != PHASE_DAY:
                 self._reject(state, command_id, "phase_not_day", "Day can be ended only during the day.")
             next_state = deepcopy(state)
+            starting_night = int(state.get("day_index") or 1) + 1
+            missed_requirement = _missed_size_requirement(next_state, starting_night)
+            if missed_requirement:
+                next_state["version"] = int(state["version"]) + 1
+                _mark_game_lost_if_needed(next_state, reason="size_deadline_missed")
+                event = next_state["event_log"][-1]
+                event.update(
+                    {
+                        "command_id": command_id,
+                        "version": int(next_state["version"]),
+                        "deadline_night": missed_requirement["night"],
+                        "required_size_index": missed_requirement["size_index"],
+                        "current_size_index": int((next_state.get("poulpita") or {}).get("size_index") or 0),
+                    }
+                )
+                return next_state, [event]
             if int(state.get("day_index") or 1) >= int(state.get("max_nights") or 5):
                 next_state["version"] = int(state["version"]) + 1
                 _mark_game_lost_if_needed(next_state, reason="maximum_nights_reached")
@@ -2689,15 +2757,6 @@ class GameRoomService:
                 "created_at": _now_iso(),
             }
             next_state.setdefault("event_log", []).append(event)
-            if (
-                int(next_state.get("day_index") or 1) >= int(next_state.get("size_deadline_night") or 4)
-                and int((next_state.get("poulpita") or {}).get("size_index") or 0) < int(next_state.get("courtship_min_size_index") if next_state.get("courtship_min_size_index") is not None else 3)
-            ):
-                _mark_game_lost_if_needed(next_state, reason="size_deadline_missed")
-                loss_event = next_state["event_log"][-1]
-                loss_event["command_id"] = command_id
-                loss_event["version"] = int(next_state["version"])
-                return next_state, [event, loss_event]
             return next_state, [event]
 
         if command_type == "collect_action_points":

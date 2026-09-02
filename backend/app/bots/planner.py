@@ -263,13 +263,31 @@ def _resource_weight(state: dict[str, Any], key: str, fallback: float) -> float:
 def _growth_energy_deadline_pressure(state: dict[str, Any]) -> float:
     """Increase energy value while the next mandatory growth is unaffordable."""
     current_size = max(0, int((state.get("poulpita") or {}).get("size_index") or 0))
-    required_size = max(
-        0,
-        int(state.get("courtship_min_size_index") if state.get("courtship_min_size_index") is not None else 3),
+    raw_requirements = state.get("size_requirements")
+    if raw_requirements is None:
+        raw_requirements = [
+            {
+                "size_index": state.get("courtship_min_size_index") if state.get("courtship_min_size_index") is not None else 3,
+                "night": state.get("size_deadline_night") or 4,
+            }
+        ]
+    requirements = []
+    for requirement in raw_requirements or []:
+        if not isinstance(requirement, dict):
+            continue
+        try:
+            requirements.append((max(0, int(requirement.get("size_index"))), max(1, int(requirement.get("night")))))
+        except (TypeError, ValueError):
+            continue
+    next_requirement = next(
+        ((size_index, night) for size_index, night in sorted(requirements, key=lambda entry: entry[1]) if size_index > current_size),
+        None,
     )
-    deadline = max(1, int(state.get("size_deadline_night") or 4))
+    if next_requirement is None:
+        return 0.0
+    required_size, deadline = next_requirement
     current_night = max(1, int(state.get("day_index") or 1))
-    if current_size >= required_size or current_night > deadline:
+    if current_night >= deadline:
         return 0.0
     cost, next_size = _poulpita_size_upgrade_cost(state)
     if cost is None or not next_size:

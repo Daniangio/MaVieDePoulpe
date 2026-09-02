@@ -197,6 +197,8 @@ export type GameProjection = {
   objectives?: Array<Record<string, any>>;
   objective_progress?: Record<string, any>;
   courtship_min_size_index?: number;
+  courtship_min_energy?: number;
+  size_requirements?: Array<{ size_index: number; night: number }>;
   counter_attack_min_size_index?: number;
   counter_attack_unlocked?: boolean;
   tile_catalog?: {

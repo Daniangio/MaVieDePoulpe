@@ -270,6 +270,13 @@ def test_level_save_validates_group_capacity_and_node_assignment(tmp_path, monke
                 {"id": "fish", "name": "Small fish", "event_id": "fish-event", "interaction_ids": []},
             ],
             "player_boards": [],
+            "poulpita_panel": {
+                "sizes": [
+                    {"amount": 200, "unit": "mg", "energy_cost": 0},
+                    {"amount": 1, "unit": "kg", "energy_cost": 8},
+                    {"amount": 2, "unit": "kg", "energy_cost": 10},
+                ]
+            },
             "levels": [],
         }
     )
@@ -294,6 +301,10 @@ def test_level_save_validates_group_capacity_and_node_assignment(tmp_path, monke
         courtship_min_energy=9,
         win_min_energy=6,
         size_deadline_night=5,
+        size_requirements=[
+            {"size_index": 1, "night": 3},
+            {"size_index": 2, "night": 5},
+        ],
         tile_sets=[
             {
                 "id": "adult-set",
@@ -317,6 +328,10 @@ def test_level_save_validates_group_capacity_and_node_assignment(tmp_path, monke
     assert level["courtship_min_energy"] == 9
     assert level["win_min_energy"] == 6
     assert level["size_deadline_night"] == 5
+    assert level["size_requirements"] == [
+        {"size_index": 1, "night": 3},
+        {"size_index": 2, "night": 5},
+    ]
     assert level["tile_sets"][0]["groups"][0]["tile_counts"] == {"fish": 2}
     assert level["objectives"] == [
         {"id": "objective-1", "type": "increase_size", "target": 2},

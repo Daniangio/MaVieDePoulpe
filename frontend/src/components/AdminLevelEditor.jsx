@@ -22,7 +22,7 @@ const emptyLevelDraft = () => ({
   courtship_min_size_index: 3,
   courtship_min_energy: 8,
   win_min_energy: 5,
-  size_deadline_night: 4,
+  size_requirements: [{ size_index: 3, night: 4 }],
   tile_sets: [],
   surprise_deck_id: "",
   poulpita_starting_node_id: "",
@@ -81,10 +81,23 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
     }) && Object.keys(replacementById).length === (draft.groups || []).length;
   }), [draft.groups, draft.tile_sets, groupStats]);
 
+  const sizeRequirementsValid = useMemo(() => {
+    const requirements = [...(draft.size_requirements || [])].sort((a, b) => Number(a.night) - Number(b.night));
+    return requirements.length > 0 && requirements.every((requirement, index) => (
+      Number(requirement.size_index) >= 0
+      && Number(requirement.size_index) < sizes.length
+      && Number(requirement.night) >= 1
+      && Number(requirement.night) <= Number(draft.max_nights || 1)
+      && (index === 0 || Number(requirement.night) > Number(requirements[index - 1].night))
+      && (index === 0 || Number(requirement.size_index) > Number(requirements[index - 1].size_index))
+    ));
+  }, [draft.max_nights, draft.size_requirements, sizes.length]);
+
   const canSave = nodes.length > 0
     && nodes.every((node) => draft.node_group_ids[node.id])
     && Object.values(groupStats).every((stats) => stats.valid)
-    && replacementSetsValid;
+    && replacementSetsValid
+    && sizeRequirementsValid;
 
   const levelFromMap = (map, base = emptyLevelDraft()) => {
     const groupId = base.groups?.[0]?.id || "group-1";
@@ -123,8 +136,11 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
 
   const editLevel = (level) => {
     const map = maps.find((entry) => entry.id === level.map_id) || null;
+    const sizeRequirements = level.size_requirements?.length
+      ? level.size_requirements
+      : [{ size_index: Number(level.courtship_min_size_index ?? 3), night: Number(level.size_deadline_night ?? 4) }];
     setSelectedNodeId("");
-    setDraft(levelFromMap(map, { ...emptyLevelDraft(), ...level, groups: level.groups || [] }));
+    setDraft(levelFromMap(map, { ...emptyLevelDraft(), ...level, size_requirements: sizeRequirements, groups: level.groups || [] }));
   };
 
   const changeMap = (mapId) => {
@@ -171,6 +187,23 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
       };
     });
     setSelectedNodeId("");
+  };
+
+  const addSizeRequirement = () => {
+    setDraft((current) => {
+      const existing = current.size_requirements || [];
+      for (let night = 1; night <= Number(current.max_nights || 1); night += 1) {
+        for (let sizeIndex = 0; sizeIndex < sizes.length; sizeIndex += 1) {
+          const candidate = [...existing, { size_index: sizeIndex, night }].sort((a, b) => Number(a.night) - Number(b.night));
+          const valid = candidate.every((entry, index) => index === 0 || (
+            Number(entry.night) > Number(candidate[index - 1].night)
+            && Number(entry.size_index) > Number(candidate[index - 1].size_index)
+          ));
+          if (valid) return { ...current, size_requirements: candidate };
+        }
+      }
+      return current;
+    });
   };
 
   const setGroupTileCount = (groupId, tileId, count) => {
@@ -248,7 +281,7 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
       form.set("courtship_min_size_index", String(Math.max(0, Number(draft.courtship_min_size_index ?? 3))));
       form.set("courtship_min_energy", String(Math.max(1, Number(draft.courtship_min_energy ?? 8))));
       form.set("win_min_energy", String(Math.max(1, Number(draft.win_min_energy ?? 5))));
-      form.set("size_deadline_night", String(Math.max(1, Number(draft.size_deadline_night ?? 4))));
+      form.set("size_requirements_json", JSON.stringify(draft.size_requirements || []));
       form.set("tile_sets_json", JSON.stringify(draft.tile_sets || []));
       form.set("surprise_deck_id", draft.surprise_deck_id || "");
       form.set("poulpita_starting_node_id", draft.poulpita_starting_node_id || "");
@@ -418,7 +451,35 @@ const AdminLevelEditor = ({ request, content, busy, setBusy, setError, onReload 
               </select>
             </label>
             <label className="text-sm text-slate-600">Courtship minimum energy<input className="mt-1 w-full rounded-md border border-cyan-200 bg-white px-3 py-2 text-slate-800" min="1" type="number" value={Number(draft.courtship_min_energy ?? 8)} onChange={(event) => setDraft((current) => ({ ...current, courtship_min_energy: Math.max(1, Number(event.target.value || 1)) }))} /></label>
-            <label className="text-sm text-slate-600">Size deadline night<input className="mt-1 w-full rounded-md border border-cyan-200 bg-white px-3 py-2 text-slate-800" min="1" type="number" value={Number(draft.size_deadline_night ?? 4)} onChange={(event) => setDraft((current) => ({ ...current, size_deadline_night: Math.max(1, Number(event.target.value || 1)) }))} /></label>
+            <label className="text-sm text-slate-600">Winning return minimum energy<input className="mt-1 w-full rounded-md border border-cyan-200 bg-white px-3 py-2 text-slate-800" min="1" type="number" value={Number(draft.win_min_energy ?? 5)} onChange={(event) => setDraft((current) => ({ ...current, win_min_energy: Math.max(1, Number(event.target.value || 1)) }))} /></label>
+          </div>
+
+          <div className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold text-teal-950">Required sizes by night</h3>
+                <p className="text-xs text-slate-600">Checked at the start of the selected night, after the preceding day.</p>
+              </div>
+              <button className="rounded border border-cyan-300 bg-white px-2 py-1 text-xs text-teal-800 hover:bg-cyan-50" type="button" onClick={addSizeRequirement}>Add requirement</button>
+            </div>
+            <div className="grid gap-2">
+              {(draft.size_requirements || []).map((requirement, index) => (
+                <div className="grid items-end gap-2 sm:grid-cols-[1fr_1fr_auto]" key={`size-requirement-${index}`}>
+                  <label className="text-sm text-slate-600">
+                    Minimum size
+                    <select className="mt-1 w-full rounded-md border border-cyan-200 bg-white px-3 py-2 text-slate-800" value={Number(requirement.size_index)} onChange={(event) => setDraft((current) => ({ ...current, size_requirements: (current.size_requirements || []).map((entry, entryIndex) => entryIndex === index ? { ...entry, size_index: Number(event.target.value) } : entry) }))}>
+                      {sizes.map((size, sizeIndex) => <option key={sizeIndex} value={sizeIndex}>Size {sizeIndex + 1}: {size.amount ?? size.kg ?? 0} {size.unit || "kg"}</option>)}
+                    </select>
+                  </label>
+                  <label className="text-sm text-slate-600">
+                    At start of night
+                    <input className="mt-1 w-full rounded-md border border-cyan-200 bg-white px-3 py-2 text-slate-800" min="1" max={Number(draft.max_nights || 1)} type="number" value={Number(requirement.night)} onChange={(event) => setDraft((current) => ({ ...current, size_requirements: (current.size_requirements || []).map((entry, entryIndex) => entryIndex === index ? { ...entry, night: Math.max(1, Number(event.target.value || 1)) } : entry) }))} />
+                  </label>
+                  <button className="rounded border border-rose-300 bg-white px-2 py-2 text-xs text-rose-700 hover:bg-rose-50 disabled:opacity-50" disabled={(draft.size_requirements || []).length <= 1} type="button" onClick={() => setDraft((current) => ({ ...current, size_requirements: (current.size_requirements || []).filter((_entry, entryIndex) => entryIndex !== index) }))}>Remove</button>
+                </div>
+              ))}
+              {!sizeRequirementsValid && <p className="text-xs text-rose-700">Use unique nights within the level, with both size and night increasing for each requirement.</p>}
+            </div>
           </div>
 
           <div>
