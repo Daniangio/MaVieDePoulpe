@@ -5068,9 +5068,13 @@ def _local_orchestrator_interaction_candidates(state: dict[str, Any]) -> list[di
     )
     failure_base_score = 75 - best_search_probability * 35 + late_failure_bonus + control_scarcity_bonus
     if is_courtship:
-        # A failed courtship can block the level's win path. Exhaust every known
-        # support or draw route before accepting it, even late in the final night.
-        failure_base_score = -260 if search_candidates else -70
+        # A failed courtship blocks the node until Poulpita moves away. Do not
+        # offer failure at all while a known card-search route remains: rollout
+        # terminal-loss scores can otherwise make failing, moving away, and
+        # returning look better than the required draw/AP sequence.
+        if search_candidates:
+            return search_candidates
+        failure_base_score = -70
     fail_candidate = _local_orchestrator_candidate(
         state,
         plan_id=f"local_fail_{(entry.get('instance') or {}).get('instance_id')}",

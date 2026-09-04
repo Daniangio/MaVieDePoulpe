@@ -1964,6 +1964,73 @@ def test_bot_plans_use_shared_intelligence_cards_for_open_interaction_support():
     run(scenario())
 
 
+def test_final_night_courtship_draw_cannot_be_replaced_by_failure_and_movement():
+    state = _goldfish_state("room_courtship_required_draw", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["day_index"] = int(state.get("max_nights") or 5)
+    state["night_time_spent"] = 18
+    state["active_capability_id"] = "force"
+    state["objectives"] = [{"id": "courtship", "type": "resolve_courtship"}]
+    state["tile_catalog"] = {
+        **state["tile_catalog"],
+        "categories": {
+            "__courtship_category__": {
+                "id": "__courtship_category__",
+                "compulsory_on_same_node": False,
+            }
+        },
+        "events": {
+            "__courtship_event__": {
+                "id": "__courtship_event__",
+                "category_id": "__courtship_category__",
+            }
+        },
+        "interactions": {"dance": {"id": "dance", "name": "Dance"}},
+        "tiles": {
+            "__courtship_token__": {
+                "id": "__courtship_token__",
+                "event_id": "__courtship_event__",
+                "token_type": "courtship",
+                "interaction_ids": ["dance"],
+            }
+        },
+    }
+    state["interaction"] = {
+        "tile_instance_id": "courtship-instance",
+        "tile_id": "__courtship_token__",
+        "node_id": state["poulpita"]["node_id"],
+        "initiator_capability_id": "force",
+        "initiator_confirmed": True,
+        "played_cards": [],
+        "courtship_card": {"id": "dance-card", "interaction_ids": ["dance"]},
+    }
+    for capability in state["capabilities"].values():
+        capability["hand"] = []
+        capability["draw_pile"] = []
+        capability["discard"] = []
+    state["capabilities"]["force"]["pa"] = 3
+    state["capabilities"]["force"]["actions_taken_this_control"] = 0
+    state["capabilities"]["force"]["draw_pile"] = [
+        {
+            "card_id": "future-dance",
+            "interaction_id": "dance",
+            "interaction_ids": ["dance"],
+            "owner_capability_id": "force",
+        }
+    ]
+
+    candidates = bot_planner._local_orchestrator_interaction_candidates(state)
+    decision = bot_planner.choose_fast_bot_orchestrator_action(state)
+
+    assert [bot_planner._orchestrator_command(candidate)["type"] for candidate in candidates] == [
+        "draw_action_card"
+    ]
+    assert decision["command"] == {
+        "type": "draw_action_card",
+        "payload": {"capability_id": "force"},
+    }
+
+
 def test_auto_resolve_interaction_selects_counter_attack_cards():
     async def scenario():
         service, user, room, _start = await create_started_room()
@@ -4101,7 +4168,7 @@ def test_bot_secures_required_shelter_before_pursuing_courtship():
     assert ready["next_node_id"] == "1B"
 
 
-def test_courtship_support_search_outranks_failure_when_missing_card_is_in_deck():
+def test_courtship_support_search_excludes_failure_when_missing_card_is_in_deck():
     state = _goldfish_state("room_courtship_support_priority", level_id="test-level", mode="bots_only")
     state["phase"] = "night_action"
     state["active_capability_id"] = "propulsion"
@@ -4144,11 +4211,9 @@ def test_courtship_support_search_outranks_failure_when_missing_card_is_in_deck(
 
     candidates = bot_planner._local_orchestrator_interaction_candidates(state)
     search = next(candidate for candidate in candidates if candidate["commands"][0]["type"] == "take_control")
-    failure = next(candidate for candidate in candidates if candidate["commands"][0]["type"] == "fail_interaction")
 
     assert search["commands"][0]["payload"]["capability_id"] == "intelligence"
-    assert search["statistics"]["planner_score"] > failure["statistics"]["planner_score"]
-    assert failure["statistics"]["courtship_failure_penalty"] > 300
+    assert all(candidate["commands"][0]["type"] != "fail_interaction" for candidate in candidates)
 
 
 def test_final_night_continues_toward_pending_courtship_instead_of_ending():
