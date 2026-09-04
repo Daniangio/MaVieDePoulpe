@@ -437,6 +437,37 @@ def test_background_bot_simulations_are_listed_immediately_as_queued(tmp_path, m
     release_worker.set()
 
 
+def test_queued_bot_simulation_can_be_deleted_before_the_worker_starts(tmp_path, monkeypatch):
+    monkeypatch.setattr(bot_simulation_service, "REPLAYS_ROOT", tmp_path)
+    replay_id = "replay_queued_delete"
+    payload = bot_simulation_service._queued_replay_payload(
+        replay_id=replay_id,
+        created_at="2026-01-01T00:00:00+00:00",
+        level=TEST_LEVEL,
+        seed=500,
+        max_steps=50,
+        simulation_mode="fast",
+        thinking_profile="instant",
+        sampling_strategy="greedy",
+    )
+    bot_simulation_service._write_replay(payload)
+    bot_simulation_service._write_progress(
+        replay_id,
+        {"status": "queued", "updated_at": "2026-01-01T00:00:00+00:00", "step": 0, "max_steps": 50},
+    )
+    started = []
+    monkeypatch.setattr(bot_simulation_service, "run_bot_simulation", lambda **kwargs: started.append(kwargs))
+
+    bot_simulation_service.delete_bot_replay(replay_id)
+    bot_simulation_service._run_background_batch(
+        [{"id": replay_id, "level_id": "test-level", "seed": 500, "max_steps": 50, "simulation_mode": "fast", "thinking_profile": "instant", "sampling_strategy": "greedy", "created_at": "2026-01-01T00:00:00+00:00"}]
+    )
+
+    assert bot_simulation_service.list_bot_replays() == []
+    assert started == []
+    assert not bot_simulation_service._cancellation_path(replay_id).exists()
+
+
 def test_simulation_comparison_pairs_strategies_on_identical_seeds(tmp_path, monkeypatch):
     monkeypatch.setattr(bot_simulation_service, "REPLAYS_ROOT", tmp_path)
     monkeypatch.setattr(bot_simulation_service, "get_level_config", lambda level_id: TEST_LEVEL)

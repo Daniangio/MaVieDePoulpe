@@ -65,6 +65,10 @@ _background_threads: set[threading.Thread] = set()
 _background_threads_lock = threading.Lock()
 
 
+class SimulationCancelled(RuntimeError):
+    """Raised internally when an admin deletes a queued simulation."""
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -136,6 +140,15 @@ def _replay_path(replay_id: str) -> Path:
 
 def _progress_path(replay_id: str) -> Path:
     return _replay_path(replay_id).with_suffix(".progress")
+
+
+def _cancellation_path(replay_id: str) -> Path:
+    return _replay_path(replay_id).with_suffix(".cancelled")
+
+
+def _raise_if_simulation_cancelled(replay_id: str) -> None:
+    if _cancellation_path(replay_id).exists():
+        raise SimulationCancelled("Simulation was cancelled before it started.")
 
 
 def _write_replay(payload: dict[str, Any]) -> None:
@@ -263,10 +276,16 @@ def delete_bot_replay(replay_id: str) -> None:
     path = _replay_path(replay_id)
     if not path.exists():
         raise LookupError("Replay not found.")
+    payload = _read_replay(replay_id)
     progress = _read_progress(replay_id) or {}
-    if str(progress.get("status") or "") in {"queued", "running"}:
+    replay_status = str(progress.get("status") or payload.get("status") or "")
+    if replay_status == "running":
         raise RuntimeError("A running simulation cannot be deleted.")
-    path.unlink()
+    if replay_status == "queued":
+        # The batch worker holds pending jobs in memory. Keep a marker until it
+        # reaches this job, so it cannot recreate an admin-deleted replay.
+        _cancellation_path(replay_id).touch()
+    path.unlink(missing_ok=True)
     _progress_path(replay_id).unlink(missing_ok=True)
 
 
@@ -466,6 +485,7 @@ def run_bot_simulation(
     sampling_strategy = _simulation_strategies(thinking_profile, sampling_strategy)[0]
     simulation_mode = "fast" if thinking_profile == "instant" else "full"
     replay_id = replay_id or f"replay_{uuid.uuid4().hex}"
+    _raise_if_simulation_cancelled(replay_id)
     created_at = created_at or _now_iso()
     room_id = f"simulation_{uuid.uuid4().hex}"
     bot_config = _bot_room_config(mode="bots_only")
@@ -494,12 +514,14 @@ def run_bot_simulation(
     stop_reason = "game_finished"
     last_progress_write = 0.0
     previous_phase = ""
+    _raise_if_simulation_cancelled(replay_id)
     _write_progress(
         replay_id,
         _simulation_progress(state=state, status="running", step=0, max_steps=max_steps),
     )
 
     for step in range(1, max_steps + 1):
+        _raise_if_simulation_cancelled(replay_id)
         if state.get("phase") == PHASE_FINISHED:
             break
         decision = (
@@ -559,6 +581,7 @@ def run_bot_simulation(
     else:
         stop_reason = "step_limit_reached"
 
+    _raise_if_simulation_cancelled(replay_id)
     elapsed_ms = max(1, round((time.perf_counter() - started) * 1000))
     poulpita = state.get("poulpita") or {}
     final_progress = _simulation_progress(
@@ -665,6 +688,10 @@ def _run_background_batch(instances: list[dict[str, Any]]) -> None:
         previous_random_state = random.getstate()
         try:
             for instance in instances:
+                replay_id = str(instance["id"])
+                if _cancellation_path(replay_id).exists():
+                    _cancellation_path(replay_id).unlink(missing_ok=True)
+                    continue
                 try:
                     run_bot_simulation(
                         level_id=instance["level_id"],
@@ -676,8 +703,10 @@ def _run_background_batch(instances: list[dict[str, Any]]) -> None:
                         replay_id=instance["id"],
                         created_at=instance["created_at"],
                     )
+                except SimulationCancelled:
+                    _cancellation_path(replay_id).unlink(missing_ok=True)
                 except Exception as exc:  # Persist worker failures so polling never remains stuck on running.
-                    _mark_simulation_failed(instance["id"], f"{type(exc).__name__}: {exc}")
+                    _mark_simulation_failed(replay_id, f"{type(exc).__name__}: {exc}")
         finally:
             random.setstate(previous_random_state)
 

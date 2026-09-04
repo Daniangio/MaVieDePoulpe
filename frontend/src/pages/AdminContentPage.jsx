@@ -2488,7 +2488,7 @@ const BotSimulationsAdmin = ({ levels, request }) => {
                     <td className="p-2">
                       <div className="flex justify-end gap-2">
                         {replay.status === "completed" ? <Link className={primaryButton} to={`/admin/replays/${replay.id}`}>Replay</Link> : null}
-                        <button className={dangerButton} disabled={active} onClick={() => void deleteReplay(replay)} type="button">Delete</button>
+                        <button className={dangerButton} disabled={replay.status === "running"} onClick={() => void deleteReplay(replay)} type="button">Delete</button>
                       </div>
                     </td>
                   </tr>
