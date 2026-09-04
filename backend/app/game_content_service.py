@@ -98,6 +98,8 @@ DEFAULT_BOT_SETTINGS = {
     "orchestrator_rollout_take_controls": 3,
     "orchestrator_rollouts_per_plan": 3,
     "orchestrator_sampling_temperature": 1.0,
+    "orchestrator_sampling_strategy": "tempered",
+    "orchestrator_rollout_influence": 1.0,
     "orchestrator_max_candidates": 8,
     "max_plans": 3,
     "min_energy_after_size_upgrade": 4,
@@ -782,6 +784,9 @@ def _normalize_bot_settings(raw_settings: dict[str, Any]) -> dict[str, Any]:
     normalized["orchestrator_rollout_take_controls"] = max(1, min(8, int(raw_settings.get("orchestrator_rollout_take_controls") if raw_settings.get("orchestrator_rollout_take_controls") is not None else normalized["orchestrator_rollout_take_controls"])))
     normalized["orchestrator_rollouts_per_plan"] = max(1, min(12, int(raw_settings.get("orchestrator_rollouts_per_plan") if raw_settings.get("orchestrator_rollouts_per_plan") is not None else normalized["orchestrator_rollouts_per_plan"])))
     normalized["orchestrator_sampling_temperature"] = max(0.1, min(5.0, float(raw_settings.get("orchestrator_sampling_temperature") if raw_settings.get("orchestrator_sampling_temperature") is not None else normalized["orchestrator_sampling_temperature"])))
+    sampling_strategy = str(raw_settings.get("orchestrator_sampling_strategy") or normalized["orchestrator_sampling_strategy"]).lower()
+    normalized["orchestrator_sampling_strategy"] = sampling_strategy if sampling_strategy in {"greedy", "tempered"} else "tempered"
+    normalized["orchestrator_rollout_influence"] = max(0.0, min(2.0, float(raw_settings.get("orchestrator_rollout_influence") if raw_settings.get("orchestrator_rollout_influence") is not None else normalized["orchestrator_rollout_influence"])))
     normalized["orchestrator_max_candidates"] = max(2, min(20, int(raw_settings.get("orchestrator_max_candidates") if raw_settings.get("orchestrator_max_candidates") is not None else normalized["orchestrator_max_candidates"])))
     normalized["max_plans"] = max(1, min(16, int(raw_settings.get("max_plans") if raw_settings.get("max_plans") is not None else normalized["max_plans"])))
     normalized["min_energy_after_size_upgrade"] = max(1, min(31, int(raw_settings.get("min_energy_after_size_upgrade") if raw_settings.get("min_energy_after_size_upgrade") is not None else normalized["min_energy_after_size_upgrade"])))

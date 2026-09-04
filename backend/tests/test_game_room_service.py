@@ -400,6 +400,9 @@ def test_backend_only_bot_simulation_persists_compact_replay(tmp_path, monkeypat
     assert replay["progress"]["phase_label"]
     assert "neurons" in replay["progress"]
     assert "seashells" in replay["progress"]
+    assert replay["thinking_profile"] == "instant"
+    assert replay["sampling_strategy"] == "greedy"
+    assert replay["frames"][1]["decision"]["alternatives"]
 
     bot_simulation_service.delete_bot_replay(replay["id"])
     assert bot_simulation_service.list_bot_replays() == []
@@ -432,6 +435,64 @@ def test_background_bot_simulations_are_listed_immediately_as_queued(tmp_path, m
     assert {summary["seed"] for summary in listed} == {500, 501}
     assert all(summary["progress"]["phase_label"] == "Queued" for summary in listed)
     release_worker.set()
+
+
+def test_simulation_comparison_pairs_strategies_on_identical_seeds(tmp_path, monkeypatch):
+    monkeypatch.setattr(bot_simulation_service, "REPLAYS_ROOT", tmp_path)
+    monkeypatch.setattr(bot_simulation_service, "get_level_config", lambda level_id: TEST_LEVEL)
+    captured = []
+    worker_started = bot_simulation_service.threading.Event()
+    release_worker = bot_simulation_service.threading.Event()
+
+    def paused_worker(instances):
+        captured.extend(instances)
+        worker_started.set()
+        release_worker.wait(timeout=2)
+
+    monkeypatch.setattr(bot_simulation_service, "_run_background_batch", paused_worker)
+
+    summaries = bot_simulation_service.start_bot_simulation_batch(
+        level_id="test-level",
+        game_count=2,
+        max_steps=50,
+        seed=900,
+        thinking_profile="shallow",
+        sampling_strategy="compare",
+    )
+    assert worker_started.wait(timeout=1)
+
+    assert len(summaries) == 4
+    assert [(entry["seed"], entry["sampling_strategy"]) for entry in captured] == [
+        (900, "greedy"),
+        (900, "tempered"),
+        (901, "greedy"),
+        (901, "tempered"),
+    ]
+    assert {entry["thinking_profile"] for entry in summaries} == {"shallow"}
+    release_worker.set()
+
+
+def test_completed_strategy_pair_records_identical_setup_fingerprint(tmp_path, monkeypatch):
+    monkeypatch.setattr(bot_simulation_service, "REPLAYS_ROOT", tmp_path)
+    monkeypatch.setattr(bot_simulation_service, "get_level_config", lambda level_id: TEST_LEVEL)
+
+    summaries = bot_simulation_service.run_bot_simulation_batch(
+        level_id="test-level",
+        game_count=1,
+        max_steps=10,
+        seed=321,
+        thinking_profile="shallow",
+        sampling_strategy="compare",
+    )
+
+    assert len(summaries) == 2
+    assert {summary["sampling_strategy"] for summary in summaries} == {"greedy", "tempered"}
+    assert len({summary["setup_fingerprint"] for summary in summaries}) == 1
+    assert summaries[0]["setup_fingerprint"]
+
+    state = _goldfish_state("string-surprise-deck", level_id="test-level", mode="bots_only")
+    state["surprise_draw_pile"] = ["surprise-a", "surprise-b"]
+    assert bot_simulation_service._setup_fingerprint(state)
 
 
 def test_backend_simulation_reshuffles_an_initial_no_action_layout(tmp_path, monkeypatch):
@@ -4125,6 +4186,141 @@ def test_final_night_continues_toward_pending_courtship_instead_of_ending():
         command == {"type": "move_poulpita", "payload": {"capability_id": "force", "target_node_id": "1B"}}
         for command in commands
     )
+
+
+def test_late_night_does_not_draw_a_card_only_to_lose_it_at_reset():
+    state = _goldfish_state("room_late_expiring_card", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "force"
+    state["night_time_spent"] = 18
+    state["night_time_total"] = 24
+    current_node_id = state["poulpita"]["node_id"]
+    state["map"]["adjacency"] = {current_node_id: []}
+    state["shelters"] = {current_node_id: {"count": 1, "seashells": 0, "secure": False}}
+    state["tiles"] = {}
+    state["objectives"] = []
+    for ability_id, capability in state["capabilities"].items():
+        capability["control_takes_this_night"] = capability["max_control_takes_per_night"]
+        capability["hand"] = []
+        capability["draw_pile"] = []
+        capability["discard"] = []
+        if ability_id == "force":
+            capability["pa"] = 5
+            capability["actions_taken_this_control"] = 0
+            capability["draw_pile"] = [{"card_id": "expiring", "interaction_id": "charge"}]
+
+    commands = [
+        bot_planner._orchestrator_command(candidate)
+        for candidate in bot_planner._local_orchestrator_night_candidates(state)
+    ]
+
+    assert not any(command and command["type"] == "draw_action_card" for command in commands)
+    assert bot_planner.choose_fast_bot_orchestrator_action(state)["command"]["type"] == "end_night"
+
+
+def test_cards_and_ap_lose_heuristic_value_as_night_reset_approaches():
+    state = _goldfish_state("room_expiring_resources", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["night_time_total"] = 24
+    state["capabilities"]["force"]["hand"] = [{"card_id": "held"}]
+    state["capabilities"]["force"]["pa"] = 4
+
+    state["night_time_spent"] = 0
+    early = bot_planner._global_state_score_components(state)
+    state["night_time_spent"] = 18
+    late = bot_planner._global_state_score_components(state)
+
+    assert early["cards_in_hand"] == late["cards_in_hand"] * 4
+    assert early["ap"] == late["ap"] * 4
+
+
+def test_locked_courtship_adds_growth_pressure_only_on_penultimate_night():
+    state = _goldfish_state("room_late_courtship_growth", level_id="test-level", mode="bots_only")
+    state["max_nights"] = 5
+    state["poulpita"]["size_index"] = 2
+    state["poulpita"]["energy"] = 1
+    state["courtship_min_size_index"] = 3
+    state["size_requirements"] = [{"size_index": 2, "night": 4}]
+    state["objectives"] = [{"id": "courtship", "type": "resolve_courtship"}]
+    state["tile_catalog"]["poulpita_panel"] = {
+        "sizes": [{"energy_cost": 0}, {"energy_cost": 3}, {"energy_cost": 5}, {"energy_cost": 8}]
+    }
+
+    state["day_index"] = 3
+    assert bot_planner._growth_energy_deadline_pressure(state) == 0
+    state["day_index"] = 4
+    assert bot_planner._growth_energy_deadline_pressure(state) > 1
+
+
+def test_day_bot_preserves_third_shelter_shell_for_pending_courtship():
+    state = _goldfish_state("room_preserve_courtship_shells", level_id="test-level", mode="bots_only")
+    state["phase"] = "day"
+    state["objectives"] = [{"id": "courtship", "type": "resolve_courtship"}]
+    current_node_id = state["poulpita"]["node_id"]
+    state["shelters"] = {current_node_id: {"count": 1, "seashells": 3, "secure": True}}
+    state["poulpita"]["seashells"] = 0
+    state["poulpita"]["size_index"] = 99
+    state["poulpita"]["neurons"] = 0
+    for capability in state["capabilities"].values():
+        capability["hand_size_upgrades"] = []
+
+    commands = [
+        bot_planner._orchestrator_command(candidate)
+        for candidate in bot_planner._local_orchestrator_day_candidates(state)
+    ]
+
+    assert {command["type"] for command in commands if command} == {"end_day"}
+
+
+def test_greedy_rollout_continuation_always_takes_highest_score():
+    proposals = [
+        {"plan_id": "low", "commands": [{"type": "end_day", "payload": {}}], "statistics": {"planner_score": 10}},
+        {"plan_id": "high", "commands": [{"type": "end_day", "payload": {}}], "statistics": {"planner_score": 80}},
+    ]
+
+    selected = bot_planner._weighted_rollout_plan(
+        proposals,
+        generator=bot_planner.random.Random(7),
+        temperature=5,
+        sampling_strategy="greedy",
+    )
+
+    assert selected["plan_id"] == "high"
+
+    uuid_tied = [
+        {"plan_id": "tile_zzz", "commands": [{"type": "end_day", "payload": {}}], "statistics": {"planner_score": 20}},
+        {"plan_id": "tile_aaa", "commands": [{"type": "end_day", "payload": {}}], "statistics": {"planner_score": 20}},
+    ]
+    assert bot_planner._weighted_rollout_plan(
+        uuid_tied,
+        generator=bot_planner.random.Random(7),
+        temperature=1,
+        sampling_strategy="greedy",
+    )["plan_id"] == "tile_zzz"
+
+
+def test_shallow_rollout_does_not_cycle_initiatives_instead_of_ending_night():
+    state = _goldfish_state("room_rollout_end_night_prior", level_id="test-level", mode="bots_only")
+    state["phase"] = "night_action"
+    state["active_capability_id"] = "force"
+    state["night_time_spent"] = 18
+    current_node_id = state["poulpita"]["node_id"]
+    state["map"]["adjacency"] = {current_node_id: []}
+    state["shelters"] = {current_node_id: {"count": 1, "seashells": 0, "secure": False}}
+    state["tiles"] = {}
+    state["objectives"] = []
+    state["tile_catalog"]["bot_settings"] = {
+        "orchestrator_rollout_take_controls": 1,
+        "orchestrator_rollouts_per_plan": 1,
+        "orchestrator_sampling_strategy": "greedy",
+    }
+
+    decision = bot_planner.choose_bot_orchestrator_action(state)
+
+    assert decision["command"] == {
+        "type": "end_night",
+        "payload": {"capability_id": "force"},
+    }
 
 
 def test_bot_special_power_unlock_night_and_force_simulation():

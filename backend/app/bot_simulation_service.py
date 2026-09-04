@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import random
@@ -27,7 +28,32 @@ from .game_room_service import (
 from .server_models import User
 
 
-REPLAY_FORMAT_VERSION = 1
+REPLAY_FORMAT_VERSION = 2
+SIMULATION_THINKING_PROFILES: dict[str, dict[str, int | float] | None] = {
+    "instant": None,
+    "shallow": {
+        "planning_depth_take_controls": 1,
+        "orchestrator_rollout_take_controls": 1,
+        "orchestrator_rollouts_per_plan": 1,
+        "orchestrator_max_candidates": 6,
+        "orchestrator_rollout_influence": 0.15,
+    },
+    "balanced": {
+        "planning_depth_take_controls": 2,
+        "orchestrator_rollout_take_controls": 2,
+        "orchestrator_rollouts_per_plan": 2,
+        "orchestrator_max_candidates": 8,
+        "orchestrator_rollout_influence": 0.35,
+    },
+    "deep": {
+        "planning_depth_take_controls": 3,
+        "orchestrator_rollout_take_controls": 4,
+        "orchestrator_rollouts_per_plan": 4,
+        "orchestrator_max_candidates": 12,
+        "orchestrator_rollout_influence": 0.65,
+    },
+    "configured": {},
+}
 REPLAYS_ROOT = Path(
     os.getenv(
         "BOT_REPLAYS_ROOT",
@@ -41,6 +67,64 @@ _background_threads_lock = threading.Lock()
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _normalize_thinking_profile(thinking_profile: str | None, simulation_mode: str = "fast") -> str:
+    requested = str(thinking_profile or "").strip().lower()
+    if requested in SIMULATION_THINKING_PROFILES:
+        return requested
+    return "configured" if str(simulation_mode or "fast").lower() == "full" else "instant"
+
+
+def _normalize_sampling_strategy(sampling_strategy: str | None) -> str:
+    requested = str(sampling_strategy or "tempered").strip().lower()
+    return requested if requested in {"greedy", "tempered", "compare"} else "tempered"
+
+
+def _simulation_strategies(thinking_profile: str, sampling_strategy: str | None) -> list[str]:
+    if thinking_profile == "instant":
+        return ["greedy"]
+    normalized = _normalize_sampling_strategy(sampling_strategy)
+    return ["greedy", "tempered"] if normalized == "compare" else [normalized]
+
+
+def _profile_bot_settings(thinking_profile: str, sampling_strategy: str) -> dict[str, Any]:
+    settings = deepcopy(SIMULATION_THINKING_PROFILES.get(thinking_profile) or {})
+    settings["orchestrator_sampling_strategy"] = sampling_strategy
+    return settings
+
+
+def _setup_fingerprint(state: dict[str, Any]) -> str:
+    """Hash seeded game setup while ignoring run-specific UUID identifiers."""
+    capabilities = state.get("capabilities") or {}
+    semantic_setup = {
+        "map_id": (state.get("map") or {}).get("id"),
+        "tiles": {
+            str(node_id): [
+                {
+                    "tile_id": instance.get("tile_id"),
+                    "token_type": instance.get("token_type"),
+                    "face_up": bool(instance.get("face_up")),
+                }
+                for instance in instances or []
+            ]
+            for node_id, instances in sorted((state.get("tiles") or {}).items())
+        },
+        "decks": {
+            str(ability_id): [
+                sorted(str(option) for option in (card.get("interaction_ids") or [card.get("interaction_id")]) if option)
+                for zone in ("hand", "draw_pile", "discard")
+                for card in capability.get(zone) or []
+            ]
+            for ability_id, capability in sorted(capabilities.items())
+        },
+        "surprise_deck": [
+            card.get("id") if isinstance(card, dict) else str(card)
+            for card in state.get("surprise_draw_pile") or []
+        ],
+    }
+    encoded = json.dumps(semantic_setup, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
 
 
 def _replay_path(replay_id: str) -> Path:
@@ -144,11 +228,14 @@ def _replay_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "level_name": str(payload.get("level_name") or payload.get("level_id") or ""),
         "seed": int(payload.get("seed") or 0),
         "simulation_mode": str(payload.get("simulation_mode") or "fast"),
+        "thinking_profile": str(payload.get("thinking_profile") or ("configured" if payload.get("simulation_mode") == "full" else "instant")),
+        "sampling_strategy": str(payload.get("sampling_strategy") or ("greedy" if payload.get("simulation_mode") == "fast" else "tempered")),
         "status": status,
         "outcome": str(metadata.get("outcome") or ("pending" if status in {"queued", "running"} else "incomplete")),
         "game_over_reason": str(metadata.get("game_over_reason") or ""),
         "steps": int(metadata.get("steps") or 0),
         "duration_ms": int(metadata.get("duration_ms") or 0),
+        "setup_fingerprint": str(metadata.get("setup_fingerprint") or ""),
         "final_day": int(metadata.get("final_day") or 1),
         "final_energy": int(metadata.get("final_energy") or 0),
         "frame_count": len(payload.get("frames") or []),
@@ -263,6 +350,8 @@ def _queued_replay_payload(
     seed: int,
     max_steps: int,
     simulation_mode: str,
+    thinking_profile: str,
+    sampling_strategy: str,
 ) -> dict[str, Any]:
     return {
         "format_version": REPLAY_FORMAT_VERSION,
@@ -272,6 +361,8 @@ def _queued_replay_payload(
         "level_name": str(level.get("name") or level["id"]),
         "seed": int(seed),
         "simulation_mode": simulation_mode,
+        "thinking_profile": thinking_profile,
+        "sampling_strategy": sampling_strategy,
         "status": "queued",
         "metadata": {
             "outcome": "pending",
@@ -303,6 +394,16 @@ def _frame(
             "plan_id": decision.get("plan_id"),
             "plan_title": decision.get("plan_title"),
             "score": decision.get("score"),
+            "expected_return": decision.get("expected_return"),
+            "settings": deepcopy(decision.get("settings") or {}),
+            "planner_debug": deepcopy(decision.get("planner_debug") or {}),
+            "alternatives": [
+                {
+                    key: deepcopy(entry.get(key))
+                    for key in ("plan_id", "title", "mean_return", "minimum_return", "maximum_return")
+                }
+                for entry in (decision.get("evaluated_plans") or [])[:5]
+            ],
         } if decision else None,
         "projection": _compact_projection(projection),
     }
@@ -327,10 +428,18 @@ def _playable_initial_state(
     room_id: str,
     level_id: str,
     bot_config: dict[str, Any],
+    decision_seed: int | str | None = None,
+    bot_settings_override: dict[str, Any] | None = None,
     max_attempts: int = 50,
 ) -> tuple[dict[str, Any], int]:
     for attempt in range(1, max_attempts + 1):
         state = _goldfish_state(room_id, level_id=level_id, mode="bots_only", bot_config=bot_config)
+        state["bot_decision_seed"] = str(decision_seed if decision_seed is not None else room_id)
+        catalog = state.setdefault("tile_catalog", {})
+        catalog["bot_settings"] = {
+            **deepcopy(catalog.get("bot_settings") or {}),
+            **deepcopy(bot_settings_override or {}),
+        }
         first_decision = choose_fast_bot_orchestrator_action(state)
         first_command_type = str(((first_decision.get("command") or {}).get("type") or ""))
         if first_command_type != "bot_no_actions_available":
@@ -347,10 +456,15 @@ def run_bot_simulation(
     seed: int,
     max_steps: int = 2000,
     simulation_mode: str = "fast",
+    thinking_profile: str | None = None,
+    sampling_strategy: str = "tempered",
     replay_id: str | None = None,
     created_at: str | None = None,
 ) -> dict[str, Any]:
     level = get_level_config(level_id)
+    thinking_profile = _normalize_thinking_profile(thinking_profile, simulation_mode)
+    sampling_strategy = _simulation_strategies(thinking_profile, sampling_strategy)[0]
+    simulation_mode = "fast" if thinking_profile == "instant" else "full"
     replay_id = replay_id or f"replay_{uuid.uuid4().hex}"
     created_at = created_at or _now_iso()
     room_id = f"simulation_{uuid.uuid4().hex}"
@@ -371,7 +485,10 @@ def run_bot_simulation(
         room_id=room_id,
         level_id=level["id"],
         bot_config=bot_config,
+        decision_seed=seed,
+        bot_settings_override=_profile_bot_settings(thinking_profile, sampling_strategy),
     )
+    setup_fingerprint = _setup_fingerprint(state)
     initial_projection = _project_state(state)
     frames = [_frame(index=0, projection=initial_projection, command=None, events=initial_projection.get("events") or [])]
     stop_reason = "game_finished"
@@ -460,6 +577,8 @@ def run_bot_simulation(
         "level_name": level.get("name") or level["id"],
         "seed": seed,
         "simulation_mode": simulation_mode,
+        "thinking_profile": thinking_profile,
+        "sampling_strategy": sampling_strategy,
         "status": "completed",
         "progress": final_progress,
         "map": deepcopy(initial_projection.get("map") or {}),
@@ -473,6 +592,7 @@ def run_bot_simulation(
             "final_day": int(state.get("day_index") or 1),
             "final_energy": int(poulpita.get("energy") or 0),
             "setup_rerolls": max(0, setup_attempts - 1),
+            "setup_fingerprint": setup_fingerprint,
         },
         "frames": frames,
     }
@@ -488,10 +608,14 @@ def run_bot_simulation_batch(
     max_steps: int = 2000,
     seed: int | None = None,
     simulation_mode: str = "fast",
+    thinking_profile: str | None = None,
+    sampling_strategy: str = "tempered",
 ) -> list[dict[str, Any]]:
     normalized_count = max(1, min(100, int(game_count)))
     normalized_steps = max(10, min(10000, int(max_steps)))
-    normalized_mode = "full" if str(simulation_mode or "fast").lower() == "full" else "fast"
+    normalized_profile = _normalize_thinking_profile(thinking_profile, simulation_mode)
+    normalized_mode = "fast" if normalized_profile == "instant" else "full"
+    strategies = _simulation_strategies(normalized_profile, sampling_strategy)
     base_seed = int(seed) if seed is not None else random.SystemRandom().randrange(1, 2**31)
     with _simulation_lock:
         previous_random_state = random.getstate()
@@ -502,8 +626,11 @@ def run_bot_simulation_batch(
                     seed=base_seed + index,
                     max_steps=normalized_steps,
                     simulation_mode=normalized_mode,
+                    thinking_profile=normalized_profile,
+                    sampling_strategy=strategy,
                 )
                 for index in range(normalized_count)
+                for strategy in strategies
             ]
         finally:
             random.setstate(previous_random_state)
@@ -544,6 +671,8 @@ def _run_background_batch(instances: list[dict[str, Any]]) -> None:
                         seed=instance["seed"],
                         max_steps=instance["max_steps"],
                         simulation_mode=instance["simulation_mode"],
+                        thinking_profile=instance["thinking_profile"],
+                        sampling_strategy=instance["sampling_strategy"],
                         replay_id=instance["id"],
                         created_at=instance["created_at"],
                     )
@@ -560,46 +689,55 @@ def start_bot_simulation_batch(
     max_steps: int = 2000,
     seed: int | None = None,
     simulation_mode: str = "fast",
+    thinking_profile: str | None = None,
+    sampling_strategy: str = "tempered",
 ) -> list[dict[str, Any]]:
     level = get_level_config(level_id)
     normalized_count = max(1, min(100, int(game_count)))
     normalized_steps = max(10, min(10000, int(max_steps)))
-    normalized_mode = "full" if str(simulation_mode or "fast").lower() == "full" else "fast"
+    normalized_profile = _normalize_thinking_profile(thinking_profile, simulation_mode)
+    normalized_mode = "fast" if normalized_profile == "instant" else "full"
+    strategies = _simulation_strategies(normalized_profile, sampling_strategy)
     base_seed = int(seed) if seed is not None else random.SystemRandom().randrange(1, 2**31)
     instances = []
     for index in range(normalized_count):
-        replay_id = f"replay_{uuid.uuid4().hex}"
-        created_at = _now_iso()
-        instance = {
-            "id": replay_id,
-            "created_at": created_at,
-            "level_id": str(level["id"]),
-            "seed": base_seed + index,
-            "max_steps": normalized_steps,
-            "simulation_mode": normalized_mode,
-        }
-        payload = _queued_replay_payload(
-            replay_id=replay_id,
-            created_at=created_at,
-            level=level,
-            seed=instance["seed"],
-            max_steps=normalized_steps,
-            simulation_mode=normalized_mode,
-        )
-        _write_replay(payload)
-        _write_progress(
-            replay_id,
-            {
-                "status": "queued",
-                "updated_at": created_at,
-                "step": 0,
+        for strategy in strategies:
+            replay_id = f"replay_{uuid.uuid4().hex}"
+            created_at = _now_iso()
+            instance = {
+                "id": replay_id,
+                "created_at": created_at,
+                "level_id": str(level["id"]),
+                "seed": base_seed + index,
                 "max_steps": normalized_steps,
-                "percent": 0,
-                "phase": "queued",
-                "phase_label": "Queued",
-            },
-        )
-        instances.append(instance)
+                "simulation_mode": normalized_mode,
+                "thinking_profile": normalized_profile,
+                "sampling_strategy": strategy,
+            }
+            payload = _queued_replay_payload(
+                replay_id=replay_id,
+                created_at=created_at,
+                level=level,
+                seed=instance["seed"],
+                max_steps=normalized_steps,
+                simulation_mode=normalized_mode,
+                thinking_profile=normalized_profile,
+                sampling_strategy=strategy,
+            )
+            _write_replay(payload)
+            _write_progress(
+                replay_id,
+                {
+                    "status": "queued",
+                    "updated_at": created_at,
+                    "step": 0,
+                    "max_steps": normalized_steps,
+                    "percent": 0,
+                    "phase": "queued",
+                    "phase_label": "Queued",
+                },
+            )
+            instances.append(instance)
 
     thread = threading.Thread(
         target=_run_background_batch,

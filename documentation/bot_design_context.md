@@ -735,9 +735,23 @@ Testing requirements for bot implementation:
 
 - Privacy is not enforced server-side yet.
 - Multiplayer privacy is conceptually desired but current projection exposes all hands.
-- Special powers are not implemented yet; action-cost config reserves a slot for them.
-- Bot-specific APIs do not exist yet.
 - There is no formal planner state redaction layer.
 - There is no policy for human override or proposal voting.
-- There is no simulation/search utility around the reducer yet.
+- Deeper rollout profiles still need broad balance evaluation; more thinking is not assumed to mean stronger play.
 - Some implementation docs in `documentation/current_architecture.md` may describe older Astralia-derived distributed internals and should not be treated as complete gameplay documentation for this prototype.
+
+## Current Simulation And Replay Controls
+
+The admin simulation runner supports a gradual search ladder:
+
+- `instant`: greedy immediate heuristic, with no nested rollout;
+- `shallow`: one initiative window, six candidates, and 15% rollout influence;
+- `balanced`: two windows, eight candidates, and 35% rollout influence;
+- `deep`: four windows, twelve candidates, and 65% rollout influence;
+- `configured`: use the global bot settings without a simulation override.
+
+Non-instant profiles can use greedy continuations, tempered sampling, or a paired comparison. A paired comparison runs both policies with the same seed. Completed replays record a semantic setup fingerprint so the shared board/deck setup can be verified even though runtime instance IDs are UUIDs. Exact-score ties use a seeded semantic key rather than those UUIDs, making independent reruns reproducible as well.
+
+Rollout return keeps the immediate heuristic as a policy prior and adds a depth-dependent fraction of simulated future gain. This prevents a shallow rollout from replacing a clearly productive immediate action with low-value initiative cycling while still allowing deeper profiles to change close decisions.
+
+Replay decision frames store the selected plan, planner settings, planner diagnostics, and the top five alternatives. AP and cards are discounted as the night reset approaches; generic late-night draws are suppressed, while draws required to finish an open interaction remain available. A shelter's third shell is preserved while courtship is pending.

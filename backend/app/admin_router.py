@@ -115,6 +115,8 @@ async def admin_run_bot_simulations(
         raw_seed = payload.get("seed")
         seed = int(raw_seed) if raw_seed not in {None, ""} else None
         simulation_mode = str(payload.get("simulation_mode") or "fast")
+        thinking_profile = str(payload.get("thinking_profile") or "") or None
+        sampling_strategy = str(payload.get("sampling_strategy") or "tempered")
         replays = await asyncio.to_thread(
             start_bot_simulation_batch,
             level_id=level_id,
@@ -122,6 +124,8 @@ async def admin_run_bot_simulations(
             max_steps=max_steps,
             seed=seed,
             simulation_mode=simulation_mode,
+            thinking_profile=thinking_profile,
+            sampling_strategy=sampling_strategy,
         )
         return {"status": "accepted", "replays": replays}
     except LookupError as exc:

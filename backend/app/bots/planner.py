@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import random
 from copy import deepcopy
@@ -263,6 +264,8 @@ def _resource_weight(state: dict[str, Any], key: str, fallback: float) -> float:
 def _growth_energy_deadline_pressure(state: dict[str, Any]) -> float:
     """Increase energy value while the next mandatory growth is unaffordable."""
     current_size = max(0, int((state.get("poulpita") or {}).get("size_index") or 0))
+    current_night = max(1, int(state.get("day_index") or 1))
+    final_night = max(1, int(state.get("max_nights") or 5))
     raw_requirements = state.get("size_requirements")
     if raw_requirements is None:
         raw_requirements = [
@@ -279,6 +282,12 @@ def _growth_energy_deadline_pressure(state: dict[str, Any]) -> float:
             requirements.append((max(0, int(requirement.get("size_index"))), max(1, int(requirement.get("night")))))
         except (TypeError, ValueError):
             continue
+    if _courtship_objective_pending(state) and current_night == final_night - 1:
+        courtship_size = max(
+            0,
+            int(state.get("courtship_min_size_index") if state.get("courtship_min_size_index") is not None else 3),
+        )
+        requirements.append((courtship_size, final_night))
     next_requirement = next(
         ((size_index, night) for size_index, night in sorted(requirements, key=lambda entry: entry[1]) if size_index > current_size),
         None,
@@ -286,7 +295,6 @@ def _growth_energy_deadline_pressure(state: dict[str, Any]) -> float:
     if next_requirement is None:
         return 0.0
     required_size, deadline = next_requirement
-    current_night = max(1, int(state.get("day_index") or 1))
     if current_night >= deadline:
         return 0.0
     cost, next_size = _poulpita_size_upgrade_cost(state)
@@ -441,6 +449,15 @@ def _final_night_objective_push(state: dict[str, Any]) -> bool:
     )
 
 
+def _night_resource_retention(state: dict[str, Any]) -> float:
+    """Discount AP and unplayed cards as the automatic night reset approaches."""
+    if state.get("phase") not in {"night_idle", "night_action"}:
+        return 1.0
+    total = max(1, int(state.get("night_time_total") or 24))
+    remaining = max(0, total - int(state.get("night_time_spent") or 0))
+    return round(max(0.0, min(1.0, remaining / total)), 3)
+
+
 def _current_size_value(state: dict[str, Any]) -> float:
     panel = (state.get("tile_catalog") or {}).get("poulpita_panel") or {}
     sizes = panel.get("sizes") or []
@@ -488,7 +505,7 @@ def _global_state_score_components(state: dict[str, Any]) -> dict[str, float]:
         "shell_objective_progress": min(3.0, total_shells) / 3.0,
         "carried_shell_reserve": 1.0 if is_night and int(poulpita.get("seashells") or 0) > 0 else 0.0,
         "shelter_shells": float(shelter_shells),
-        "cards_in_hand": float(hand_cards),
+        "cards_in_hand": float(hand_cards) * _night_resource_retention(state),
         "hand_capacity": float(hand_capacity),
         "purchased_upgrades": float(purchased_upgrades),
         "size_index": float(poulpita.get("size_index") or 0),
@@ -497,7 +514,7 @@ def _global_state_score_components(state: dict[str, Any]) -> dict[str, float]:
         "secure_shelters": float(secure_shelters),
         "secure_shelter_objective": 1.0 if secure_shelters and _has_objective(state, {"secure_shelter", "return_secured_shelter_after_courtship"}) else 0.0,
         "courtship_completed": 1.0 if state.get("courtship_completed") else 0.0,
-        "ap": float(total_ap),
+        "ap": float(total_ap) * _night_resource_retention(state),
         "night_time_remaining": float(max(0, night_time_total - night_time_spent)),
         "unsheltered_night_end_penalty": unsheltered_night_end_penalty,
         "tile_resolution": float(state.get("_simulated_resolved_tiles") or 0),
@@ -1014,6 +1031,11 @@ def _courtship_objective_pending(state: dict[str, Any]) -> bool:
     )
 
 
+def _must_preserve_secure_shelter_shells(state: dict[str, Any], shelter_shells: int) -> bool:
+    """Keep the three shells that make the still-pending courtship win path legal."""
+    return _courtship_objective_pending(state) and shelter_shells == 3
+
+
 def _courtship_unlocked(state: dict[str, Any]) -> bool:
     current_size = max(0, int((state.get("poulpita") or {}).get("size_index") or 0))
     required_size = max(0, int(state.get("courtship_min_size_index") if state.get("courtship_min_size_index") is not None else 3))
@@ -1282,6 +1304,14 @@ def _shelter_return_context(state: dict[str, Any], start_node_id: str | None = N
     per_step = _planner_weight(state, "late_shelter_urgency", 8.0)
     urgency = 0.0
     objective_return = bool(objective_route and objective_energy_target is not None)
+    courtship = _courtship_pursuit_context(state)
+    final_courtship_push = bool(
+        _final_night_objective_push(state)
+        and courtship["pending"]
+        and courtship["unlocked"]
+        and courtship["prerequisites_ready"]
+        and courtship["energy_ready"]
+    )
     if objective_return and distance:
         urgency = 220.0
     elif route and spent >= return_start:
@@ -1304,10 +1334,11 @@ def _shelter_return_context(state: dict[str, Any], start_node_id: str | None = N
         "earliest_end": shelter_at,
         "return_start": return_start,
         "urgency": min(240.0, urgency),
-        "should_return": bool(route and distance and urgency > 0),
+        "should_return": bool(route and distance and urgency > 0 and not final_courtship_push),
         "next_node_id": route["path"][1] if route and len(route.get("path") or []) > 1 else None,
         "objective_return": objective_return,
         "objective_energy_target": objective_energy_target,
+        "final_courtship_push": final_courtship_push,
     }
 
 
@@ -4359,7 +4390,9 @@ def _active_night_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
         and _can_initiate(state, active_id, entry.get("tile") or {})
         and _can_pay_action_cost(state, capability, interact_cost)
     ]
-    if not active_visible_interactions:
+    if not active_visible_interactions and (
+        current_compulsory or _night_resource_retention(state) > 0.25
+    ):
         proposals.extend(
             _collect_plan_variants(
                 state,
@@ -4375,6 +4408,7 @@ def _active_night_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
     if (
         not current_compulsory
         and not active_visible_interactions
+        and _night_resource_retention(state) > 0.25
         and _can_pay_action_cost(state, capability, draw_cost)
         and hand_count < hand_limit
         and (capability.get("draw_pile") or capability.get("discard"))
@@ -4560,6 +4594,7 @@ def _day_proposals(state: dict[str, Any]) -> list[dict[str, Any]]:
         and shelter_count > 0
         and carried_shells == 0
         and shelter_shells > 0
+        and not _must_preserve_secure_shelter_shells(state, shelter_shells)
         and not state.get("night_shell_prepared")
         and int(state.get("day_index") or 1) < int(state.get("max_nights") or 5)
     ):
@@ -4670,15 +4705,47 @@ def _orchestrator_plan_score(proposal: dict[str, Any]) -> float:
         return 0.0
 
 
+def _orchestrator_seeded_tie_key(state: dict[str, Any], proposal: dict[str, Any]) -> int:
+    """Stable per-seed tie variation without depending on UUID instance ids."""
+    command = _orchestrator_command(proposal) or {}
+    payload = command.get("payload") or {}
+    tile_instance_id = str(payload.get("tile_instance_id") or "")
+    semantic_tile = None
+    if tile_instance_id:
+        for node_id, instances in sorted((state.get("tiles") or {}).items()):
+            for index, instance in enumerate(instances or []):
+                if str(instance.get("instance_id") or "") == tile_instance_id:
+                    semantic_tile = (str(node_id), index, str(instance.get("tile_id") or ""))
+                    break
+            if semantic_tile:
+                break
+    descriptor = {
+        "title": str(proposal.get("title") or ""),
+        "command": str(command.get("type") or ""),
+        "capability": str(payload.get("capability_id") or ""),
+        "target_node": str(payload.get("target_node_id") or ""),
+        "path": [str(node_id) for node_id in payload.get("path") or []],
+        "tile": semantic_tile,
+    }
+    decision_seed = str(state.get("bot_decision_seed") or state.get("room_id") or "")
+    raw = f"{decision_seed}:{int(state.get('version') or 0)}:{json.dumps(descriptor, sort_keys=True)}"
+    return int(hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16], 16)
+
+
 def _weighted_rollout_plan(
     proposals: list[dict[str, Any]],
     *,
     generator: random.Random,
     temperature: float,
+    sampling_strategy: str = "tempered",
 ) -> dict[str, Any] | None:
     executable = [proposal for proposal in proposals if _orchestrator_command(proposal)]
     if not executable:
         return None
+    if sampling_strategy == "greedy":
+        # Keep generation order for exact ties. Plan ids can contain UUID-backed
+        # tile instance ids and therefore must not influence seeded simulations.
+        return max(executable, key=_orchestrator_plan_score)
     scores = [_orchestrator_plan_score(proposal) for proposal in executable]
     maximum = max(scores)
     scale = max(1.0, 20.0 * temperature)
@@ -4847,6 +4914,7 @@ def _local_orchestrator_day_candidates(state: dict[str, Any]) -> list[dict[str, 
         and shelter_count
         and carried_shells == 0
         and shelter_shells > 0
+        and not _must_preserve_secure_shelter_shells(state, shelter_shells)
         and not state.get("night_shell_prepared")
         and int(state.get("day_index") or 1) < int(state.get("max_nights") or 5)
     ):
@@ -5477,6 +5545,7 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
             active_interaction_candidate_count == 0
             and not returning_to_shelter
             and not pursuing_courtship
+            and _night_resource_retention(state) > 0.25
             and _can_pay_action_cost(state, capability, draw_cost)
             and (capability.get("draw_pile") or capability.get("discard"))
         ):
@@ -5543,6 +5612,7 @@ def _local_orchestrator_night_candidates(state: dict[str, Any]) -> list[dict[str
         not candidates
         and action_slot
         and active_can_address_compulsory
+        and _night_resource_retention(state) > 0.25
         and _can_pay_action_cost(state, capability, _action_cost(state, "gain_ap"))
     ):
         candidates.append(
@@ -5767,8 +5837,11 @@ def _simulate_orchestrator_rollout(
     horizon: int,
     temperature: float,
     seed: str,
+    sampling_strategy: str = "tempered",
+    lookahead_influence: float = 1.0,
 ) -> dict[str, Any]:
     simulated = _clone_simulation_state(state)
+    initial_global_score = _global_state_score(simulated)
     generator = random.Random(int(hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16], 16))
     selected = root_proposal
     command_queue = _orchestrator_commands(selected)
@@ -5786,7 +5859,12 @@ def _simulate_orchestrator_rollout(
             if not next_proposals:
                 stop_reason = "no local follow-up actions"
                 break
-            selected = _weighted_rollout_plan(next_proposals, generator=generator, temperature=temperature)
+            selected = _weighted_rollout_plan(
+                next_proposals,
+                generator=generator,
+                temperature=temperature,
+                sampling_strategy=sampling_strategy,
+            )
             if selected is None:
                 stop_reason = "no executable follow-up plan"
                 break
@@ -5829,8 +5907,19 @@ def _simulate_orchestrator_rollout(
         stop_reason = "step limit reached"
 
     terminal_score = _global_state_score(simulated)
+    root_policy_score = _orchestrator_plan_score(root_proposal)
     return {
-        "return": round(terminal_score + path_quality, 2),
+        # The local heuristic is a strong policy prior. A bounded rollout should
+        # refine close calls, not erase that signal and prefer semantically empty
+        # actions (for example cycling initiatives at a shelter) merely because
+        # their terminal snapshots happen to be a point higher.
+        "return": round(
+            root_policy_score
+            + max(0.0, lookahead_influence) * (terminal_score - initial_global_score + path_quality),
+            2,
+        ),
+        "root_policy_score": round(root_policy_score, 2),
+        "initial_global_score": initial_global_score,
         "terminal_global_score": terminal_score,
         "controls_started": controls_started,
         "steps": len(path),
@@ -5859,9 +5948,26 @@ def choose_fast_bot_orchestrator_action(state: dict[str, Any]) -> dict[str, Any]
         }
     proposal = max(
         proposals,
-        key=lambda candidate: (_orchestrator_plan_score(candidate), str(candidate.get("plan_id") or "")),
+        key=lambda candidate: (
+            _orchestrator_plan_score(candidate),
+            _orchestrator_seeded_tie_key(state, candidate),
+        ),
     )
     score = round(_orchestrator_plan_score(proposal), 2)
+    evaluated = sorted(
+        (
+            {
+                "plan_id": candidate.get("plan_id"),
+                "title": candidate.get("title"),
+                "mean_return": round(_orchestrator_plan_score(candidate), 2),
+                "minimum_return": round(_orchestrator_plan_score(candidate), 2),
+                "maximum_return": round(_orchestrator_plan_score(candidate), 2),
+            }
+            for candidate in proposals
+        ),
+        key=lambda entry: float(entry["mean_return"]),
+        reverse=True,
+    )
     return {
         "status": "selected",
         "message": f"Selected {proposal.get('title') or proposal.get('plan_id')}.",
@@ -5871,7 +5977,7 @@ def choose_fast_bot_orchestrator_action(state: dict[str, Any]) -> dict[str, Any]
         "score": score,
         "expected_return": score,
         "settings": {"mode": "fast_immediate"},
-        "evaluated_plans": [],
+        "evaluated_plans": evaluated,
         "planner_debug": {
             "processor": "local_fast",
             "root_candidate_count": len(proposals),
@@ -5918,17 +6024,34 @@ def choose_bot_orchestrator_action(state: dict[str, Any]) -> dict[str, Any]:
         minimum=0.1,
         maximum=5.0,
     )
+    sampling_strategy = str(_bot_settings(state).get("orchestrator_sampling_strategy") or "tempered").lower()
+    if sampling_strategy not in {"greedy", "tempered"}:
+        sampling_strategy = "tempered"
+    if sampling_strategy == "greedy":
+        rollout_count = 1
+    lookahead_influence = _orchestrator_float_setting(
+        state,
+        "orchestrator_rollout_influence",
+        1.0,
+        minimum=0.0,
+        maximum=2.0,
+    )
     version = int(state.get("version") or 0)
-    room_id = str(state.get("room_id") or "")
+    decision_seed = str(state.get("bot_decision_seed") or state.get("room_id") or "")
     evaluated = []
-    for root in root_proposals:
+    for root_index, root in enumerate(root_proposals):
         rollouts = [
             _simulate_orchestrator_rollout(
                 state,
                 root_proposal=root,
                 horizon=horizon,
                 temperature=temperature,
-                seed=f"{room_id}:{version}:{root.get('plan_id')}:{rollout_index}",
+                sampling_strategy=sampling_strategy,
+                lookahead_influence=lookahead_influence,
+                # Simulation instance/card ids use UUIDs. Candidate position is
+                # stable for a seeded setup, so it keeps paired policy runs
+                # reproducible without coupling the rollout RNG to those UUIDs.
+                seed=f"{decision_seed}:{version}:{root_index}:{rollout_index}",
             )
             for rollout_index in range(rollout_count)
         ]
@@ -5949,7 +6072,7 @@ def choose_bot_orchestrator_action(state: dict[str, Any]) -> dict[str, Any]:
         key=lambda entry: (
             float(entry["mean_return"]),
             _orchestrator_plan_score(entry["proposal"]),
-            str(entry["proposal"].get("plan_id") or ""),
+            _orchestrator_seeded_tie_key(state, entry["proposal"]),
         ),
         reverse=True,
     )
@@ -5966,6 +6089,8 @@ def choose_bot_orchestrator_action(state: dict[str, Any]) -> dict[str, Any]:
             "rollout_take_controls": horizon,
             "rollouts_per_plan": rollout_count,
             "sampling_temperature": temperature,
+            "sampling_strategy": sampling_strategy,
+            "rollout_influence": lookahead_influence,
             "max_candidates": _orchestrator_int_setting(state, "orchestrator_max_candidates", 8, minimum=2, maximum=20),
         },
         "evaluated_plans": [

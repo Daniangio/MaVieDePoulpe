@@ -155,6 +155,8 @@ const defaultBotSettings = {
   orchestrator_rollout_take_controls: 3,
   orchestrator_rollouts_per_plan: 3,
   orchestrator_sampling_temperature: 1,
+  orchestrator_sampling_strategy: "tempered",
+  orchestrator_rollout_influence: 1,
   orchestrator_max_candidates: 8,
   max_plans: 3,
   min_energy_after_size_upgrade: 4,
@@ -1296,6 +1298,18 @@ const BotSettingsEditor = ({ botSettings, onSave, busy }) => {
           />
         </label>
         <label className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3 text-sm">
+          <span className="font-semibold text-teal-950">Continuation strategy</span>
+          <span className="mt-1 block text-xs text-slate-500">Greedy always takes the best-scored continuation; tempered samples alternatives.</span>
+          <select
+            className={`${input} mt-3`}
+            value={draft.orchestrator_sampling_strategy || "tempered"}
+            onChange={(event) => setDraft((current) => ({ ...current, orchestrator_sampling_strategy: event.target.value }))}
+          >
+            <option value="greedy">Greedy</option>
+            <option value="tempered">Tempered sampling</option>
+          </select>
+        </label>
+        <label className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3 text-sm">
           <span className="font-semibold text-teal-950">Sampling temperature</span>
           <span className="mt-1 block text-xs text-slate-500">Lower values are greedier; higher values explore more near-optimal plans.</span>
           <input
@@ -1306,6 +1320,19 @@ const BotSettingsEditor = ({ botSettings, onSave, busy }) => {
             type="number"
             value={Number(draft.orchestrator_sampling_temperature || 1)}
             onChange={(event) => setDraft((current) => ({ ...current, orchestrator_sampling_temperature: Math.max(0.1, Math.min(5, Number(event.target.value || 1))) }))}
+          />
+        </label>
+        <label className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3 text-sm">
+          <span className="font-semibold text-teal-950">Rollout influence</span>
+          <span className="mt-1 block text-xs text-slate-500">How strongly lookahead may override the immediate heuristic. Simulation depth presets increase this gradually.</span>
+          <input
+            className={`${input} mt-3`}
+            max="2"
+            min="0"
+            step="0.05"
+            type="number"
+            value={Number(draft.orchestrator_rollout_influence ?? 1)}
+            onChange={(event) => setDraft((current) => ({ ...current, orchestrator_rollout_influence: Math.max(0, Math.min(2, Number(event.target.value || 0))) }))}
           />
         </label>
         <label className="rounded-md border border-cyan-100 bg-cyan-50/70 p-3 text-sm">
@@ -2281,7 +2308,8 @@ const BotSimulationsAdmin = ({ levels, request }) => {
     game_count: 1,
     max_steps: 2000,
     seed: "",
-    simulation_mode: "fast",
+    thinking_profile: "instant",
+    sampling_strategy: "greedy",
   });
 
   useEffect(() => {
@@ -2363,7 +2391,7 @@ const BotSimulationsAdmin = ({ levels, request }) => {
             </select>
           </label>
           <label className="block text-sm text-slate-600">
-            Number of games
+            Number of seeds{draft.sampling_strategy === "compare" && draft.thinking_profile !== "instant" ? " (two games per seed)" : ""}
             <input className={`${input} mt-1`} disabled={running} max="100" min="1" type="number" value={draft.game_count} onChange={(event) => setDraft((current) => ({ ...current, game_count: Math.max(1, Math.min(100, Number(event.target.value || 1))) }))} />
           </label>
           <label className="block text-sm text-slate-600">
@@ -2371,11 +2399,23 @@ const BotSimulationsAdmin = ({ levels, request }) => {
             <input className={`${input} mt-1`} disabled={running} max="10000" min="10" type="number" value={draft.max_steps} onChange={(event) => setDraft((current) => ({ ...current, max_steps: Math.max(10, Math.min(10000, Number(event.target.value || 2000))) }))} />
           </label>
           <label className="block text-sm text-slate-600">
-            Decision mode
-            <select className={`${input} mt-1`} disabled={running} value={draft.simulation_mode} onChange={(event) => setDraft((current) => ({ ...current, simulation_mode: event.target.value }))}>
-              <option value="fast">Fast immediate heuristic</option>
-              <option value="full">Full orchestrator rollouts</option>
+            Thinking depth
+            <select className={`${input} mt-1`} disabled={running} value={draft.thinking_profile} onChange={(event) => setDraft((current) => ({ ...current, thinking_profile: event.target.value, sampling_strategy: event.target.value === "instant" ? "greedy" : current.sampling_strategy }))}>
+              <option value="instant">Instant — immediate heuristic</option>
+              <option value="shallow">Shallow — 1-window rollout</option>
+              <option value="balanced">Balanced — 2-window rollouts</option>
+              <option value="deep">Deep — 4-window rollouts</option>
+              <option value="configured">Configured — global bot settings</option>
             </select>
+          </label>
+          <label className="block text-sm text-slate-600">
+            Continuation strategy
+            <select className={`${input} mt-1`} disabled={running || draft.thinking_profile === "instant"} value={draft.thinking_profile === "instant" ? "greedy" : draft.sampling_strategy} onChange={(event) => setDraft((current) => ({ ...current, sampling_strategy: event.target.value }))}>
+              <option value="greedy">Greedy</option>
+              <option value="tempered">Tempered sampling</option>
+              <option value="compare">Compare both on identical seeds</option>
+            </select>
+            <span className="mt-1 block text-xs text-slate-500">Comparison pairs share the same board setup and random game rolls.</span>
           </label>
           <label className="block text-sm text-slate-600">
             Base seed (optional)
@@ -2395,9 +2435,9 @@ const BotSimulationsAdmin = ({ levels, request }) => {
           <button className={subtleButton} disabled={running} onClick={() => void loadReplays()} type="button">Refresh</button>
         </div>
         <div className="mt-4 overflow-x-auto">
-          <table className="w-full min-w-[58rem] text-left text-sm">
+          <table className="w-full min-w-[64rem] text-left text-sm">
             <thead className="border-b border-cyan-200 text-xs uppercase text-slate-500">
-              <tr><th className="p-2">Created</th><th className="p-2">Level</th><th className="p-2">Status</th><th className="p-2">Progress</th><th className="p-2">State</th><th className="p-2">Seed</th><th className="p-2" /></tr>
+              <tr><th className="p-2">Created</th><th className="p-2">Level</th><th className="p-2">Policy</th><th className="p-2">Status</th><th className="p-2">Progress</th><th className="p-2">State</th><th className="p-2">Seed</th><th className="p-2" /></tr>
             </thead>
             <tbody>
               {replays.map((replay) => {
@@ -2412,6 +2452,7 @@ const BotSimulationsAdmin = ({ levels, request }) => {
                   <tr className="border-b border-cyan-100 align-middle" key={replay.id}>
                     <td className="p-2 text-xs text-slate-500">{new Date(replay.created_at).toLocaleString()}</td>
                     <td className="p-2 font-medium text-teal-950">{replay.level_name}</td>
+                    <td className="p-2 text-xs capitalize text-slate-600">{replay.thinking_profile || (replay.simulation_mode === "full" ? "configured" : "instant")} / {replay.sampling_strategy || (replay.simulation_mode === "full" ? "tempered" : "greedy")}</td>
                     <td className="p-2">
                       <span className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs font-semibold ${statusClasses}`}>
                         <StatusIcon className={active ? "animate-spin" : ""} size={13} />
